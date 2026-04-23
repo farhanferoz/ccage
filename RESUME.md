@@ -4,13 +4,13 @@ Pointer file for resuming work without blowing up context. Update the "Current s
 
 ## Current state
 
-- **Phase:** between Phase 2 and Phase 3a (repo hygiene pending, CCAGE_SLOT next).
-- **Last session ended:** 2026-04-23. Skeleton written + reviewed; `~/.bashrc` refactored into `~/.bashrc.d/`; decisions locked (Option A keying, pure-shell packaging); docs written (PLAN/FEATURES/ARCHITECTURE/CHANGELOG/this file).
-- **Not yet done:** `git init`, LICENSE file, Phase 2 README updates, and everything from Phase 3a onward.
+- **Phase:** Phase 2 complete. Phase 3a (`CCAGE_SLOT`) is next.
+- **Last session:** 2026-04-23. Phase 2 (repo hygiene) done: LICENSE, first commit (`740b5a7`), handoff file deleted. Simplify pass done: extracted `share/ccage-lib.sh`, hot-path optimisations to `claude-isolation.sh` (`${##*/}`, `read` builtin, sha1 caching, `_CCAGE_OVERRIDE_ACTIVE` guard), deduped `install.sh`/`uninstall.sh`.
+- **User's installed files** (`~/.bashrc.d/`) synced to repo HEAD. `claude-overrides.sh` updated with `_CCAGE_OVERRIDE_ACTIVE=1` and `${##*/}` basename opt.
 
 ## Next action
 
-Run **Phase 2 — Repo hygiene** per [docs/PLAN.md](docs/PLAN.md#phase-2--repo-hygiene). Then Phase 3a (`CCAGE_SLOT`). Both are Sonnet-implementable; Opus reviews each before handing to the next.
+Implement **Phase 3a — `CCAGE_SLOT`** per [docs/PLAN.md § Phase 3a](docs/PLAN.md#phase-3a--ccage_slot-escape-hatch). Write failing `tests/test_slot.bats` first, then implement, then Opus reviews.
 
 ## Where to read
 
@@ -32,8 +32,7 @@ Locked (see `project_ccage_*` memory notes):
 - Extension model: two hook stubs (`_ccage_config_dir_override`, `_ccage_pre_exec_hook`), overrides live in `~/.bashrc.d/claude-overrides.sh` (not installed by ccage; user-written).
 
 Open:
-- LICENSE copyright holder name — confirm before first commit.
-- Whether to delete or archive `claude-isolation-handoff.md` at the repo root.
+- None blocking Phase 3a.
 
 ## User personal setup
 
