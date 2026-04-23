@@ -9,52 +9,33 @@
 
 set -euo pipefail
 
+here() { cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd; }
+# shellcheck source=share/ccage-lib.sh
+. "$(here)/share/ccage-lib.sh"
+
 shell=""
 dry_run=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --shell) shell="$2"; shift 2 ;;
-        --dry-run) dry_run=1; shift ;;
+        --shell)   shell="$2"; shift 2 ;;
+        --dry-run) dry_run=1;  shift   ;;
         -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
         *) printf 'unknown flag: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
 
-if [ -z "$shell" ]; then
-    case "${SHELL:-}" in
-        */zsh) shell=zsh ;;
-        */bash) shell=bash ;;
-        *) shell=bash ;;
-    esac
-fi
-
-case "$shell" in
-    bash) rc="$HOME/.bashrc"; rcd="$HOME/.bashrc.d" ;;
-    zsh)  rc="$HOME/.zshrc";  rcd="$HOME/.zshrc.d"  ;;
-    *) printf 'unsupported shell: %s\n' "$shell" >&2; exit 2 ;;
-esac
-
-run() {
-    if [ "$dry_run" = 1 ]; then
-        printf '+ %s\n' "$*"
-    else
-        eval "$@"
-    fi
-}
+ccage_resolve_shell
 
 for f in claude-isolation.sh claude-ccusage.sh; do
     if [ -f "$rcd/$f" ]; then
-        run "rm -f '$rcd/$f'"
+        run rm -f "$rcd/$f"
         printf 'removed %s/%s\n' "$rcd" "$f"
     fi
 done
 
-if [ -f "$rcd/claude-overrides.sh" ]; then
-    printf 'left %s/claude-overrides.sh in place (user data)\n' "$rcd"
-fi
+[ -f "$rcd/claude-overrides.sh" ] && printf 'left %s/claude-overrides.sh in place (user data)\n' "$rcd"
 
-# Strip the installer-added source block from the rc, if still present.
 if [ -f "$rc" ] && grep -qF 'Added by ccage installer' "$rc"; then
     if [ "$dry_run" = 1 ]; then
         printf '+ strip ccage block from %s\n' "$rc"

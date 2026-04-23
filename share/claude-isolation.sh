@@ -21,6 +21,7 @@
 #   _ccage_config_dir_override PWD
 #       Echo a config dir and return 0 to override ccage's default choice.
 #       Return non-zero to fall through to the default.
+#       After redefining, also set: _CCAGE_OVERRIDE_ACTIVE=1
 #   _ccage_pre_exec_hook PWD CONFIG_DIR
 #       Runs just before `command claude`. Can export env vars, append to the
 #       _ccage_extra_args array to inject CLI flags, and write UI-only keys
@@ -33,73 +34,69 @@
 #   `claude-overrides.sh` loads after `claude-isolation.sh` and can safely
 #   redefine the stubs. An example template ships as claude-overrides.sh.example.
 
-# ---- portable sha1 (sha1sum on Linux, shasum on macOS) ----
+# ---- sha1 tool — resolved once at source time ----
+if command -v sha1sum >/dev/null 2>&1; then
+    _CCAGE_SHA1_CMD=sha1sum
+elif command -v shasum >/dev/null 2>&1; then
+    _CCAGE_SHA1_CMD=shasum
+else
+    _CCAGE_SHA1_CMD=openssl
+fi
+
 _ccage_sha1() {
-    if command -v sha1sum >/dev/null 2>&1; then
-        printf '%s' "$1" | sha1sum | cut -c1-8
-    elif command -v shasum >/dev/null 2>&1; then
-        printf '%s' "$1" | shasum -a 1 | cut -c1-8
-    else
-        printf '%s' "$1" | openssl dgst -sha1 | awk '{print $NF}' | cut -c1-8
-    fi
+    case "$_CCAGE_SHA1_CMD" in
+        sha1sum) printf '%s' "$1" | sha1sum            | cut -c1-8 ;;
+        shasum)  printf '%s' "$1" | shasum -a 1        | cut -c1-8 ;;
+        openssl) printf '%s' "$1" | openssl dgst -sha1 | awk '{print $NF}' | cut -c1-8 ;;
+    esac
 }
 
 # ---- extension hook stubs (no-ops; redefine in a companion file) ----
+# When redefining _ccage_config_dir_override, also set _CCAGE_OVERRIDE_ACTIVE=1
+# so ccage knows to call it (avoids a subshell fork when no override is active).
 _ccage_config_dir_override() { return 1; }
 _ccage_pre_exec_hook() { :; }
+_CCAGE_OVERRIDE_ACTIVE=0
 
 # ---- compute the config dir for a given absolute path ----
 _ccage_config_dir_for() {
     local pwd_arg="$1"
-    local override
-    if override="$(_ccage_config_dir_override "$pwd_arg")" && [ -n "$override" ]; then
-        printf '%s\n' "$override"
-        return 0
+
+    if [ "${_CCAGE_OVERRIDE_ACTIVE:-0}" = 1 ]; then
+        local override
+        if override="$(_ccage_config_dir_override "$pwd_arg")" && [ -n "$override" ]; then
+            printf '%s\n' "$override"
+            return 0
+        fi
     fi
 
     local root="${CCAGE_ROOT:-$HOME}"
     local prefix="${CCAGE_PREFIX:-.claude-}"
-    local base
-    base="$(basename "$pwd_arg")"
+    local base="${pwd_arg##*/}"
 
     local candidate="$root/${prefix}${base}"
     local marker="$candidate/.owning_path"
 
-    # Collision: dir exists, is owned by a different PWD → disambiguate with hash.
     if [ -d "$candidate" ] && [ -f "$marker" ]; then
-        local owner
-        owner="$(cat "$marker" 2>/dev/null)"
+        local owner=""
+        { IFS= read -r owner < "$marker"; } 2>/dev/null
         if [ -n "$owner" ] && [ "$owner" != "$pwd_arg" ]; then
-            local hash
-            hash="$(_ccage_sha1 "$pwd_arg")"
-            candidate="$root/${prefix}${base}-${hash}"
+            candidate="$root/${prefix}${base}-$(_ccage_sha1 "$pwd_arg")"
         fi
     fi
     printf '%s\n' "$candidate"
 }
 
-# ---- one-shot claim + bootstrap for a config dir ----
-_ccage_bootstrap_dir() {
-    local dir="$1"
-    local pwd_arg="$2"
-
-    [ -d "$dir" ] || mkdir -p "$dir"
-    if [ ! -f "$dir/.owning_path" ]; then
-        printf '%s\n' "$pwd_arg" > "$dir/.owning_path"
-    fi
-
-    # Pre-set hasCompletedOnboarding so a fresh config dir doesn't drop the user
-    # into the login flow when they already have valid credentials elsewhere.
-    [ -n "$CCAGE_NO_ONBOARDING_PATCH" ] && return 0
-
-    local cj="$dir/.claude.json"
+# ---- patch hasCompletedOnboarding into an existing .claude.json ----
+_ccage_patch_onboarding() {
+    local cj="$1"
     if [ ! -f "$cj" ]; then
         printf '%s\n' '{"hasCompletedOnboarding":true}' > "$cj" 2>/dev/null
-        return 0
+        return
     fi
     if ! grep -q '"hasCompletedOnboarding"' "$cj" 2>/dev/null; then
-        if command -v python3 >/dev/null 2>&1; then
-            python3 - "$cj" <<'PY' 2>/dev/null
+        command -v python3 >/dev/null 2>&1 || return 0
+        python3 - "$cj" <<'PY' 2>/dev/null
 import json, sys
 p = sys.argv[1]
 try:
@@ -109,15 +106,26 @@ except Exception:
 d["hasCompletedOnboarding"] = True
 with open(p, "w") as f: json.dump(d, f, indent=2)
 PY
-        fi
     fi
 }
 
-# ---- baseline .claudesignore (only if the repo has none) ----
+# ---- one-shot claim + bootstrap for a config dir ----
+_ccage_bootstrap_dir() {
+    local dir="$1" pwd_arg="$2"
+
+    [ -d "$dir" ] || mkdir -p "$dir"
+    [ -f "$dir/.owning_path" ] || printf '%s\n' "$pwd_arg" > "$dir/.owning_path"
+
+    [ -n "$CCAGE_NO_ONBOARDING_PATCH" ] && return 0
+    _ccage_patch_onboarding "$dir/.claude.json"
+}
+
+# ---- baseline .claudesignore (only if the project has none) ----
 _ccage_write_signore() {
+    local target_dir="$1"
     [ -n "$CCAGE_NO_AUTO_SIGNORE" ] && return 0
-    [ -f .claudesignore ] && return 0
-    cat > .claudesignore <<'SIGNORE'
+    [ -f "$target_dir/.claudesignore" ] && return 0
+    cat > "$target_dir/.claudesignore" <<'SIGNORE'
 # Auto-generated by ccage. Edit freely — ccage won't overwrite this file.
 node_modules/
 .venv/
@@ -146,24 +154,11 @@ claude() {
 
     export CLAUDE_CONFIG_DIR="$(_ccage_config_dir_for "$PWD")"
     _ccage_bootstrap_dir "$CLAUDE_CONFIG_DIR" "$PWD"
-    _ccage_write_signore
+    _ccage_write_signore "$PWD"
 
-    # Suppress the per-request billing header whose rotating `cch=<hash>`
-    # destabilizes prompt-cache keys. Mechanism confirmed as of Claude Code
-    # v2.1.104 (April 2026). See README for references.
-    if [ -z "$CCAGE_KEEP_ATTRIBUTION" ]; then
-        export CLAUDE_CODE_ATTRIBUTION_HEADER=0
-    fi
+    [ -z "$CCAGE_KEEP_ATTRIBUTION"  ] && export CLAUDE_CODE_ATTRIBUTION_HEADER=0
+    [ -z "$CCAGE_KEEP_AUTOUPDATER"  ] && export DISABLE_AUTOUPDATER=1
 
-    # Parallel sessions racing on a self-update can corrupt the install.
-    if [ -z "$CCAGE_KEEP_AUTOUPDATER" ]; then
-        export DISABLE_AUTOUPDATER=1
-    fi
-
-    # Extension point: overrides can export env, append to _ccage_extra_args,
-    # or seed UI-only settings into CLAUDE_CONFIG_DIR. Keep it UI-only —
-    # copying state/permissions from a master dir re-creates the cross-session
-    # cache-bashing that ccage exists to prevent.
     _ccage_extra_args=()
     _ccage_pre_exec_hook "$PWD" "$CLAUDE_CONFIG_DIR"
 

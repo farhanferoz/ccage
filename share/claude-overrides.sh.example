@@ -8,13 +8,17 @@
 # ---- Pin specific paths to specific config dirs ----
 # Useful when a worktree has a long unhelpful basename, or when you want two
 # repos to share a config dir on purpose.
+#
+# IMPORTANT: after defining this function, set _CCAGE_OVERRIDE_ACTIVE=1 so
+# ccage calls it. Without that flag, the override is never invoked.
 _ccage_config_dir_override() {
     case "$1" in
         # /home/me/dev/work/project-aabbcc) echo "$HOME/.claude-project"; return 0 ;;
-        # /home/me/dev/work/project-aabbcc/*) echo "$HOME/.claude-project-sub-$(basename "$1")"; return 0 ;;
+        # /home/me/dev/work/project-aabbcc/*) echo "$HOME/.claude-project-sub-${1##*/}"; return 0 ;;
     esac
     return 1
 }
+_CCAGE_OVERRIDE_ACTIVE=1
 
 # ---- Per-PWD env, CLI args, and UI-only settings seeding ----
 # Runs after the config dir is bootstrapped, just before `command claude`.
