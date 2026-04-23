@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared helpers for install.sh and uninstall.sh. Not installed to ~/.bashrc.d.
 
 # dry_run must be set by the sourcing script before calling run().
@@ -10,6 +11,7 @@ run() {
 }
 
 # Sets shell, rc, rcd in the caller's scope.
+# shellcheck disable=SC2034  # rc and rcd are consumed by the sourcing script
 ccage_resolve_shell() {
     if [ -z "${shell:-}" ]; then
         case "${SHELL:-}" in

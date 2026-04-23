@@ -1,3 +1,4 @@
+# shellcheck shell=bash disable=SC2034
 # ccage user overrides — copy to ~/.bashrc.d/claude-overrides.sh and edit.
 #
 # Loaded *after* claude-isolation.sh (alphabetical order), so the hook

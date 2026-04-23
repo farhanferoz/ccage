@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # ccage — Claude Code per-project isolation wrapper
 #
 # Gives each working directory its own CLAUDE_CONFIG_DIR so multiple parallel
@@ -152,7 +153,9 @@ claude() {
         return
     fi
 
-    export CLAUDE_CONFIG_DIR="$(_ccage_config_dir_for "$PWD")"
+    local dir
+    dir="$(_ccage_config_dir_for "$PWD")"
+    export CLAUDE_CONFIG_DIR="$dir"
     _ccage_bootstrap_dir "$CLAUDE_CONFIG_DIR" "$PWD"
     _ccage_write_signore "$PWD"
 

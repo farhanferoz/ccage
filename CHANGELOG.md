@@ -4,6 +4,11 @@ All notable changes to ccage. Format follows [Keep a Changelog](https://keepacha
 
 ## [Unreleased]
 
+### Changed
+- **Extension contract**: `_ccage_config_dir_override` is now only invoked when `_CCAGE_OVERRIDE_ACTIVE=1`. Users whose existing overrides redefine the function must add `_CCAGE_OVERRIDE_ACTIVE=1` after the function definition, or the override will be silently skipped. The shipped `claude-overrides.sh.example` sets the flag; copy from it. Rationale: saves a subshell fork on every `claude` invocation when no override is installed. Documented in `docs/FEATURES.md` and `docs/ARCHITECTURE.md`.
+- Hot-path simplifications in `share/claude-isolation.sh`: sha1 tool resolved once at source time (no `command -v` probe per collision); `basename` fork replaced with `${pwd_arg##*/}`; `.owning_path` read via `read` builtin instead of `$(cat ...)`; `_ccage_patch_onboarding` split out of `_ccage_bootstrap_dir`; `_ccage_write_signore` takes an explicit directory argument. Behavior identical; fewer forks per invocation.
+- `install.sh` / `uninstall.sh`: shared `run()` helper and shell-resolution moved into `share/ccage-lib.sh`; `run()` no longer uses `eval`.
+
 ### Added
 - Per-project `CLAUDE_CONFIG_DIR` wrapper keyed on `basename $PWD` with 8-char sha1 disambiguation on collisions (see `share/claude-isolation.sh`).
 - `.owning_path` marker written to each config dir on first claim; used for collision detection.

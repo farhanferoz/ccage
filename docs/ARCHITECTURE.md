@@ -50,8 +50,9 @@ Bash function `claude()` in claude-isolation.sh runs:
    │
    ├─ CLAUDE_CONFIG_DIR=$(_ccage_config_dir_for "$PWD")
    │     │
-   │     ├─ Call _ccage_config_dir_override (stub returns 1; overrides may return a path)
-   │     ├─ Else compute $root/$prefix$base
+   │     ├─ If _CCAGE_OVERRIDE_ACTIVE=1, call _ccage_config_dir_override;
+   │     │   on a returned path, short-circuit with it
+   │     ├─ Else compute $root/$prefix$base (basename via ${##*/}, no fork)
    │     ├─ Else on collision, append -<sha1[:8] of PWD>
    │     └─ [planned] If CCAGE_SLOT set, append --<slot>
    │
@@ -86,6 +87,17 @@ Bash function `claude()` in claude-isolation.sh runs:
 | Prompt cache (server-side) | N/A (Anthropic infra) | keyed on prefix stability | N/A — ccage stabilizes the prefix |
 | `.owning_path` marker | `<config-dir>/.owning_path` | per dir | Never |
 | Baseline `.claudesignore` | `$PWD/.claudesignore` (project) | per project | N/A — project file |
+
+## Hot-path costs
+
+The wrapper runs on every `claude` invocation, including interactive shell sessions. A few decisions fall out of that:
+
+- **sha1 tool resolved once at source time** (`_CCAGE_SHA1_CMD`). No `command -v` probe on collision.
+- **Basename via `${pwd_arg##*/}`**, not `$(basename ...)`. No fork on the main path.
+- **Marker file read via the `read` builtin**, not `$(cat "$marker")`. No fork on collision.
+- **Override hook skipped unless `_CCAGE_OVERRIDE_ACTIVE=1`.** Running `$(_ccage_config_dir_override ...)` unconditionally is a ~1–2 ms subshell fork per invocation. The guard flag lets the no-override case cost nothing. The overrides file is expected to flip the flag after defining the function; the shipped `.example` template does this.
+
+Worth noting: if a user redefines `_ccage_config_dir_override` *without* setting the flag, the override is silently inactive. The `.example` template makes the pattern obvious; FEATURES.md documents it explicitly.
 
 ## Why the shell wrapper, not a hook
 

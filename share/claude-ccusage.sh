@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # ccusage-all — aggregate `ccusage` output across every ccage-isolated config dir.
 #
 # Independent of the isolation wrapper — ships separately so you can install
@@ -7,10 +8,11 @@ ccusage-all() {
     local root="${CCAGE_ROOT:-$HOME}"
     local prefix="${CCAGE_PREFIX:-.claude-}"
     local dir config_name
+    # shellcheck disable=SC2231  # $prefix intentionally expanded into the glob pattern
     for dir in "$root"/${prefix}*; do
         [ -d "$dir/projects" ] || continue
-        config_name="$(basename "$dir")"
-        printf '=== %s ===\n' "${config_name#${prefix}}"
+        config_name="${dir##*/}"
+        printf '=== %s ===\n' "${config_name#"${prefix}"}"
         CLAUDE_CONFIG_DIR="$dir" npx -y ccusage "$@"
     done
 }

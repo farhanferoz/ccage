@@ -80,6 +80,8 @@ Two stub functions defined in `claude-isolation.sh`; any file loaded after it (e
 - Return non-zero (default stub) to fall through to basename keying.
 - Runs before collision detection and the slot suffix — overrides always win.
 
+**After redefining this function, set `_CCAGE_OVERRIDE_ACTIVE=1`.** Without the flag, ccage skips the hook entirely (saves a subshell fork on every `claude` invocation when no override is installed). The default stub file sets `_CCAGE_OVERRIDE_ACTIVE=0`; your overrides file should flip it to `1` after the function definition. The shipped `claude-overrides.sh.example` does this — copy that template rather than writing from scratch.
+
 ### `_ccage_pre_exec_hook <pwd> <config-dir>`
 
 - Runs after config-dir bootstrap, immediately before `command claude`.
