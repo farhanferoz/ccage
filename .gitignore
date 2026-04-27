@@ -4,3 +4,9 @@
 .idea/
 .vscode/
 __pycache__/
+
+# Claude Code session state — gets written when something sets
+# CLAUDE_CONFIG_DIR to the repo root (a plugin, an experiment, an oops).
+# These contain conversation transcripts and should never be committed.
+backups/
+projects/
