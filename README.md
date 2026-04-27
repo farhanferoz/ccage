@@ -109,6 +109,30 @@ _ccage_pre_exec_hook() {
 }
 ```
 
+**Share slash commands, agents, and skills across all projects** (populate once, inherit everywhere):
+
+```sh
+# In ~/.bashrc.d/claude-overrides.sh:
+export CCAGE_SHARE_FROM="$HOME/.claude-master"
+# Optional override — default is "commands agents skills":
+# export CCAGE_SHARE_DIRS="commands agents"
+```
+
+On first bootstrap of any project's config dir, ccage symlinks `~/.claude-master/commands`, `~/.claude-master/agents`, and `~/.claude-master/skills` into it. Existing entries are left alone; missing master subdirs are silently skipped.
+
+**Never put** `memory/`, `projects/`, `settings.json`, `plugins/`, or `hooks/` in the master dir — these carry per-session state that breaks isolation.
+
+> **Backfilling existing sandboxes.** Sharing only runs at bootstrap, and only when the target subdir doesn't exist. Project sandboxes created before `CCAGE_SHARE_FROM` was set — or ones where a real (even empty) `skills/`, `commands/`, or `agents/` dir was created some other way — will not pick up new master skills. To backfill in one shot:
+>
+> ```sh
+> for d in ~/.claude-*/; do
+>     s="${d%/}/skills"
+>     [ ! -e "$s" ] && [ ! -L "$s" ] && ln -s "$HOME/.claude/skills" "$s"
+> done
+> ```
+>
+> Open Claude Code sessions load skills and slash commands at startup — restart any running session in those projects for the new symlink to take effect.
+
 **Seed a statusline into fresh config dirs** (UI-only — idempotent, doesn't overwrite anything):
 
 ```sh
@@ -158,10 +182,15 @@ You can. ccage is what you want if you don't already have per-project shell tool
 Each worktree is a distinct `$PWD`, so each one gets its own config dir — exactly what you want for parallel sessions on the same repo. Caveat: if you nest worktrees under a common parent with identical basenames (e.g. `repo/.claude/worktrees/main` in two repos, or two branches both named `main` in different locations), the sha1 fallback only triggers *after* the first dir is claimed. If two fresh parallel sessions race on the same basename, they can both claim the unmarked dir simultaneously. Sibling-directory worktrees (`../repo-featureA`, `../repo-featureB`) avoid this.
 
 **Can I run multiple Claude Code sessions in the same directory?**
-Not cleanly — today, both sessions get the same `CLAUDE_CONFIG_DIR` and will step on each other (settings-flush race, shared session history). Two recommended patterns:
+Yes, with some caveats. Two patterns:
 
 1. **Preferred: use `git worktree`.** `git worktree add ../myproject-review` gives you a sibling dir with a different basename; ccage then isolates it automatically. This is also Anthropic's recommended pattern for parallel-agent work on the same codebase.
-2. **Escape hatch: `CCAGE_SLOT`** (planned — see `docs/PLAN.md` Phase 3a). Set `CCAGE_SLOT=review claude` to force a distinct config dir from the default one at the same path. You'll need to `/login` per slot.
+2. **`CCAGE_SLOT`.** Set `CCAGE_SLOT=<name>` before invoking `claude` to force a distinct config dir at the same path:
+   ```
+   CCAGE_SLOT=review  claude     # → ~/.claude-myproject--review
+   CCAGE_SLOT=bg      claude     # → ~/.claude-myproject--bg
+   ```
+   Each slot gets its own credentials and history; you'll need `claude /login` once per slot. Accepted characters: `[A-Za-z0-9_-]+`.
 
 **Does this work on macOS?**
 Yes. The wrapper falls back from `sha1sum` to `shasum -a 1` to `openssl dgst -sha1`.
@@ -176,6 +205,21 @@ WSL works. Native Windows doesn't; PowerShell support would need a separate port
 
 - [`ccusage`](https://www.npmjs.com/package/ccusage) — per-dir usage accounting. ccage's `ccusage-all` wraps it.
 - Any tool that already reads `~/.claude-*/projects/` — ccage creates the multi-dir world those tools exist to analyze.
+
+## Development
+
+```sh
+# Run the full test suite (requires no system dependencies beyond bash):
+./tests/bats/bin/bats tests/
+
+# Run a single file:
+./tests/bats/bin/bats tests/test_config_dir_for.bats
+
+# Lint all shell files:
+shellcheck share/*.sh install.sh uninstall.sh
+```
+
+bats-core is vendored at `tests/bats/` as a git submodule pointing at [bats-core/bats-core](https://github.com/bats-core/bats-core). Clone with `--recurse-submodules`, or run `git submodule update --init` after cloning.
 
 ## License
 

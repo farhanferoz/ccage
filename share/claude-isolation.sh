@@ -85,6 +85,19 @@ _ccage_config_dir_for() {
             candidate="$root/${prefix}${base}-$(_ccage_sha1 "$pwd_arg")"
         fi
     fi
+
+    if [ -n "${CCAGE_SLOT:-}" ]; then
+        case "$CCAGE_SLOT" in
+            *[!A-Za-z0-9_-]*)
+                printf 'ccage: CCAGE_SLOT=%s contains unsafe characters (allowed: A-Za-z0-9_-); ignoring\n' \
+                    "$CCAGE_SLOT" >&2
+                ;;
+            *)
+                candidate="${candidate}--${CCAGE_SLOT}"
+                ;;
+        esac
+    fi
+
     printf '%s\n' "$candidate"
 }
 
@@ -97,7 +110,7 @@ _ccage_patch_onboarding() {
     fi
     if ! grep -q '"hasCompletedOnboarding"' "$cj" 2>/dev/null; then
         command -v python3 >/dev/null 2>&1 || return 0
-        python3 - "$cj" <<'PY' 2>/dev/null
+        python3 - "$cj" <<'PY' 2>/dev/null || true
 import json, sys
 p = sys.argv[1]
 try:
@@ -110,6 +123,30 @@ PY
     fi
 }
 
+# ---- optional symlink-sharing from a master config dir ----
+_ccage_share_dirs() {
+    local dir="$1"
+    [ -n "${CCAGE_SHARE_FROM:-}" ] || return 0
+
+    local master="$CCAGE_SHARE_FROM"
+    [ "$master" = "$dir" ] && return 0   # sharing from self is a no-op
+
+    local names="${CCAGE_SHARE_DIRS:-commands agents skills}"
+
+    local name
+    for name in $names; do
+        [ -d "$master/$name" ] || continue
+        local target="$dir/$name"
+        if [ -e "$target" ] || [ -L "$target" ]; then
+            [ -L "$target" ] || printf 'ccage: %s already exists; skipping share of %s\n' \
+                "$target" "$name" >&2
+            continue
+        fi
+        ln -s "$master/$name" "$target" || \
+            printf 'ccage: failed to create symlink %s → %s\n' "$target" "$master/$name" >&2
+    done
+}
+
 # ---- one-shot claim + bootstrap for a config dir ----
 _ccage_bootstrap_dir() {
     local dir="$1" pwd_arg="$2"
@@ -119,6 +156,7 @@ _ccage_bootstrap_dir() {
 
     [ -n "$CCAGE_NO_ONBOARDING_PATCH" ] && return 0
     _ccage_patch_onboarding "$dir/.claude.json"
+    _ccage_share_dirs "$dir"
 }
 
 # ---- baseline .claudesignore (only if the project has none) ----

@@ -13,7 +13,7 @@ Each `$PWD` resolves to a distinct config dir. Keying rules, in order:
 1. If `_ccage_config_dir_override "$PWD"` returns 0 with a non-empty stdout line, that path wins.
 2. Else candidate is `$CCAGE_ROOT/$CCAGE_PREFIX<basename $PWD>`.
 3. If the candidate exists *and* has a `.owning_path` marker naming a path that isn't the current `$PWD`, append `-<sha1[0:8] of full path>`.
-4. [planned — Phase 3a] If `$CCAGE_SLOT` is set and sanitizes to a non-empty alphanumeric-plus-dash string, append `--<slot>`.
+4. If `$CCAGE_SLOT` is set and contains only `[A-Za-z0-9_-]`, append `--<slot>`. Unsafe values are rejected with a stderr warning.
 
 ### Opt-outs
 - `CCAGE_DISABLE=1` — bypass the wrapper entirely for one call (straight pass-through to the real `claude`).
@@ -107,9 +107,14 @@ Function defined in `share/claude-ccusage.sh`. Iterates every `$CCAGE_ROOT/$CCAG
 
 ---
 
-## `CCAGE_SLOT` [planned — Phase 3a]
+## `CCAGE_SLOT` [shipped]
 
-Suffix on the config-dir name, for running multiple independent sessions in the same `$PWD` (e.g. one interactive, one background review agent). Accepted characters: `[A-Za-z0-9_-]+`. Anything else prints a warning and the variable is ignored.
+Suffix on the config-dir name, for running multiple independent sessions in the same `$PWD` (e.g. one interactive, one background review agent).
+
+- Accepted characters: `[A-Za-z0-9_-]+`. Anything else prints a warning to stderr and the variable is ignored (slot is dropped; normal path is used).
+- Separator is `--` (double-dash) to be visually distinct from the collision-disambiguation separator (`-`).
+- Slot suffix is applied **after** collision resolution, so a colliding path with a slot gets `<base>-<sha8>--<slot>`.
+- Takes no effect when `_ccage_config_dir_override` returns a path — overrides always win.
 
 Example:
 ```
@@ -118,20 +123,33 @@ CCAGE_SLOT=review  claude    # → ~/.claude-myproject--review
 CCAGE_SLOT=bg      claude    # → ~/.claude-myproject--bg
 ```
 
-Each slot requires its own `claude /login` the first time.
+Each slot gets its own config dir and requires its own `claude /login` the first time.
 
 ---
 
-## `CCAGE_SHARE_FROM` + `CCAGE_SHARE_DIRS` [planned — Phase 3b]
+## `CCAGE_SHARE_FROM` + `CCAGE_SHARE_DIRS` [shipped]
 
 Optional opt-in to share selected subdirectories from a master dir into every per-project config dir via symlinks.
 
 - `CCAGE_SHARE_FROM` — absolute path to the master dir (e.g. `$HOME/.claude-master`). Unset = feature off.
 - `CCAGE_SHARE_DIRS` — space-separated list of subdirs to share. Default: `"commands agents skills"`.
 
-Behavior: on bootstrap, for each name in `CCAGE_SHARE_DIRS`, if `<master>/<name>` exists and `<config-dir>/<name>` does not, create a symlink. Existing targets (real dir, file, or different symlink) are left alone.
+Behavior: on bootstrap, for each name in `CCAGE_SHARE_DIRS`, if `<master>/<name>` exists and `<config-dir>/<name>` does not exist at all, create a symlink. Existing entries (real dir, file, or symlink to any target) are left alone. Real dirs/files get a stderr warning; symlinks (even to wrong targets) are silently skipped.
 
 **Never default-share**: `memory/`, `projects/`, `settings.json`, `plugins/`, `hooks/`, or credentials. These carry state that breaks isolation if shared.
+
+### Opt-out
+There is no explicit opt-out env var — simply leave `CCAGE_SHARE_FROM` unset (the default).
+
+### Example
+```bash
+# In ~/.bashrc.d/claude-overrides.sh:
+export CCAGE_SHARE_FROM="$HOME/.claude-master"
+# Optional — default is "commands agents skills":
+# export CCAGE_SHARE_DIRS="commands agents"
+```
+
+Create `~/.claude-master/commands/`, `~/.claude-master/agents/`, `~/.claude-master/skills/` and populate them. Each project's config dir will get symlinks on first bootstrap.
 
 ---
 

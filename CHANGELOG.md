@@ -4,6 +4,14 @@ All notable changes to ccage. Format follows [Keep a Changelog](https://keepacha
 
 ## [Unreleased]
 
+### Added
+- `CCAGE_SLOT` env var: append `--<slot>` to the config dir name, letting multiple sessions share the same `$PWD` without clobbering each other. Slot suffix is applied after collision-hash resolution; unsafe characters (`/`, spaces, etc.) emit a stderr warning and are ignored. Override hook still takes precedence.
+- `CCAGE_SHARE_FROM` + `CCAGE_SHARE_DIRS`: opt-in symlink-sharing of `commands`, `agents`, and `skills` from a master config dir into every per-project config dir on bootstrap. Existing entries are left alone; missing master subdirs are silently skipped; real-dir conflicts warn to stderr.
+- Backfill test suite: `tests/test_config_dir_for.bats`, `tests/test_bootstrap.bats`, `tests/test_signore.bats`, `tests/test_env_defaults.bats` (31 tests total). bats-core vendored at `tests/bats/`.
+
+### Fixed
+- `_ccage_patch_onboarding`: python3 failure now silently swallowed (`|| true`) rather than propagating under `set -e`. Previously a failing python3 invocation would abort the bootstrap call with a non-zero exit.
+
 ### Changed
 - **Extension contract**: `_ccage_config_dir_override` is now only invoked when `_CCAGE_OVERRIDE_ACTIVE=1`. Users whose existing overrides redefine the function must add `_CCAGE_OVERRIDE_ACTIVE=1` after the function definition, or the override will be silently skipped. The shipped `claude-overrides.sh.example` sets the flag; copy from it. Rationale: saves a subshell fork on every `claude` invocation when no override is installed. Documented in `docs/FEATURES.md` and `docs/ARCHITECTURE.md`.
 - Hot-path simplifications in `share/claude-isolation.sh`: sha1 tool resolved once at source time (no `command -v` probe per collision); `basename` fork replaced with `${pwd_arg##*/}`; `.owning_path` read via `read` builtin instead of `$(cat ...)`; `_ccage_patch_onboarding` split out of `_ccage_bootstrap_dir`; `_ccage_write_signore` takes an explicit directory argument. Behavior identical; fewer forks per invocation.

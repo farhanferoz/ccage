@@ -54,13 +54,13 @@ Bash function `claude()` in claude-isolation.sh runs:
    │     │   on a returned path, short-circuit with it
    │     ├─ Else compute $root/$prefix$base (basename via ${##*/}, no fork)
    │     ├─ Else on collision, append -<sha1[:8] of PWD>
-   │     └─ [planned] If CCAGE_SLOT set, append --<slot>
+   │     └─ If CCAGE_SLOT set (and safe chars), append --<slot>
    │
    ├─ _ccage_bootstrap_dir "$CLAUDE_CONFIG_DIR" "$PWD":
    │     ├─ mkdir -p
    │     ├─ Write .owning_path if absent
    │     └─ Patch hasCompletedOnboarding=true into .claude.json (unless opt-out)
-   │     └─ [planned] _ccage_share_dirs (selective sharing)
+   │     └─ _ccage_share_dirs (if CCAGE_SHARE_FROM set)
    │
    ├─ _ccage_write_signore (unless opt-out): writes baseline .claudesignore if missing
    │
@@ -82,7 +82,7 @@ Bash function `claude()` in claude-isolation.sh runs:
 | Onboarding flag | `<config-dir>/.claude.json` | per dir | N/A — ccage sets it everywhere |
 | Session history | `<config-dir>/projects/<encoded-path>/` | per dir | No |
 | `settings.json` | `<config-dir>/settings.json` | per dir | UI keys only (by doctrine) |
-| Skills / commands / agents | `<config-dir>/{skills,commands,agents}/` | per dir by default | [planned] opt-in share via `CCAGE_SHARE_FROM` |
+| Skills / commands / agents | `<config-dir>/{skills,commands,agents}/` | per dir by default | Opt-in symlinks via `CCAGE_SHARE_FROM` |
 | Plugins | `<config-dir>/plugins/` | per dir | No — plugins carry state |
 | Prompt cache (server-side) | N/A (Anthropic infra) | keyed on prefix stability | N/A — ccage stabilizes the prefix |
 | `.owning_path` marker | `<config-dir>/.owning_path` | per dir | Never |
@@ -120,7 +120,7 @@ If two parallel processes in two different paths with the same basename both cal
 
 Mitigations v0 offers:
 - Rare in practice — requires identical basenames *and* both being fresh sessions *and* within a sub-second window.
-- `CCAGE_SLOT` [planned Phase 3a] gives the user an explicit escape hatch.
+- `CCAGE_SLOT` gives the user an explicit escape hatch.
 
 Proper fix (registry-based, post-v0) is listed in PLAN.md Phase 6.
 
