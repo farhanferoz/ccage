@@ -203,6 +203,12 @@ Not yet. The function is straightforward to port — open an issue.
 **What about Windows / WSL / PowerShell?**
 WSL works. Native Windows doesn't; PowerShell support would need a separate port.
 
+## Limitations
+
+- **`claude` is a shell function, so anything that exec's it as an external command bypasses the wrapper.** `timeout 60 claude`, `nohup claude`, `xargs claude`, and similar will find the real binary in `$PATH` and skip ccage's bootstrap (no `CLAUDE_CONFIG_DIR` export, no per-project dir). Inherent to the function-wrapper design. If you need ccage behavior under `timeout` or `nohup`, wrap the call in a subshell: `bash -c 'source ~/.bashrc.d/claude-isolation.sh && claude --print "..."'`.
+- **Strict-mode shells (`set -u`).** ccage reads several optional env vars without defaults and will crash with "unbound variable" when sourced into a strict shell. Fix planned before v0.1.0; in the meantime, `set +u` before sourcing the wrapper if you must use strict mode.
+- **Nested-worktree basename collisions** in two parallel fresh sessions — see the worktree FAQ above. Mitigation: prefer sibling-directory worktrees, or set `CCAGE_SLOT` per session.
+
 ## Related
 
 - [`ccusage`](https://www.npmjs.com/package/ccusage) — per-dir usage accounting. ccage's `ccusage-all` wraps it.

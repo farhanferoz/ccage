@@ -2,6 +2,21 @@
 
 Workflow: **Sonnet implements each phase TDD-style; Opus reviews when the phase reports green**.
 
+## Status
+
+| Phase | State |
+|---|---|
+| 0 — User pre-flight | ⏳ ongoing (cache-fix soak) |
+| 2 — Repo hygiene | ✅ done |
+| 3a — `CCAGE_SLOT` | ✅ done |
+| 3b — `CCAGE_SHARE_FROM` | ✅ done |
+| 4 — Backfill bats tests | ✅ done (bats vendored as submodule) |
+| 5 — CI matrix | ✅ done locally; § 5.3 pending real-runner verification on first push |
+| 6 — Nice-to-haves | ⏸ queued |
+| 7 — Publish | ⏸ blocked on § 5.3 + two pre-publish bug fixes (see RESUME.md "Known bugs") |
+
+End-to-end behavior is also covered by `tests/validate-e2e.sh` (30 mock + 9 real-claude assertions) — see RESUME.md for details.
+
 ## Ground rules
 
 - **TDD, no guesses.** For every phase: write the failing test first, run it, watch it fail for the right reason, write the minimum code to pass, run it, watch it pass, refactor.

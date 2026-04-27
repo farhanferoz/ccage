@@ -13,6 +13,10 @@ All notable changes to ccage. Format follows [Keep a Changelog](https://keepacha
 ### Fixed
 - `_ccage_patch_onboarding`: python3 failure now silently swallowed (`|| true`) rather than propagating under `set -e`. Previously a failing python3 invocation would abort the bootstrap call with a non-zero exit.
 
+### Documentation
+- README "Limitations" section: documents the `timeout`/`nohup` function-bypass, `set -u` unsafety, and nested-worktree race. The first two surfaced via `tests/validate-e2e.sh` validation pass; both are scheduled to be fixed (or, in the function-bypass case, made tolerable) before v0.1.0.
+- PLAN.md: added a Status block summarizing which phases are done.
+
 ### Changed
 - **Extension contract**: `_ccage_config_dir_override` is now only invoked when `_CCAGE_OVERRIDE_ACTIVE=1`. Users whose existing overrides redefine the function must add `_CCAGE_OVERRIDE_ACTIVE=1` after the function definition, or the override will be silently skipped. The shipped `claude-overrides.sh.example` sets the flag; copy from it. Rationale: saves a subshell fork on every `claude` invocation when no override is installed. Documented in `docs/FEATURES.md` and `docs/ARCHITECTURE.md`.
 - Hot-path simplifications in `share/claude-isolation.sh`: sha1 tool resolved once at source time (no `command -v` probe per collision); `basename` fork replaced with `${pwd_arg##*/}`; `.owning_path` read via `read` builtin instead of `$(cat ...)`; `_ccage_patch_onboarding` split out of `_ccage_bootstrap_dir`; `_ccage_write_signore` takes an explicit directory argument. Behavior identical; fewer forks per invocation.
