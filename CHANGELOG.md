@@ -8,6 +8,7 @@ All notable changes to ccage. Format follows [Keep a Changelog](https://keepacha
 - `CCAGE_SLOT` env var: append `--<slot>` to the config dir name, letting multiple sessions share the same `$PWD` without clobbering each other. Slot suffix is applied after collision-hash resolution; unsafe characters (`/`, spaces, etc.) emit a stderr warning and are ignored. Override hook still takes precedence.
 - `CCAGE_SHARE_FROM` + `CCAGE_SHARE_DIRS`: opt-in symlink-sharing of `commands`, `agents`, and `skills` from a master config dir into every per-project config dir on bootstrap. Existing entries are left alone; missing master subdirs are silently skipped; real-dir conflicts warn to stderr.
 - Backfill test suite: `tests/test_config_dir_for.bats`, `tests/test_bootstrap.bats`, `tests/test_signore.bats`, `tests/test_env_defaults.bats` (31 tests total). bats-core vendored at `tests/bats/`.
+- GitHub Actions CI: `.github/workflows/ci.yml` — matrix of `os: [ubuntu-latest, macos-latest]` × `shell: [bash, zsh]`; bash cells run shellcheck (ubuntu only — OS-independent) + source smoke test + bats; zsh cells run source smoke test only (bats requires bash). Deviates from PLAN.md § 5.1 which implied bats and shellcheck run on all cells — both restrictions are intentional.
 
 ### Fixed
 - `_ccage_patch_onboarding`: python3 failure now silently swallowed (`|| true`) rather than propagating under `set -e`. Previously a failing python3 invocation would abort the bootstrap call with a non-zero exit.

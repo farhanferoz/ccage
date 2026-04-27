@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        shell: [bash, zsh]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install shellcheck
+        if: matrix.os == 'ubuntu-latest' && matrix.shell == 'bash'
+        run: command -v shellcheck || sudo apt-get install -y shellcheck
+        shell: bash
+
+      - name: shellcheck
+        if: matrix.os == 'ubuntu-latest' && matrix.shell == 'bash'
+        run: shellcheck share/*.sh install.sh uninstall.sh
+        shell: bash
+
+      - name: source smoke test (bash)
+        if: matrix.shell == 'bash'
+        run: |
+          source share/claude-isolation.sh
+          typeset -f claude >/dev/null
+        shell: bash
+
+      - name: source smoke test (zsh)
+        if: matrix.shell == 'zsh'
+        run: |
+          source share/claude-isolation.sh
+          typeset -f claude >/dev/null
+        shell: 'zsh -e {0}'
+
+      - name: bats tests
+        if: matrix.shell == 'bash'
+        run: ./tests/bats/bin/bats tests/
+        shell: bash

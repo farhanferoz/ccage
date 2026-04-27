@@ -1,5 +1,7 @@
 # ccage
 
+[![CI](https://github.com/<your-user>/ccage/actions/workflows/ci.yml/badge.svg)](https://github.com/<your-user>/ccage/actions/workflows/ci.yml)
+
 Per-project isolation for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Every working directory gets its own config dir, so two sessions in two repos stop fighting over one prompt cache, one credential file, and one shell history.
 
 > Status: early. API and defaults may still change.
