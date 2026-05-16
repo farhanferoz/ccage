@@ -5,8 +5,13 @@ Pointer file for resuming work without blowing up context. Update the "Current s
 ## Current state
 
 - **Phase:** 6a + 6b + 6c **complete and committed locally.** Phase 7 (publish) is blocked only on § 5.3 — the user pushing to a GitHub remote and watching the CI matrix go green (and confirming an intentional-red branch produces a failing run).
-- **Latest commits** (most recent first):
-  - `ec19861` fix: zsh-compatible read for resume cost prompt (Tier 2 review fix)
+- **Latest commits** (most recent first; 11 since baseline `39f30c4`):
+  - `e50ec5c` perf: stream per-record handoff extractors instead of slurp (Tier 2 finding)
+  - `1d79534` fix: handoff cost estimate sums all 4 billing components (Tier 2 finding)
+  - `e72c037` docs: update RESUME + PLAN status
+  - `ec19861` fix: zsh-compatible read for resume cost prompt
+  - `ddf43ca` fix: handoff filters synthetic slash-command echoes from prompts
+  - `0aa8e7b` docs: README + FEATURES sections for Phase 6b interception
   - `380603b` feat: -r/-c cost prompt interception (Phase 6b)
   - `be103f2` fix: ${var:-} defaults for set -u safety in claude-isolation.sh
   - `1191f10` feat: ccage handoff — offline session brief generator (Phase 6a)
@@ -40,11 +45,13 @@ Still unvalidated (and out of my scope without push permission):
 
 ## Tier 2 review (2026-05-16) — outcome
 
-- Five commits since baseline `39f30c4`. ~2500 line additions across 18 files.
+- 11 commits since baseline `39f30c4`. ~2700 line additions across 19 files.
 - External review via gemini 0.42.0 (`/home/ff235/.npm-global/bin/gemini`) on the full diff `39f30c4..HEAD`.
-- One **high-severity** finding addressed: `read -rn 1 -s` is bash-only — zsh uses `-k N`. Fixed in commit `ec19861`. Gemini missed it; surfaced on a follow-up audit pass.
+- Findings addressed:
+  - **High** (audit pass, not gemini): `read -rn 1 -s` is bash-only — zsh uses `-k N`. Fixed in commit `ec19861`.
+  - **Medium** (gemini): handoff brief's "Estimated cost so far" line was cache-write only. Fixed in `1d79534` — now sums input + output + cache-write + cache-read.
+  - **Medium** (gemini): `jq -Rrs` slurp on per-record extractors meant ~10× file-size peak RSS on long Opus session JSONLs. Fixed in `e50ec5c` — switched 7 helpers to streaming `jq -Rr 'fromjson? // empty'`. 3 aggregation helpers (count/prompts_json) kept slurp because they aggregate across all records; each runs once per brief.
 - Four **false positives** rejected (slug derivation, awk truncation correctness, backtick "injection," uninstall.sh awk regex — the last was already fixed in `c306f8d`).
-- No medium-severity defects.
 - Verdict: ship-ready pending § 5.3.
 
 ## Known bugs (still open, low priority)
