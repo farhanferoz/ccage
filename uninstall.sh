@@ -5,6 +5,7 @@
 # Usage:
 #   ./uninstall.sh                   # uninstall for the current shell
 #   ./uninstall.sh --shell bash|zsh  # force a specific shell target
+#   ./uninstall.sh --prefix DIR      # CLI prefix (default: ~/.local)
 #   ./uninstall.sh --dry-run         # print what would be done
 
 set -euo pipefail
@@ -15,12 +16,14 @@ here() { cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd; }
 
 shell=""
 dry_run=0
+prefix="$HOME/.local"
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --shell)   shell="$2"; shift 2 ;;
         --dry-run) dry_run=1;  shift   ;;
-        -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+        --prefix)  prefix="$2"; shift 2 ;;
+        -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
         *) printf 'unknown flag: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
@@ -34,7 +37,22 @@ for f in claude-isolation.sh claude-ccusage.sh; do
     fi
 done
 
+# CLI dispatcher + handoff library.
+if [ -f "$prefix/bin/ccage" ]; then
+    run rm -f "$prefix/bin/ccage"
+    printf 'removed %s/bin/ccage\n' "$prefix"
+fi
+if [ -f "$prefix/share/ccage/ccage-handoff.sh" ]; then
+    run rm -f "$prefix/share/ccage/ccage-handoff.sh"
+    printf 'removed %s/share/ccage/ccage-handoff.sh\n' "$prefix"
+fi
+# rmdir empty share/ccage dir if we left it behind, but don't force.
+if [ -d "$prefix/share/ccage" ]; then
+    rmdir "$prefix/share/ccage" 2>/dev/null && printf 'removed empty %s/share/ccage\n' "$prefix" || true
+fi
+
 [ -f "$rcd/claude-overrides.sh" ] && printf 'left %s/claude-overrides.sh in place (user data)\n' "$rcd"
+# User handoff briefs and config dirs are user data — never touched.
 
 if [ -f "$rc" ] && grep -qF 'Added by ccage installer' "$rc"; then
     if [ "$dry_run" = 1 ]; then

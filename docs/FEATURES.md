@@ -97,6 +97,113 @@ Idempotency is the contract: hooks must only add missing keys, never overwrite e
 
 ---
 
+## `ccage handoff` — offline session brief [shipped]
+
+Generates a Markdown handoff brief from a Claude Code session JSONL. **Zero API calls** — pure shell + jq. Use case: avoid `claude -r`/`-c`'s structural prompt-cache rewrite tax (Claude Code resumes always cache-miss on the message prefix — see GitHub issues #42309, #43657). Generate a brief from the prior session, start a fresh `claude`, paste the brief as the first message.
+
+### Usage
+
+```
+ccage handoff                          # most-recent session for $PWD
+ccage handoff <session-id-prefix>      # specific session (UUID, prefix-match)
+ccage handoff --stdout                 # write to stdout instead of file
+ccage handoff --output FILE            # explicit output path
+ccage handoff --project /abs/path      # use that path's slug, not $PWD's
+ccage handoff --max-prompts N          # cap user-prompt list (default 20)
+```
+
+### What's in the brief
+
+- Session metadata (id, started/last-activity, turn counts, last model used).
+- Tokens billed so far (input · output · cache-write · cache-read) and an estimated cost in dollars based on the pricing table in `share/ccage-handoff.sh`.
+- User prompts (verbatim, chronological, last N up to `--max-prompts`).
+- Files touched, aggregated from Read/Edit/Write tool_use records — top 30 by frequency.
+- Bash commands, deduplicated and with trivials (`pwd`, `ls`, `true`, `clear`, `exit`, `cd`) filtered out.
+- The last assistant text turn (truncated to first/last 300 words if longer than 600).
+
+### Output path
+
+`${CCAGE_HANDOFF_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ccage/handoffs}/<project-slug>-<session-prefix>-<timestamp>.md`
+
+Filename embeds the project slug so cross-project listing is easy.
+
+### Clipboard auto-copy
+
+In default file mode, if one of `pbcopy` (macOS), `wl-copy` (Wayland), `xclip`, or `xsel` is available, the brief is also copied to the clipboard. Skipped silently if none found. Suppressed in `--stdout` and `--output` modes.
+
+### Filtering rules
+
+User-prompt extraction excludes:
+- Records where `toolUseResult != null` (tool result echoes, not prompts).
+- Records where `isMeta == true` (synthetic system reminders).
+- Records with empty/whitespace-only content.
+
+Resilient to malformed JSONL lines — every jq invocation uses raw-input + `fromjson?` so a partial-write line in the middle of a session file doesn't kill the rest of the extraction.
+
+### Env vars
+
+- `CCAGE_HANDOFF_DIR` — override the default output directory.
+- `CCAGE_LIB` — override library lookup path (used by `bin/ccage`). Default: auto-detected from `bin/ccage`'s location.
+
+### Dependencies
+
+- `jq` (any version with `fromjson?` support — jq 1.5+).
+- Standard coreutils: `awk`, `sed`, `sort`, `mktemp`, `date`.
+- `python3` is NOT required for this feature.
+
+---
+
+## `ccage handoff` [shipped — Phase 6a]
+
+Standalone CLI that produces a Markdown handoff brief from a Claude Code session JSONL. Designed for the workflow "I want to start a fresh `claude` session instead of paying `claude -r`'s structural cache-rewrite tax."
+
+**Zero API calls.** Pure jq + shell. Reads only on-disk session history.
+
+### Usage
+
+```sh
+ccage handoff                                # most-recent session for $PWD
+ccage handoff <session-id-prefix>            # specific session by UUID prefix
+ccage handoff --stdout                       # brief to stdout (no file)
+ccage handoff --output PATH                  # explicit output path
+ccage handoff --project /abs/path            # other project's sessions
+ccage handoff --max-prompts N                # cap user-prompt list (default 20)
+```
+
+### What's in the brief
+
+- Session metadata: id, project, start/last-activity timestamps, turn counts.
+- **Tokens billed so far** (input / output / cache-write / cache-read), summed from per-turn `message.usage` fields.
+- **Estimated cost so far** in dollars (using the model recorded on the last assistant turn against a hardcoded pricing table).
+- **User prompts** verbatim, chronological, last N (default 20). Earlier prompts get an elided-count marker.
+- **Files touched** table from `tool_use` records (Read / Edit / Write), top 30 by frequency.
+- **Commands run**, deduplicated, with trivial commands (`pwd`, `ls`, `cd`, `clear`, `exit`, `true`) filtered out. Cap 40 unique.
+- **Last assistant turn** verbatim, with first-300/last-300-word truncation if longer than 600 words.
+
+### Where the file lands
+
+Default location: `${CCAGE_HANDOFF_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ccage/handoffs}/<project-slug>-<session-prefix>-<YYYYMMDD-HHMMSS>.md`.
+
+After write, prints the path to stdout, hints the next step on stderr, and copies to clipboard if available. Clipboard detection order: `pbcopy` → `wl-copy` → `xclip` → `xsel`. Silent skip if none.
+
+### Env
+
+| Var | Default | Effect |
+|---|---|---|
+| `CCAGE_HANDOFF_DIR` | `~/.local/share/ccage/handoffs/` | Override the handoff output directory. |
+
+### Limitations
+
+- Best-effort JSONL parsing. If Anthropic changes session field names, extraction will degrade loudly (jq returns nulls; missing fields show as 0). Test fixtures pin the current schema.
+- Cost estimate uses a hardcoded pricing table (200K tier). 1M-context-tier sessions are under-estimated by ~2×. The pricing file (`share/ccage-handoff.sh`) has a `# updated:` header for tracking rate refreshes.
+- The handoff brief is structural (facts, no synthesis). For LLM-quality narrative summaries, use the in-session `/session-handoff` skill while the session is still warm.
+
+### Dependencies
+
+`jq` (any 1.6+). `install.sh` checks for it.
+
+---
+
 ## `ccusage-all` [shipped]
 
 Function defined in `share/claude-ccusage.sh`. Iterates every `$CCAGE_ROOT/$CCAGE_PREFIX*` directory with a `projects/` subdir, exports `CLAUDE_CONFIG_DIR`, and runs `npx -y ccusage "$@"` against each.

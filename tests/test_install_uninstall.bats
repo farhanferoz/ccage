@@ -18,8 +18,8 @@ setup() {
     local original=$'# user pre-content\nexport EDITOR=vim\nalias gs=\'git status\'\n'
     printf '%s' "$original" > "$rc"
 
-    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash >/dev/null
-    HOME="$FAKE_HOME" "$REPO_ROOT/uninstall.sh" --shell bash >/dev/null
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    HOME="$FAKE_HOME" "$REPO_ROOT/uninstall.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
 
     [ -f "$rc" ]
     # Trailing blank lines from install's leading-\n separator are tolerated —
@@ -38,8 +38,8 @@ setup() {
     local rc="$FAKE_HOME/.bashrc"
     printf '%s\n' '# user pre-content' 'export EDITOR=vim' > "$rc"
 
-    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash >/dev/null
-    HOME="$FAKE_HOME" "$REPO_ROOT/uninstall.sh" --shell bash >/dev/null
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    HOME="$FAKE_HOME" "$REPO_ROOT/uninstall.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
 
     grep -qx '# user pre-content' "$rc"
     grep -qx 'export EDITOR=vim' "$rc"
@@ -62,8 +62,8 @@ setup() {
 @test "uninstall: ccage marker comment removed" {
     local rc="$FAKE_HOME/.bashrc"
     printf '' > "$rc"
-    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash >/dev/null
-    HOME="$FAKE_HOME" "$REPO_ROOT/uninstall.sh" --shell bash >/dev/null
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    HOME="$FAKE_HOME" "$REPO_ROOT/uninstall.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
 
     ! grep -q 'Added by ccage installer' "$rc"
 }
@@ -71,8 +71,8 @@ setup() {
 @test "uninstall: source loop removed (no orphaned 'for f in .sh' line)" {
     local rc="$FAKE_HOME/.bashrc"
     printf '' > "$rc"
-    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash >/dev/null
-    HOME="$FAKE_HOME" "$REPO_ROOT/uninstall.sh" --shell bash >/dev/null
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    HOME="$FAKE_HOME" "$REPO_ROOT/uninstall.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
 
     # The whole point: no leftover sourcing loop referencing the bashrc.d.
     ! grep -q 'for f in.*\.sh' "$rc"
@@ -80,21 +80,21 @@ setup() {
 }
 
 @test "uninstall: installed .sh files removed from rcd" {
-    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash >/dev/null
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
     [ -f "$FAKE_HOME/.bashrc.d/claude-isolation.sh" ]
     [ -f "$FAKE_HOME/.bashrc.d/claude-ccusage.sh" ]
 
-    HOME="$FAKE_HOME" "$REPO_ROOT/uninstall.sh" --shell bash >/dev/null
+    HOME="$FAKE_HOME" "$REPO_ROOT/uninstall.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
 
     [ ! -f "$FAKE_HOME/.bashrc.d/claude-isolation.sh" ]
     [ ! -f "$FAKE_HOME/.bashrc.d/claude-ccusage.sh" ]
 }
 
 @test "uninstall: leaves user's claude-overrides.sh in place" {
-    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash >/dev/null
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
     printf '# my overrides\n' > "$FAKE_HOME/.bashrc.d/claude-overrides.sh"
 
-    HOME="$FAKE_HOME" "$REPO_ROOT/uninstall.sh" --shell bash >/dev/null
+    HOME="$FAKE_HOME" "$REPO_ROOT/uninstall.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
 
     [ -f "$FAKE_HOME/.bashrc.d/claude-overrides.sh" ]
     grep -qx '# my overrides' "$FAKE_HOME/.bashrc.d/claude-overrides.sh"
@@ -104,8 +104,8 @@ setup() {
     local rc="$FAKE_HOME/.bashrc"
     printf '' > "$rc"
 
-    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash >/dev/null
-    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash >/dev/null
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
 
     local n
     n=$(grep -c 'Added by ccage installer' "$rc")
@@ -113,13 +113,40 @@ setup() {
 }
 
 @test "install --no-ccusage: only claude-isolation.sh installed" {
-    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --no-ccusage >/dev/null
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --no-ccusage --prefix "$FAKE_HOME/.local" >/dev/null
     [ -f "$FAKE_HOME/.bashrc.d/claude-isolation.sh" ]
     [ ! -f "$FAKE_HOME/.bashrc.d/claude-ccusage.sh" ]
 }
 
 @test "install --dry-run: nothing written" {
-    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --dry-run >/dev/null
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --dry-run --prefix "$FAKE_HOME/.local" >/dev/null
     [ ! -e "$FAKE_HOME/.bashrc.d" ]
     [ ! -e "$FAKE_HOME/.bashrc" ]
+    [ ! -e "$FAKE_HOME/.local/bin/ccage" ]
+}
+
+@test "install: bin/ccage and handoff library land at prefix" {
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    [ -x "$FAKE_HOME/.local/bin/ccage" ]
+    [ -f "$FAKE_HOME/.local/share/ccage/ccage-handoff.sh" ]
+}
+
+@test "install --no-cli: bin/ccage and handoff lib not installed" {
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --no-cli --prefix "$FAKE_HOME/.local" >/dev/null
+    [ ! -e "$FAKE_HOME/.local/bin/ccage" ]
+    [ ! -e "$FAKE_HOME/.local/share/ccage/ccage-handoff.sh" ]
+}
+
+@test "uninstall: bin/ccage and handoff library removed" {
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    HOME="$FAKE_HOME" "$REPO_ROOT/uninstall.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    [ ! -e "$FAKE_HOME/.local/bin/ccage" ]
+    [ ! -e "$FAKE_HOME/.local/share/ccage/ccage-handoff.sh" ]
+}
+
+@test "installed bin/ccage handoff --help works (no source-tree access)" {
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    run "$FAKE_HOME/.local/bin/ccage" handoff --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Usage:"* ]]
 }

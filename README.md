@@ -29,6 +29,8 @@ Drops a tiny shell function over `claude` that:
 6. Exports `CLAUDE_CODE_ATTRIBUTION_HEADER=0`. Claude Code otherwise sends an `x-anthropic-billing-header` containing a `cch=<hash>` that rotates per request, destabilizing prompt-cache keys. Suppressing it restores stable prefixes. Mechanism: [claude-code-router PR #1220](https://github.com/musistudio/claude-code-router/pull/1220), [cc-switch issue #2025](https://github.com/farion1231/cc-switch/issues/2025). This is one cache-invalidation source among several — see [anthropics/claude-code#40652](https://github.com/anthropics/claude-code/issues/40652) for an adjacent, still-open bug that ccage does **not** fix; [claude-code-cache-fix](https://github.com/cnighswonger/claude-code-cache-fix) is complementary if you want both.
 7. Exports `DISABLE_AUTOUPDATER=1`. Parallel sessions racing on a self-update can corrupt the install; skip the updater and bump the CLI manually.
 8. Ships a `ccusage-all` helper that runs [`ccusage`](https://www.npmjs.com/package/ccusage) across every isolated config dir and aggregates the output.
+9. Ships a `ccage handoff` CLI that produces an offline Markdown brief from any session JSONL — useful as a context bootstrap for a fresh session when you'd otherwise pay `claude -r`'s structural cache-rewrite tax. Pure jq, zero API calls. See [docs/FEATURES.md](docs/FEATURES.md) and [docs/PHASE-6-HANDOFF-SPEC.md](docs/PHASE-6-HANDOFF-SPEC.md).
+9. Ships a `ccage handoff` CLI that turns any session JSONL on disk into a Markdown brief you can paste into a fresh `claude` session — useful for avoiding `claude -r`'s structural prompt-cache rewrite tax. Pure shell + jq, zero API calls.
 
 ### Bonus: dodges the `settings.json` write race
 
@@ -39,6 +41,7 @@ Each worktree gets its own credentials. Run `claude /login` once per project.
 ## Prerequisites
 
 - **bash ≥ 4** or **zsh ≥ 5**
+- **`jq`** — required by `ccage handoff`. Install via `brew install jq`, `apt install jq`, `dnf install jq`, etc. Run `./install.sh --no-cli` if you don't want the CLI/handoff parts and prefer not to install jq.
 - **`python3`** (optional) — only used to patch an existing `.claude.json` with `hasCompletedOnboarding=true`. Without it, your first session in a fresh config dir will see Claude Code's onboarding flow; you can proceed through it normally.
 - **`npx`** (optional) — only needed if you use `ccusage-all`.
 - **Linux or macOS.** Windows native is unsupported; WSL works.
@@ -152,6 +155,27 @@ if "statusLine" not in d:
 PY
 }
 ```
+
+## Avoiding `-r`/`-c`'s cache rewrite cost — `ccage handoff`
+
+Claude Code's `--resume` / `--continue` always cache-misses the message prefix on the first turn after resume (structural diff, not TTL — see GitHub issues #42309, #43657). On a long Opus session that's $0.50–$2 of cache-write tokens every resume, even seconds after `/clear`.
+
+`ccage handoff` turns a session JSONL into a Markdown brief you can paste as the first message of a fresh `claude` session. Zero API calls — pure shell + jq.
+
+```sh
+# Most-recent session for the current project:
+ccage handoff
+
+# Specific session (by UUID prefix):
+ccage handoff 4f616b4b
+
+# Write to stdout for piping or quick view:
+ccage handoff --stdout
+```
+
+The brief contains: user prompts (chronological), files Read/Edit/Written, Bash commands run, the last assistant turn, token totals, and a cost estimate. It's written to `~/.local/share/ccage/handoffs/<project>-<session>-<timestamp>.md` and auto-copied to the clipboard if `pbcopy`/`wl-copy`/`xclip`/`xsel` is available.
+
+Requires `jq` (`brew install jq`, `apt install jq`, etc). See `docs/FEATURES.md` for the full reference.
 
 ## Uninstall
 

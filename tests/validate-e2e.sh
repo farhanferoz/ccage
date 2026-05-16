@@ -172,6 +172,31 @@ check "second claimant got hash suffix"   test "$DIR_S1" != "$DIR_S2"
 check "second claimant dir matches pattern" \
     bash -c "[[ '$DIR_S2' == '$FAKE_HOME/.claude-shared-'* ]]"
 
+# ===== 9. ccage handoff against a fixture-shaped session dir =====
+# Phase 6a. Verifies bin/ccage handoff produces a brief from a real
+# ccage-bootstrapped config dir, no API calls, no claude invocation.
+echo "[9] ccage handoff against a fixture-shaped session dir"
+mkdir -p "$TMP/projF"
+# Bootstrap the config dir via the wrapper (no flag injection needed).
+run_in_proj "$TMP/projF" "$TMP/log-f"
+DIR_F=$(grep '^CLAUDE_CONFIG_DIR=' "$TMP/log-f" | cut -d= -f2-)
+# Compute the slug Claude Code would use for this PWD.
+SLUG_F=$(printf '%s' "$TMP/projF" | sed 's|/|-|g')
+SESS_F="$DIR_F/projects/$SLUG_F"
+mkdir -p "$SESS_F"
+cp "$REPO/tests/fixtures/sessions/minimal.jsonl" "$SESS_F/test-min-001.jsonl"
+# Capture handoff brief to a file (check() can't see pipe output post-redirect).
+CCAGE_HANDOFF_DIR="$TMP/handoff-out" CLAUDE_CONFIG_DIR="$DIR_F" \
+    "$REPO/bin/ccage" handoff --project "$TMP/projF" --stdout > "$TMP/handoff-brief.md" 2>/dev/null || true
+check "handoff produced a brief"                 test -s "$TMP/handoff-brief.md"
+check "brief includes session ID"                grep -q "test-min-001" "$TMP/handoff-brief.md"
+check "brief lists user prompts section"         grep -q "User prompts" "$TMP/handoff-brief.md"
+check "brief lists files-touched section"        grep -q "Files touched" "$TMP/handoff-brief.md"
+check "brief extracts /tmp/foo.py file"          grep -q "/tmp/foo.py" "$TMP/handoff-brief.md"
+check "brief extracts last assistant turn"       grep -q "Here's a summary" "$TMP/handoff-brief.md"
+check "brief has cost estimate"                  grep -q '~\$' "$TMP/handoff-brief.md"
+check "no API call signal in brief generation"   bash -c "! grep -q 'api.anthropic.com\\|fetch\\|curl' '$TMP/handoff-brief.md'"
+
 # ===== Real claude integration (opt-in) =====
 if [ "${1:-}" = "--with-real-claude" ]; then
     echo

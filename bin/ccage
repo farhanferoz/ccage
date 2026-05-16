@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# ccage — CLI dispatcher.
+#
+# Installed as ~/.local/bin/ccage (or wherever install.sh's --prefix points).
+# Sources share/ccage-handoff.sh from the install layout: the dispatcher and
+# the libraries ship together, with $CCAGE_LIB pointing at the lib dir.
+#
+# Subcommands:
+#   handoff   — produce a Markdown brief from a session JSONL
+#   -h --help — this message
+
+# Resolve install layout. Two modes:
+#   1. Running from the source tree (development): bin/ccage → ../share/
+#   2. Running from an install: $PREFIX/bin/ccage → $PREFIX/share/ccage/
+# We try the source-tree layout first, then fall back to a standard share dir.
+_ccage_resolve_lib() {
+    local self="${BASH_SOURCE[0]}"
+    # follow symlinks
+    while [ -L "$self" ]; do
+        local target
+        target=$(readlink "$self")
+        case "$target" in
+            /*) self="$target" ;;
+            *)  self="$(dirname "$self")/$target" ;;
+        esac
+    done
+    local bin_dir lib_candidate
+    bin_dir=$(cd "$(dirname "$self")" && pwd)
+
+    for lib_candidate in \
+        "${CCAGE_LIB:-}" \
+        "$bin_dir/../share" \
+        "$bin_dir/../share/ccage" \
+        "$bin_dir/../lib/ccage"
+    do
+        [ -n "$lib_candidate" ] || continue
+        if [ -f "$lib_candidate/ccage-handoff.sh" ]; then
+            (cd "$lib_candidate" && pwd)
+            return 0
+        fi
+    done
+    # shellcheck disable=SC2016  # literal '$CCAGE_LIB' in user-facing hint
+    # shellcheck disable=SC2016  # $CCAGE_LIB is literal text shown in the error message
+    printf 'ccage: cannot locate share/ccage-handoff.sh — set $CCAGE_LIB?\n' >&2
+    return 2
+}
+
+case "${1:-}" in
+    handoff)
+        shift
+        CCAGE_LIB=$(_ccage_resolve_lib) || exit $?
+        # shellcheck source=../share/ccage-handoff.sh disable=SC1091
+        . "$CCAGE_LIB/ccage-handoff.sh"
+        _ccage_handoff_main "$@"
+        ;;
+    -h|--help|"")
+        cat <<EOF
+Usage: ccage <command> [args]
+
+Commands:
+  handoff   Produce a Markdown brief from a Claude Code session JSONL.
+
+Env:
+  CCAGE_LIB           Override library directory (default: \$(dirname \$0)/../share).
+  CCAGE_HANDOFF_DIR   Where handoff briefs are written. Default:
+                      \${XDG_DATA_HOME:-~/.local/share}/ccage/handoffs.
+
+ccage handoff -h for handoff-specific help.
+EOF
+        ;;
+    *)
+        printf 'ccage: unknown subcommand: %s\nusage: ccage handoff [...]\n' "$1" >&2
+        exit 2
+        ;;
+esac

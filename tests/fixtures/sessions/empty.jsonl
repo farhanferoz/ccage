@@ -1,0 +1,2 @@
+{"type":"queue-operation","sessionId":"test-empty-001","timestamp":"2026-05-16T08:00:00.000Z","operation":"enqueue","content":"never-finished"}
+{"type":"ai-title","sessionId":"test-empty-001","timestamp":"2026-05-16T08:00:00.500Z","title":"new session"}
