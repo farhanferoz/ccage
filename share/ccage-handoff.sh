@@ -6,15 +6,24 @@
 #
 # Public entry: _ccage_handoff_main "$@"
 
-# ---- pricing table (200K tier, cache-write = 1.25× input) -------------------
-# Refresh `# updated:` and add to CHANGELOG when Anthropic publishes new rates.
+# ---- pricing table (200K tier; rates per million tokens) --------------------
+# Cache-write = 1.25× input. Cache-read = 0.1× input. Refresh `# updated:` and
+# add to CHANGELOG when Anthropic publishes new rates.
 # updated: 2026-05-16
 _ccage_handoff_price_input() {
     case "$1" in
         claude-opus-4-7|claude-opus-4-6)   echo 15 ;;
         claude-sonnet-4-6|claude-sonnet-4-5) echo 3 ;;
         claude-haiku-4-5)                  echo 0.80 ;;
-        *)                                 echo 15 ;;  # default to opus rate as conservative upper bound
+        *)                                 echo 15 ;;
+    esac
+}
+_ccage_handoff_price_output() {
+    case "$1" in
+        claude-opus-4-7|claude-opus-4-6)   echo 75 ;;
+        claude-sonnet-4-6|claude-sonnet-4-5) echo 15 ;;
+        claude-haiku-4-5)                  echo 4 ;;
+        *)                                 echo 75 ;;
     esac
 }
 _ccage_handoff_price_cache_write() {
@@ -23,6 +32,14 @@ _ccage_handoff_price_cache_write() {
         claude-sonnet-4-6|claude-sonnet-4-5) echo 3.75 ;;
         claude-haiku-4-5)                  echo 1.00 ;;
         *)                                 echo 18.75 ;;
+    esac
+}
+_ccage_handoff_price_cache_read() {
+    case "$1" in
+        claude-opus-4-7|claude-opus-4-6)   echo 1.50 ;;
+        claude-sonnet-4-6|claude-sonnet-4-5) echo 0.30 ;;
+        claude-haiku-4-5)                  echo 0.08 ;;
+        *)                                 echo 1.50 ;;
     esac
 }
 
@@ -324,14 +341,24 @@ _ccage_handoff_truncate_words() {
     printf '%s\n…(%d words elided)…\n%s\n' "$first" $((n - max)) "$last"
 }
 
-# ---- compute estimated cost (dollars, 2 decimal) ----------------------------
-# Args: tokens model
-# Echoes a dollar amount like "$0.08"
+# ---- compute estimated total session cost (dollars, 2 decimal) --------------
+# Args: input_tokens output_tokens cache_write_tokens cache_read_tokens model
+# Echoes a dollar amount like "$9.25" representing the cumulative spend across
+# all four billing components: input + output + cache-write + cache-read.
 _ccage_handoff_cost() {
-    local tokens="$1" model="$2"
-    local rate
-    rate=$(_ccage_handoff_price_cache_write "$model")
-    awk -v t="$tokens" -v r="$rate" 'BEGIN { printf "$%.2f\n", t / 1000000 * r }'
+    local in_tok="$1" out_tok="$2" cw_tok="$3" cr_tok="$4" model="$5"
+    local in_rate out_rate cw_rate cr_rate
+    in_rate=$(_ccage_handoff_price_input "$model")
+    out_rate=$(_ccage_handoff_price_output "$model")
+    cw_rate=$(_ccage_handoff_price_cache_write "$model")
+    cr_rate=$(_ccage_handoff_price_cache_read "$model")
+    # Note: gawk reserves `or` as a builtin — use `outr` instead.
+    awk -v i="$in_tok" -v o="$out_tok" -v cw="$cw_tok" -v cr="$cr_tok" \
+        -v ir="$in_rate" -v outr="$out_rate" -v cwr="$cw_rate" -v crr="$cr_rate" \
+        'BEGIN {
+            total = i*ir + o*outr + cw*cwr + cr*crr
+            printf "$%.2f\n", total / 1000000
+        }'
 }
 
 # ---- clipboard helpers -----------------------------------------------------
@@ -396,7 +423,7 @@ _ccage_handoff_generate() {
     cr_tok=$(printf '%s\n' "$totals" | sed -n 's/.*cache_read=\([0-9]*\).*/\1/p')
 
     local cost_so_far
-    cost_so_far=$(_ccage_handoff_cost "${cw_tok:-0}" "$model")
+    cost_so_far=$(_ccage_handoff_cost "${in_tok:-0}" "${out_tok:-0}" "${cw_tok:-0}" "${cr_tok:-0}" "$model")
 
     # age in seconds
     local age_sec=""
