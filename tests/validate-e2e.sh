@@ -197,6 +197,83 @@ check "brief extracts last assistant turn"       grep -q "Here's a summary" "$TM
 check "brief has cost estimate"                  grep -q '~\$' "$TMP/handoff-brief.md"
 check "no API call signal in brief generation"   bash -c "! grep -q 'api.anthropic.com\\|fetch\\|curl' '$TMP/handoff-brief.md'"
 
+# ===== 10. resume cost interception gates (Phase 6b) =====
+# Verifies the interceptor's non-interactive gates: CCAGE_DISABLE,
+# CCAGE_NO_RESUME_PROMPT, and non-tty stdin all pass-through silently.
+# Cannot exercise the actual prompt UI here (it reads from /dev/tty,
+# which is unavailable in CI); the prompt is unit-tested in bats.
+echo "[10] resume interception gates pass through silently"
+mkdir -p "$TMP/projG"
+
+# 10a: CCAGE_NO_RESUME_PROMPT=1 should pass through with -c, no prompt to stderr.
+run_in_proj "$TMP/projG" "$TMP/log-g-noprompt" CCAGE_NO_RESUME_PROMPT=1
+DIR_G=$(grep '^CLAUDE_CONFIG_DIR=' "$TMP/log-g-noprompt" | cut -d= -f2-)
+
+# Drop a substantive fixture into the project's session dir so the cost
+# estimator has something to chew on. Without this, the empty-session path
+# trivially short-circuits and we wouldn't be testing the gate.
+SLUG_G=$(printf '%s' "$TMP/projG" | sed 's|/|-|g')
+mkdir -p "$DIR_G/projects/$SLUG_G"
+cp "$REPO/tests/fixtures/sessions/minimal.jsonl" "$DIR_G/projects/$SLUG_G/test-min.jsonl"
+
+# Re-run with -c and capture stderr — gate should suppress the prompt.
+STDERR_LOG_G="$TMP/stderr-g.log"
+(
+    unset CLAUDE_CONFIG_DIR CLAUDE_CODE_ATTRIBUTION_HEADER DISABLE_AUTOUPDATER
+    unset CCAGE_DISABLE CCAGE_KEEP_ATTRIBUTION CCAGE_KEEP_AUTOUPDATER
+    unset CCAGE_SHARE_FROM CCAGE_SHARE_DIRS CCAGE_SLOT
+    unset CCAGE_NO_ONBOARDING_PATCH CCAGE_NO_AUTO_SIGNORE
+    cd "$TMP/projG"
+    HOME=$FAKE_HOME
+    PATH="$MOCK_BIN:$PATH"
+    MOCK_LOG="$TMP/log-g-c"
+    export HOME PATH MOCK_LOG
+    export CCAGE_NO_RESUME_PROMPT=1
+    # shellcheck disable=SC1090
+    source "$WRAPPER"
+    claude -c 2> "$STDERR_LOG_G"
+)
+check "CCAGE_NO_RESUME_PROMPT=1: no prompt on -c"     test ! -s "$STDERR_LOG_G" || \
+    bash -c "! grep -q '\[r\]esume' '$STDERR_LOG_G'"
+check "CCAGE_NO_RESUME_PROMPT=1: claude still invoked" grep -qx "MOCK_INVOKED" "$TMP/log-g-c"
+
+# 10b: CCAGE_DISABLE=1 + -c should bypass entirely.
+(
+    unset CLAUDE_CONFIG_DIR CLAUDE_CODE_ATTRIBUTION_HEADER DISABLE_AUTOUPDATER
+    unset CCAGE_KEEP_ATTRIBUTION CCAGE_KEEP_AUTOUPDATER
+    unset CCAGE_SHARE_FROM CCAGE_SHARE_DIRS CCAGE_SLOT
+    unset CCAGE_NO_ONBOARDING_PATCH CCAGE_NO_AUTO_SIGNORE CCAGE_NO_RESUME_PROMPT
+    cd "$TMP/projG"
+    HOME=$FAKE_HOME
+    PATH="$MOCK_BIN:$PATH"
+    MOCK_LOG="$TMP/log-g-disable"
+    export HOME PATH MOCK_LOG
+    export CCAGE_DISABLE=1
+    # shellcheck disable=SC1090
+    source "$WRAPPER"
+    claude -c 2> "$TMP/stderr-g-disable.log"
+)
+check "CCAGE_DISABLE=1 with -c: no prompt"            bash -c "! grep -q '\[r\]esume' '$TMP/stderr-g-disable.log' 2>/dev/null"
+check "CCAGE_DISABLE=1 with -c: claude invoked"       grep -qx "MOCK_INVOKED" "$TMP/log-g-disable"
+
+# 10c: non-resume invocation (e.g. --print) never prompts even without gates.
+(
+    unset CLAUDE_CONFIG_DIR CLAUDE_CODE_ATTRIBUTION_HEADER DISABLE_AUTOUPDATER
+    unset CCAGE_DISABLE CCAGE_KEEP_ATTRIBUTION CCAGE_KEEP_AUTOUPDATER
+    unset CCAGE_SHARE_FROM CCAGE_SHARE_DIRS CCAGE_SLOT
+    unset CCAGE_NO_ONBOARDING_PATCH CCAGE_NO_AUTO_SIGNORE CCAGE_NO_RESUME_PROMPT
+    cd "$TMP/projG"
+    HOME=$FAKE_HOME
+    PATH="$MOCK_BIN:$PATH"
+    MOCK_LOG="$TMP/log-g-print"
+    export HOME PATH MOCK_LOG
+    # shellcheck disable=SC1090
+    source "$WRAPPER"
+    claude --print "hi" 2> "$TMP/stderr-g-print.log"
+)
+check "non-resume invocation: no prompt"              bash -c "! grep -q '\[r\]esume' '$TMP/stderr-g-print.log' 2>/dev/null"
+check "non-resume invocation: claude invoked"         grep -qx "MOCK_INVOKED" "$TMP/log-g-print"
+
 # ===== Real claude integration (opt-in) =====
 if [ "${1:-}" = "--with-real-claude" ]; then
     echo

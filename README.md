@@ -156,9 +156,25 @@ PY
 }
 ```
 
-## Avoiding `-r`/`-c`'s cache rewrite cost — `ccage handoff`
+## Avoiding `-r`/`-c`'s cache rewrite cost
 
 Claude Code's `--resume` / `--continue` always cache-misses the message prefix on the first turn after resume (structural diff, not TTL — see GitHub issues #42309, #43657). On a long Opus session that's $0.50–$2 of cache-write tokens every resume, even seconds after `/clear`.
+
+ccage helps two ways:
+
+### Cost prompt before `-r`/`-c`
+
+When you run `claude -c` or `claude -r <uuid>`, ccage estimates the rewrite cost from the session JSONL and asks before launching:
+
+```
+ccage: Continuing most-recent session 4f616b4b · 8h ago · claude-opus-4-7
+       Resume will rewrite ~70K tokens. Estimated cost: $1.10–$1.65.
+       [r]esume / [h]andoff / [c]ancel?
+```
+
+Single keypress, no Enter. Gates: `CCAGE_NO_RESUME_PROMPT=1` to disable; `CCAGE_RESUME_PROMPT_MIN_USD` to raise/lower the threshold (default $0.25); non-tty stdin and `CCAGE_DISABLE=1` also skip the prompt.
+
+### `ccage handoff` — pasteable brief for a fresh session
 
 `ccage handoff` turns a session JSONL into a Markdown brief you can paste as the first message of a fresh `claude` session. Zero API calls — pure shell + jq.
 
@@ -196,8 +212,11 @@ All off by default. Set any of these before launching `claude`:
 | `CCAGE_KEEP_AUTOUPDATER=1` | Don't touch `DISABLE_AUTOUPDATER`. |
 | `CCAGE_NO_AUTO_SIGNORE=1` | Don't create a baseline `.claudesignore`. |
 | `CCAGE_NO_ONBOARDING_PATCH=1` | Don't pre-set `hasCompletedOnboarding`. |
+| `CCAGE_NO_RESUME_PROMPT=1` | Skip the resume cost prompt for `-r`/`-c`. |
+| `CCAGE_RESUME_PROMPT_MIN_USD` | Threshold below which the prompt is skipped (default `0.25`). |
 | `CCAGE_ROOT=/some/dir` | Parent directory for isolated configs (default `$HOME`). |
 | `CCAGE_PREFIX=.claude-` | Directory name prefix (default `.claude-`). |
+| `CCAGE_HANDOFF_DIR` | Where `ccage handoff` writes briefs (default `~/.local/share/ccage/handoffs`). |
 
 ## FAQ
 

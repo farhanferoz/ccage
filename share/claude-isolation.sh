@@ -184,6 +184,269 @@ build/
 SIGNORE
 }
 
+# ============================================================================
+# Resume cost interception (Phase 6b)
+#
+# claude -r / claude -c trigger a structural cache miss on the message prefix
+# every time, regardless of TTL (Claude Code's processSessionStartHooks +
+# reorderAttachmentsForAPI shuffle bytes at messages[0]; see GitHub
+# anthropics/claude-code #42309, #43657). Each cold resume rewrites the full
+# accumulated cache at ~1.25× input rate. On a long Opus session that's real
+# money — $0.50 to $2+ per resume.
+#
+# The interceptor:
+#   1. Detects -c / --continue / -r <uuid> / --resume <uuid> in args
+#   2. Estimates rewrite cost from the session JSONL's peak cache_read
+#   3. Prompts the user [r]esume / [h]andoff / [c]ancel
+#
+# Gates: CCAGE_DISABLE=1, CCAGE_NO_RESUME_PROMPT=1, non-tty stdin, or
+# estimated cost below CCAGE_RESUME_PROMPT_MIN_USD (default 0.25) all
+# pass-through without prompting.
+# ============================================================================
+
+# Pricing — 200K tier, cache-write = 1.25× input. Refresh `# updated:` below
+# when Anthropic publishes new rates and add a CHANGELOG entry.
+# Kept inline rather than in a separate ccage-pricing.sh so the wrapper has
+# zero external sourcing dependency (the rc loader handles only one file).
+# Duplicated in share/ccage-handoff.sh — keep both in sync.
+# updated: 2026-05-16
+_ccage_resume_price_cache_write() {
+    case "$1" in
+        claude-opus-4-7|claude-opus-4-6)     echo 18.75 ;;
+        claude-sonnet-4-6|claude-sonnet-4-5) echo 3.75 ;;
+        claude-haiku-4-5)                    echo 1.00 ;;
+        *)                                   echo 18.75 ;;  # conservative default
+    esac
+}
+
+# Pure decision function — tested directly. r/R/<enter> → resume,
+# h/H → handoff, anything else → cancel (safe default for unrecognized input).
+_ccage_resume_decide() {
+    case "$1" in
+        r|R|"") echo resume ;;
+        h|H)    echo handoff ;;
+        *)      echo cancel ;;
+    esac
+}
+
+# Detect a resume invocation that we can confidently intercept.
+#
+# In scope (deterministic — we know which session):
+#   -c, --continue                  → most-recent session
+#   -r <uuid-prefix>                → specific session
+#   --resume <uuid-prefix>          → specific session
+#
+# Out of scope (Claude Code may show its own picker — we can't predict):
+#   bare -r / bare --resume (no arg, or next arg is another flag)
+_ccage_is_resume_invocation() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -c|--continue) return 0 ;;
+            -r|--resume)
+                # Need the next token to look like a session id (UUID prefix).
+                local next="${2:-}"
+                if [ -n "$next" ] && [[ "$next" =~ ^[0-9a-fA-F][0-9a-fA-F-]{4,}$ ]]; then
+                    return 0
+                fi
+                return 1
+                ;;
+        esac
+        shift
+    done
+    return 1
+}
+
+# Estimate cache-rewrite cost as a range. Echoes: "<lo>\t<hi>\t<model>\t<tokens>"
+# where lo/hi are dollar amounts (2 decimal) and tokens is the estimated
+# message-prefix rewrite size (peak cache_read minus ~19K tools+system prefix).
+# Empty session or no substantive cache_read → "0.00\t0.00\tunknown\t0".
+_ccage_resume_estimate_cost_usd() {
+    local jsonl="$1"
+    [ -f "$jsonl" ] || { printf '0.00\t0.00\tunknown\t0\n'; return 0; }
+
+    # Peak cache_read across substantive turns.
+    local peak
+    peak=$(jq -Rrs '
+        split("\n") | .[] | select(length > 0) | fromjson? // empty |
+        select(.type == "assistant")
+        | .message.usage.cache_read_input_tokens // 0
+        | select(. > 1000)
+    ' "$jsonl" 2>/dev/null | sort -rn | head -1)
+    peak="${peak:-0}"
+
+    # Last model used (skip <synthetic>).
+    local model
+    model=$(jq -Rrs '
+        split("\n") | .[] | select(length > 0) | fromjson? // empty |
+        select(.type == "assistant" and .message.model != null and .message.model != "<synthetic>")
+        | .message.model
+    ' "$jsonl" 2>/dev/null | tail -1)
+    model="${model:-unknown}"
+
+    # Rewrite tokens ≈ peak_cache_read − ~19K (tools+system prefix, which
+    # hits at account level even after structural resume).
+    local rewrite=$((peak - 19000))
+    [ "$rewrite" -lt 0 ] && rewrite=0
+
+    if [ "$rewrite" -eq 0 ]; then
+        printf '0.00\t0.00\t%s\t0\n' "$model"
+        return 0
+    fi
+
+    local rate
+    rate=$(_ccage_resume_price_cache_write "$model")
+
+    # ±25% uncertainty band — empirical precision from sampled JSONLs.
+    awk -v r="$rewrite" -v p="$rate" -v m="$model" 'BEGIN {
+        mid = r / 1000000 * p
+        printf "%.2f\t%.2f\t%s\t%d\n", mid * 0.75, mid * 1.25, m, r
+    }'
+}
+
+# Should we prompt? Returns 0 if yes, non-zero if cost is below the threshold
+# (or the JSONL has no signal). Threshold is dollar-denominated:
+# CCAGE_RESUME_PROMPT_MIN_USD (default 0.25).
+_ccage_resume_should_prompt() {
+    local jsonl="$1"
+    local threshold="${CCAGE_RESUME_PROMPT_MIN_USD:-0.25}"
+    local lo hi
+    IFS=$'\t' read -r lo hi _ _ < <(_ccage_resume_estimate_cost_usd "$jsonl")
+    # Use the upper bound for the threshold comparison — be loud rather than quiet.
+    awk -v hi="$hi" -v t="$threshold" 'BEGIN { exit (hi >= t) ? 0 : 1 }'
+}
+
+# Format a session-age string from an ISO 8601 timestamp.
+_ccage_resume_age_human() {
+    local ts="$1"
+    [ -n "$ts" ] || { echo "unknown"; return; }
+    local last_epoch now_epoch sec
+    last_epoch=$(date -d "$ts" +%s 2>/dev/null || date -j -f '%Y-%m-%dT%H:%M:%S' "${ts%.*}" +%s 2>/dev/null || echo "")
+    [ -n "$last_epoch" ] || { echo "unknown"; return; }
+    now_epoch=$(date +%s)
+    sec=$((now_epoch - last_epoch))
+    if [ "$sec" -lt 60 ]; then echo "${sec}s ago"
+    elif [ "$sec" -lt 3600 ]; then echo "$((sec / 60))m ago"
+    elif [ "$sec" -lt 86400 ]; then echo "$((sec / 3600))h $((sec % 3600 / 60))m ago"
+    else echo "$((sec / 86400))d ago"
+    fi
+}
+
+# Resolve session JSONL for current PWD + CLAUDE_CONFIG_DIR + optional id.
+# Echoes path; returns 1 on miss (no error — interceptor will pass through).
+_ccage_resume_locate_jsonl() {
+    local id_prefix="${1:-}"
+    local slug="${PWD//\//-}"
+    local session_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$slug"
+    [ -d "$session_dir" ] || return 1
+
+    if [ -n "$id_prefix" ]; then
+        local f
+        for f in "$session_dir/$id_prefix"*.jsonl; do
+            [ -f "$f" ] && { printf '%s\n' "$f"; return 0; }
+        done
+        return 1
+    fi
+
+    # Most-recent by mtime.
+    local newest
+    # shellcheck disable=SC2012  # mtime sort; find -printf isn't portable to macOS
+    newest=$(ls -t "$session_dir"/*.jsonl 2>/dev/null | head -1)
+    [ -n "$newest" ] && [ -f "$newest" ] || return 1
+    printf '%s\n' "$newest"
+}
+
+# Extract the session id (or empty) from positional resume args.
+_ccage_resume_extract_id() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -r|--resume)
+                local next="${2:-}"
+                if [ -n "$next" ] && [[ "$next" =~ ^[0-9a-fA-F][0-9a-fA-F-]{4,}$ ]]; then
+                    printf '%s\n' "$next"
+                    return 0
+                fi
+                ;;
+        esac
+        shift
+    done
+    return 1
+}
+
+# Main interceptor. Returns 0 to "continue to claude as normal," non-zero to
+# "cancel the claude invocation" (user picked cancel or handoff).
+#
+# Gates (all return 0 = pass-through):
+#   - args don't look like a deterministic resume
+#   - CCAGE_DISABLE=1                  (the wrapper's outer guard takes over)
+#   - CCAGE_NO_RESUME_PROMPT=1
+#   - non-tty stdin                    (can't prompt; user is scripting)
+#   - estimated cost below threshold
+_ccage_intercept_resume() {
+    if [ -n "${CCAGE_DISABLE:-}" ]; then return 0; fi
+    if [ -n "${CCAGE_NO_RESUME_PROMPT:-}" ]; then return 0; fi
+    if ! _ccage_is_resume_invocation "$@"; then return 0; fi
+    if [ ! -t 0 ]; then return 0; fi   # scripted; no tty to prompt on
+
+    local id
+    id=$(_ccage_resume_extract_id "$@" || true)
+
+    local jsonl
+    if ! jsonl=$(_ccage_resume_locate_jsonl "$id"); then
+        # No session found — let claude itself report the error.
+        return 0
+    fi
+
+    if ! _ccage_resume_should_prompt "$jsonl"; then return 0; fi
+
+    # Pull the data we'll show in the prompt copy.
+    local lo hi model rewrite
+    IFS=$'\t' read -r lo hi model rewrite < <(_ccage_resume_estimate_cost_usd "$jsonl")
+    local session_id
+    session_id=$(jq -Rrs 'split("\n") | .[] | select(length > 0) | fromjson? // empty | select(.sessionId != null) | .sessionId' "$jsonl" 2>/dev/null | head -1)
+    session_id="${session_id:-unknown}"
+    local last_ts
+    last_ts=$(jq -Rrs 'split("\n") | .[] | select(length > 0) | fromjson? // empty | select(.timestamp != null) | .timestamp' "$jsonl" 2>/dev/null | tail -1)
+    local age
+    age=$(_ccage_resume_age_human "$last_ts")
+
+    # Pick the verb based on -c vs -r<id>.
+    local verb="Resuming"
+    case " $* " in *" -c "*|*" --continue "*) verb="Continuing most-recent" ;; esac
+
+    {
+        printf 'ccage: %s session %s · %s · %s\n' "$verb" "${session_id:0:8}" "$age" "$model"
+        printf '       Resume will rewrite ~%dK tokens (message prefix). Estimated cost: $%s–$%s.\n' \
+            $((rewrite / 1000)) "$lo" "$hi"
+        printf '       (Claude Code resume always misses cache; not a TTL issue — see GitHub #42309, #43657.)\n'
+        printf '       [r]esume / [h]andoff / [c]ancel? '
+    } >&2
+
+    local response decision
+    read -rn 1 -s response < /dev/tty
+    printf '%s\n' "$response" >&2
+    decision=$(_ccage_resume_decide "$response")
+
+    case "$decision" in
+        resume)  return 0 ;;
+        handoff)
+            # Find the installed ccage CLI on PATH and dispatch to it for the
+            # actual brief generation. If not on PATH, point at the source-tree
+            # location via $CCAGE_LIB-style env override.
+            if command -v ccage >/dev/null 2>&1; then
+                ccage handoff ${id:+"$id"} >&2
+            else
+                # shellcheck disable=SC2016  # literal `ccage` and `./install.sh` in user hint
+                printf 'ccage: handoff path requires `ccage` on PATH — install with ./install.sh\n' >&2
+            fi
+            return 1
+            ;;
+        cancel|*)
+            printf 'ccage: cancelled\n' >&2
+            return 1
+            ;;
+    esac
+}
+
 # ---- the wrapper ----
 claude() {
     if [ -n "${CCAGE_DISABLE:-}" ]; then
@@ -199,6 +462,11 @@ claude() {
 
     [ -z "${CCAGE_KEEP_ATTRIBUTION:-}" ] && export CLAUDE_CODE_ATTRIBUTION_HEADER=0
     [ -z "${CCAGE_KEEP_AUTOUPDATER:-}" ] && export DISABLE_AUTOUPDATER=1
+
+    # Resume cost prompt — passes through silently for non-resume args, gates,
+    # and below-threshold cases. Returns non-zero only when user cancels or
+    # picks handoff (in which case we don't exec claude).
+    _ccage_intercept_resume "$@" || return $?
 
     _ccage_extra_args=()
     _ccage_pre_exec_hook "$PWD" "$CLAUDE_CONFIG_DIR"

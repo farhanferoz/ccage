@@ -97,6 +97,78 @@ Idempotency is the contract: hooks must only add missing keys, never overwrite e
 
 ---
 
+## Resume cost interception (`-r` / `-c`) [shipped]
+
+The `claude()` shell function intercepts resume invocations to surface the cache-rewrite cost before launch. Motivation: Claude Code's `--resume` / `--continue` always cache-miss the message prefix (structural diff at `messages[0]`, not TTL — see GitHub #42309, #43657). On long sessions this is real money ($0.50–$2/resume on Opus).
+
+### Detection
+
+| Args | Behavior |
+|---|---|
+| `-c`, `--continue` | Intercept. Use most-recent session JSONL by mtime. |
+| `-r <uuid-prefix>`, `--resume <uuid-prefix>` | Intercept. Look up the specific session by UUID prefix. |
+| Bare `-r` / `--resume` (no id, or next arg is another flag) | **Pass through.** Claude Code's own session picker may run; we can't predict the user's choice. |
+| Any other invocation | Pass through silently. |
+
+### Prompt UX
+
+```
+ccage: Continuing most-recent session 4f616b4b · 8h ago · claude-opus-4-7
+       Resume will rewrite ~70K tokens (message prefix). Estimated cost: $1.10–$1.65.
+       (Claude Code resume always misses cache; not a TTL issue — see GitHub #42309, #43657.)
+       [r]esume / [h]andoff / [c]ancel?
+```
+
+Single keypress, no Enter needed. Reads from `/dev/tty` so it works even when stdin is piped.
+
+### Branch actions
+
+- `r` / `R` / Enter → resume normally (claude proceeds).
+- `h` / `H` → invokes `ccage handoff <session-prefix>` and cancels the resume.
+- Any other key → cancel.
+
+### Cost estimation
+
+Reads the session JSONL's per-turn `message.usage.cache_read_input_tokens`, takes the max value across substantive turns (>1000 tokens), subtracts an estimated 19,000-token tools+system prefix that survives resume at the account level, applies the model's cache-write rate, and reports a ±25% range:
+
+```
+rewrite_estimate = max(cache_read_input_tokens across substantive turns) - 19000
+cost_lo = rewrite_estimate * 0.75 * cache_write_rate / 1e6
+cost_hi = rewrite_estimate * 1.25 * cache_write_rate / 1e6
+```
+
+±25% reflects empirical drift between predicted and actual rewrite size (sample-based, two JSONLs at 2-min and 3-hour gaps).
+
+### Env vars
+
+| Var | Default | Effect |
+|---|---|---|
+| `CCAGE_NO_RESUME_PROMPT` | unset | If set to any non-empty value, skips the interceptor entirely. Pure pass-through. |
+| `CCAGE_RESUME_PROMPT_MIN_USD` | `0.25` | Skip the prompt when the high-end estimate is below this dollar amount. Default $0.25 ≈ noisy enough to be worth showing on Opus, quiet enough to avoid prompt-fatigue on small sessions. |
+| `CCAGE_DISABLE` | unset | Pre-existing global opt-out — the wrapper's outer `CCAGE_DISABLE` branch short-circuits before reaching the interceptor. |
+
+### Gates that pass through silently (no prompt)
+
+- `CCAGE_DISABLE=1` (already documented above)
+- `CCAGE_NO_RESUME_PROMPT=1`
+- Stdin is not a tty (`[ ! -t 0 ]`) — common in scripted/piped contexts.
+- Estimated cost below `CCAGE_RESUME_PROMPT_MIN_USD`.
+- No session JSONL found for the current project (claude itself will error appropriately).
+- Bare `-r` / `--resume` with no UUID-shaped following arg.
+
+### Pricing table
+
+Hardcoded in `share/claude-isolation.sh`. Refresh the `# updated:` header and bump CHANGELOG on rate changes:
+
+| Model | Cache-write $/MTok (200K tier) |
+|---|---:|
+| claude-opus-4-7, claude-opus-4-6 | 18.75 |
+| claude-sonnet-4-6, claude-sonnet-4-5 | 3.75 |
+| claude-haiku-4-5 | 1.00 |
+| (unknown) | 18.75 (conservative upper bound) |
+
+---
+
 ## `ccage handoff` — offline session brief [shipped]
 
 Generates a Markdown handoff brief from a Claude Code session JSONL. **Zero API calls** — pure shell + jq. Use case: avoid `claude -r`/`-c`'s structural prompt-cache rewrite tax (Claude Code resumes always cache-miss on the message prefix — see GitHub issues #42309, #43657). Generate a brief from the prior session, start a fresh `claude`, paste the brief as the first message.
