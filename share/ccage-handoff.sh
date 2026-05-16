@@ -146,6 +146,21 @@ _ccage_handoff_count_prompts() {
             and (.isMeta // false) == false
             and (.toolUseResult // null) == null
         ))
+        | map(
+            .message.content as $c
+            | if ($c | type) == "string" then $c
+              elif ($c | type) == "array" then
+                ([$c[]? | select(.type == "text") | .text] | join("\n"))
+              else "" end
+        )
+        | map(select(
+            length > 0
+            and (startswith("<command-name>") | not)
+            and (startswith("<local-command-stdout>") | not)
+            and (startswith("<system-reminder>") | not)
+            and (startswith("<command-message>") | not)
+            and (startswith("<command-args>") | not)
+        ))
         | length
     ' "$jsonl" 2>/dev/null || echo 0
 }
@@ -183,6 +198,17 @@ _ccage_handoff_prompts_json() {
               else "" end
         )
         | map(select(length > 0))
+        # Drop synthetic slash-command echoes (`<command-name>`, `<local-command-stdout>`,
+        # `<system-reminder>`, etc.). These appear in real Claude Code transcripts
+        # whenever a user invokes a slash command — the visible "prompt" is the
+        # auto-emitted command-info block, not human intent.
+        | map(select(
+            (startswith("<command-name>") | not)
+            and (startswith("<local-command-stdout>") | not)
+            and (startswith("<system-reminder>") | not)
+            and (startswith("<command-message>") | not)
+            and (startswith("<command-args>") | not)
+        ))
     ' "$jsonl" 2>/dev/null
 }
 
