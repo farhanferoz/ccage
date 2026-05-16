@@ -4,33 +4,52 @@ Pointer file for resuming work without blowing up context. Update the "Current s
 
 ## Current state
 
-- **Phase:** Phase 5 (CI) locally validated, pending push. Opus signed off on § 5.1 + § 5.2; § 5.3 (first green run + intentional-red verification) is blocked on a GitHub remote. Phase 6 (nice-to-haves) and Phase 7 (publish) come after.
-- **Last session:** 2026-04-23. Phase 5: `.github/workflows/ci.yml` shipped with `os: [ubuntu-latest, macos-latest] × shell: [bash, zsh]` matrix. Two simplify + two Opus review passes.
-- **Local validation done** (Docker + local): YAML valid, shellcheck clean, bats 31/31 in ubuntu container + locally, bash smoke test in ubuntu container, **zsh smoke test under real zsh (zshusers/zsh image)** — directly confirms `typeset -f claude >/dev/null` works in both shells. `act` run failed on `apt-get` finding shellcheck in its stripped container; not a workflow bug (GitHub's ubuntu-latest image ships shellcheck pre-installed, so `command -v shellcheck` short-circuits before apt).
+- **Phase:** 6a + 6b + 6c **complete and committed locally.** Phase 7 (publish) is blocked only on § 5.3 — the user pushing to a GitHub remote and watching the CI matrix go green (and confirming an intentional-red branch produces a failing run).
+- **Latest commits** (most recent first):
+  - `ec19861` fix: zsh-compatible read for resume cost prompt (Tier 2 review fix)
+  - `380603b` feat: -r/-c cost prompt interception (Phase 6b)
+  - `be103f2` fix: ${var:-} defaults for set -u safety in claude-isolation.sh
+  - `1191f10` feat: ccage handoff — offline session brief generator (Phase 6a)
+  - `c306f8d` fix: uninstall left orphaned source loop in user rc
+  - `54fea5b` docs: Phase 6 handoff + resume cost interception spec
+- **What works locally**:
+  - **118 bats tests pass** across `test_handoff` (42), `test_install_uninstall` (14), `test_resume_interception` (28), `test_set_u_safety` (3), plus the 31 pre-existing wrapper tests.
+  - **44 e2e checks pass** in `tests/validate-e2e.sh` (the original 30 mock-stub assertions + 8 new for `ccage handoff` against a real ccage-bootstrapped session + 3 new for `-r`/`-c` interception gates + ~3 baseline).
+  - **shellcheck clean** across `install.sh`, `uninstall.sh`, `share/*.sh`, `bin/ccage`, `tests/validate-e2e.sh`.
+  - **Phase 6c real-world validation**: produced a 145-line / 11.7KB Markdown brief from a real 91-prompt / 688-assistant-turn session JSONL at `~/.claude-ab-task_a/projects/-home-ff235-dev-mercor-agentic-bench-gh8nb-task-a/69f299d8-1da0-486f-ae99-203642e5fcbe.jsonl`. All four sections (User prompts, Files touched, Commands run, Last assistant turn) populated with substantive content. Cost summary: ~$33 in cache writes paid across 31 days of session activity. Verdict: brief is a usable context bootstrap.
+- **What's NOT done by me** (waiting on user):
+  - `git push -u origin main` to the GitHub remote (per CLAUDE.md safety rules + explicit "don't push without my approval" from this session). After push, the user verifies § 5.3 acceptance:
+    1. First CI run goes green on all 4 matrix cells (`ubuntu-latest`/`macos-latest` × `bash`/`zsh`).
+    2. An intentional-red commit on a throwaway branch produces a failing CI run.
 
 ## Next action
 
-**User pushes to GitHub** to a new remote, then verifies § 5.3: first run green on all 4 matrix cells, and an intentional-red commit on a branch produces a failing run.
+**User pushes `main` to GitHub remote.** Then verifies § 5.3 (matrix green on first run + intentional-red branch fails). After that, Phase 7 publish is unblocked: tag `v0.1.0`, move CHANGELOG `Unreleased` → dated section.
 
-After § 5.3 clears, next phases:
-- **Phase 6** (post-v0, queued): `ccage list`, `ccage doctor`, `ccage prune`. Each is its own tests-first phase.
-  - Candidate (doctor-adjacent): **stale-session nudge.** If the newest session JSONL under `$CLAUDE_CONFIG_DIR/projects/<slug>/` is older than ~2h on `claude` invocation, print a one-line hint suggesting `/clear` or session-handoff. Motivation: Anthropic prompt cache TTL is 5min (ephemeral) / 1h (extended); overnight idle sessions always cold-miss, and the morning's first message re-writes the full accumulated context at cache-write rates. ccage can't extend the TTL, but it can warn before the user pays for it. Not a fix, just a nudge — gate behind an env var (`CCAGE_STALE_NUDGE=0` to silence) so it can't become noise.
-- **Phase 7** (publish): tag `v0.1.0`, move CHANGELOG `Unreleased` → dated section.
+## Validation status (2026-05-16)
 
-## Validation status (2026-04-27)
+Locally green on every layer:
+- `./tests/bats/bin/bats tests/test_*.bats` — 118/118 pass.
+- `./tests/validate-e2e.sh` — 44/44 pass (no real-claude run; that scenario remains opt-in via `--with-real-claude`).
+- `shellcheck install.sh uninstall.sh share/*.sh bin/ccage tests/validate-e2e.sh` — clean.
+- Real-world handoff brief on a 91-prompt session — sections populated correctly, content useful.
 
-End-to-end behavior verified via `tests/validate-e2e.sh` — 30 mock-stub checks plus 9 real-`claude` checks (gated behind `--with-real-claude`, ~$0.005 in API spend). Together they cover parallel-session isolation, env defaults, onboarding patch, skill/command/agent symlinking, `CCAGE_DISABLE`, `CCAGE_KEEP_*` opt-outs, idempotency, basename-collision hashing, and confirmation that the real `claude` binary accepts what ccage produces (patched `.claude.json`, symlinked subdirs, etc.). Combined with 31 bats unit tests and shellcheck clean, the wrapper is well-validated. Still unvalidated: cache-hit improvement claim (needs tokenol soak), real GH macOS runner (blocked on § 5.3 push).
+Still unvalidated (and out of my scope without push permission):
+- First green CI run on real GH runners (§ 5.3).
+- Zsh runtime of the `-r`/`-c` interception's interactive prompt (the new `read -k 1` branch). Code was added based on Tier 2 review analysis without a local zsh to verify against; CI's zsh smoke test sources the wrapper but doesn't enter the interactive prompt code path. Worth a manual zsh shell smoke once available.
 
-## Known bugs
+## Tier 2 review (2026-05-16) — outcome
 
-- **`claude` is a function, so `timeout`/`nohup`/`xargs` bypass the wrapper.** Anything that exec's `claude` as an external command (rather than going through the shell) finds the real binary in PATH and skips ccage's bootstrap entirely. Discovered while writing `tests/validate-e2e.sh` (the test wrapped `timeout 60 claude` and silently lost all bootstrap effects). Not a bug per se — that's how shell functions work — but worth one line in README's "limitations" before publish, or shipping an alternate `ccage-run` script entry point that bridges the function for non-shell callers.
+- Five commits since baseline `39f30c4`. ~2500 line additions across 18 files.
+- External review via gemini 0.42.0 (`/home/ff235/.npm-global/bin/gemini`) on the full diff `39f30c4..HEAD`.
+- One **high-severity** finding addressed: `read -rn 1 -s` is bash-only — zsh uses `-k N`. Fixed in commit `ec19861`. Gemini missed it; surfaced on a follow-up audit pass.
+- Four **false positives** rejected (slug derivation, awk truncation correctness, backtick "injection," uninstall.sh awk regex — the last was already fixed in `c306f8d`).
+- No medium-severity defects.
+- Verdict: ship-ready pending § 5.3.
 
-- **Wrapper unsafe under `set -u`.** `share/claude-isolation.sh` reads `CCAGE_DISABLE`, `CCAGE_KEEP_ATTRIBUTION`, `CCAGE_KEEP_AUTOUPDATER`, `CCAGE_NO_ONBOARDING_PATCH`, `CCAGE_NO_AUTO_SIGNORE` without `${var:-}` defaults. Sourcing into a strict shell (any user with `set -u` in their shell init) crashes on first `claude` invocation with "unbound variable". Five-line fix; surface before Phase 7 (publish). Found by `tests/validate-e2e.sh` 2026-04-27.
+## Known bugs (still open, low priority)
 
-## Known fragilities to watch
-
-- The `command -v shellcheck || sudo apt-get install -y shellcheck` guard assumes shellcheck is pre-installed on `ubuntu-latest` (currently true). If that ever changes upstream, CI will fail because there's no `apt-get update` before the install. Flagged but not worth fixing now (costs ~8s every run for a hypothetical future).
-- `shell: 'zsh -e {0}'` uses documented custom-shell template syntax but was not run against a real GitHub Actions runner locally. First push will confirm.
+- **Zsh `nomatch` on empty `.sh` glob in the installed rc source loop.** When ccage is uninstalled or all `.sh` files are removed from `~/.zshrc.d/`, zsh's default `nomatch` would error on the source loop. The uninstall regex fix in `c306f8d` closes the main vector (uninstall used to leave an orphan loop). Defense-in-depth fix would wrap the loop in a function with `setopt local_options null_glob`, but it can't be locally verified without zsh installed on this machine. Documented as a known limitation. Won't fix for v0; revisit if reported.
 
 ## Where to read
 
@@ -39,20 +58,22 @@ End-to-end behavior verified via `tests/validate-e2e.sh` — 30 mock-stub checks
 | What's the build plan? | [docs/PLAN.md](docs/PLAN.md) |
 | What does ccage do; every env var & hook? | [docs/FEATURES.md](docs/FEATURES.md) |
 | How do the pieces fit internally? | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| What's the Phase 6 design rationale? | [docs/PHASE-6-HANDOFF-SPEC.md](docs/PHASE-6-HANDOFF-SPEC.md) |
 | What changed in each version? | [CHANGELOG.md](CHANGELOG.md) |
 | How do I install and use it? | [README.md](README.md) |
 
 ## Active decisions
 
-Locked (see `project_ccage_*` memory notes):
+Locked (see `project_ccage_*` memory notes + `docs/PHASE-6-HANDOFF-SPEC.md` decisions log):
 - Keying: **Option A** — basename + sha1-on-collision. No always-suffix, no registry.
 - Packaging: **pure shell**. Homebrew deferred until demand.
 - Defaults: attribution header + autoupdater both off by default, both opt-outable.
 - Doctrine: **UI-only seeding** into per-project `settings.json` — never copy permissions/plugins/state from a master.
-- Extension model: two hook stubs (`_ccage_config_dir_override`, `_ccage_pre_exec_hook`), overrides live in `~/.bashrc.d/claude-overrides.sh` (not installed by ccage; user-written).
+- Extension model: two hook stubs (`_ccage_config_dir_override`, `_ccage_pre_exec_hook`), overrides live in `~/.bashrc.d/claude-overrides.sh`.
+- **Phase 6 design** (locked at spec commit `54fea5b`): zero API calls in `ccage handoff` (jq-only), global flat handoff retention at `~/.local/share/ccage/handoffs/`, no git assumptions, single-template `-c` vs `-r <id>` prompt copy, clipboard order `pbcopy → wl-copy → xclip → xsel`. Resume interceptor lives inline in `share/claude-isolation.sh` (deviation from spec — spec suggested separate `ccage-resume.sh` — pragmatic to keep rc sourcing to one file; pricing table duplicated and tagged for synchronized refresh).
 
 Open:
-- None blocking next phases.
+- None blocking Phase 7.
 
 ## User personal setup
 
@@ -61,12 +82,17 @@ User's machine setup (separate from ccage repo):
 - `~/.bashrc.d/claude-ccusage.sh` — ccage `ccusage-all`.
 - `~/.bashrc.d/claude-overrides.sh` — user-specific: mercor path pinning, telegram per-PWD, statusline seeding.
 - `~/.bashrc.pre-ccage-<timestamp>` — backup of pre-refactor `.bashrc`.
-- `~/.bashrc` exports `CCAGE_SHARE_FROM="$HOME/.claude"` — activates `_ccage_share_dirs`, symlinking `skills/`, `commands/`, `agents/` from `~/.claude/` into every per-project config dir. Orthogonal to the UI-only settings.json doctrine (directory-sharing, not JSON-key seeding).
+- `~/.bashrc` exports `CCAGE_SHARE_FROM="$HOME/.claude"` — activates `_ccage_share_dirs`, symlinking `skills/`, `commands/`, `agents/` from `~/.claude/` into every per-project config dir.
 
 User TODOs (Phase 0, not Sonnet's scope):
 - Install `claude-code-cache-fix`, run ~1 week, record ccusage deltas in CHANGELOG Unreleased.
 - Report any ccage regressions from real-world use.
 
+After v0 ships, suggested follow-ups (not blocking):
+- Re-source `~/.bashrc.d/claude-isolation.sh` in any already-open shell to pick up the new interception and handoff features (the existing function in those shells is from before this work).
+- Try `claude -c` on a known-stale session; confirm the prompt fires and shows a reasonable cost range.
+- Try `ccage handoff` against any project's most-recent session; check the brief.
+
 ## Workflow
 
-Sonnet implements; Opus reviews. Each phase follows PLAN.md's TDD rhythm: failing test → minimum code → passing test → refactor → docs + CHANGELOG. Handoff message format is at the bottom of PLAN.md.
+Sonnet implements; Opus reviews. Tier 2 final review done at end of Phase 6c (per CLAUDE.md's `tiered-review` skill). Handoff message format is at the bottom of PLAN.md.

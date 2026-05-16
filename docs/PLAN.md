@@ -12,8 +12,10 @@ Workflow: **Sonnet implements each phase TDD-style; Opus reviews when the phase 
 | 3b — `CCAGE_SHARE_FROM` | ✅ done |
 | 4 — Backfill bats tests | ✅ done (bats vendored as submodule) |
 | 5 — CI matrix | ✅ done locally; § 5.3 pending real-runner verification on first push |
-| 6 — Nice-to-haves | ⏸ queued |
-| 7 — Publish | ⏸ blocked on § 5.3 + two pre-publish bug fixes (see RESUME.md "Known bugs") |
+| 6a — `ccage handoff` | ✅ done — offline brief generator, 42 unit + 14 install + 8 e2e tests |
+| 6b — `-r`/`-c` cost interception | ✅ done — wrapper-level prompt, 28 unit + 3 e2e tests, set -u fix bundled |
+| 6c — Real-world validation + Tier 2 review | ✅ done — gemini external review surfaced one defect (zsh `read -n`); fixed |
+| 7 — Publish | ⏸ blocked only on § 5.3 (first push to remote, watch matrix go green) |
 
 End-to-end behavior is also covered by `tests/validate-e2e.sh` (30 mock + 9 real-claude assertions) — see RESUME.md for details.
 
