@@ -99,17 +99,26 @@ _ccage_handoff_locate() {
     esac
 }
 
-# All jq invocations below use raw-input + slurp + `fromjson?` to tolerate
-# malformed lines in the JSONL (live session files occasionally contain
-# partial writes). Plain `jq -r` aborts at the first parse error — that
-# would silently drop every record after a single bad line.
+# Per-record extractors below use streaming (`jq -Rr 'fromjson? // empty'`)
+# rather than slurp. On a long Opus session JSONL (50+ MB realistic, hundreds
+# of MB possible) slurp peak-RSS hits ~10× file size; streaming keeps memory
+# constant per record. `fromjson?` still tolerates malformed lines (drops
+# them silently), so partial-write resilience is preserved.
+#
+# The preamble was retained for backward-compat with the shared variable —
+# `split("\n") | .[] | ...` on a one-line input is a harmless no-op (single
+# element array) so functions that switched from -Rrs to -Rr still work.
+#
+# Three helpers (count_prompts, count_assistants, prompts_json) still slurp
+# because they aggregate across all records to produce a single value. Those
+# are each called once per brief; their slurp is bounded.
 _CCAGE_HANDOFF_JQ_PREAMBLE='split("\n") | .[] | select(length > 0) | fromjson? // empty'
 
 # ---- token totals -----------------------------------------------------------
 # Echoes one line: "input=N output=N cache_write=N cache_read=N"
 _ccage_handoff_token_totals() {
     local jsonl="$1"
-    jq -Rrs "$_CCAGE_HANDOFF_JQ_PREAMBLE"'
+    jq -Rr "$_CCAGE_HANDOFF_JQ_PREAMBLE"'
         | select(.type == "assistant") | .message.usage // {} |
         [
             (.input_tokens // 0),
@@ -233,7 +242,7 @@ _ccage_handoff_prompts_json() {
 # Output: TSV — path<TAB>read_count<TAB>edit_count<TAB>write_count
 _ccage_handoff_files_touched() {
     local jsonl="$1"
-    jq -Rrs "$_CCAGE_HANDOFF_JQ_PREAMBLE"'
+    jq -Rr "$_CCAGE_HANDOFF_JQ_PREAMBLE"'
         | select(.type == "assistant")
         | .message.content[]?
         | select(.type == "tool_use" and (.name == "Read" or .name == "Edit" or .name == "Write"))
@@ -259,7 +268,7 @@ _ccage_handoff_files_touched() {
 # Trivials: pwd, ls (no args), true, clear, exit, cd (no args)
 _ccage_handoff_bash_commands() {
     local jsonl="$1"
-    jq -Rrs "$_CCAGE_HANDOFF_JQ_PREAMBLE"'
+    jq -Rr "$_CCAGE_HANDOFF_JQ_PREAMBLE"'
         | select(.type == "assistant")
         | .message.content[]?
         | select(.type == "tool_use" and .name == "Bash")
@@ -281,7 +290,7 @@ _ccage_handoff_bash_commands() {
 # ---- last assistant text ----------------------------------------------------
 _ccage_handoff_last_assistant_text() {
     local jsonl="$1"
-    jq -Rrs "$_CCAGE_HANDOFF_JQ_PREAMBLE"'
+    jq -Rr "$_CCAGE_HANDOFF_JQ_PREAMBLE"'
         | select(.type == "assistant")
         | .message.content[]?
         | select(.type == "text")
@@ -293,20 +302,20 @@ _ccage_handoff_last_assistant_text() {
 # ---- timestamps -------------------------------------------------------------
 _ccage_handoff_first_timestamp() {
     local jsonl="$1"
-    jq -Rrs "$_CCAGE_HANDOFF_JQ_PREAMBLE"'
+    jq -Rr "$_CCAGE_HANDOFF_JQ_PREAMBLE"'
         | select(.timestamp != null) | .timestamp
     ' "$jsonl" 2>/dev/null | head -1
 }
 _ccage_handoff_last_timestamp() {
     local jsonl="$1"
-    jq -Rrs "$_CCAGE_HANDOFF_JQ_PREAMBLE"'
+    jq -Rr "$_CCAGE_HANDOFF_JQ_PREAMBLE"'
         | select(.timestamp != null) | .timestamp
     ' "$jsonl" 2>/dev/null | tail -1
 }
 
 _ccage_handoff_session_id() {
     local jsonl="$1"
-    jq -Rrs "$_CCAGE_HANDOFF_JQ_PREAMBLE"'
+    jq -Rr "$_CCAGE_HANDOFF_JQ_PREAMBLE"'
         | select(.sessionId != null) | .sessionId
     ' "$jsonl" 2>/dev/null | head -1
 }
