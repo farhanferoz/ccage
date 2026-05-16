@@ -41,9 +41,16 @@ if [ -f "$rc" ] && grep -qF 'Added by ccage installer' "$rc"; then
         printf '+ strip ccage block from %s\n' "$rc"
     else
         tmp="$(mktemp)"
+        # Marker contract (must match install.sh):
+        #   line N:    # Added by ccage installer. ...
+        #   line N+1:  <source-loop>
+        # Remove both lines. The simple "drop one line after the marker"
+        # approach is robust to source-loop syntax tweaks; the previous
+        # regex-based approach silently failed to match when install.sh's
+        # source line was reformatted (left an orphaned `for f in` line).
         awk '
             /^# Added by ccage installer/ { skip=1; next }
-            skip && /^for f in .* \.sh; do/ { skip=0; next }
+            skip { skip=0; next }
             { print }
         ' "$rc" > "$tmp"
         mv "$tmp" "$rc"

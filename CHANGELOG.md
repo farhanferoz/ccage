@@ -12,6 +12,7 @@ All notable changes to ccage. Format follows [Keep a Changelog](https://keepacha
 
 ### Fixed
 - `_ccage_patch_onboarding`: python3 failure now silently swallowed (`|| true`) rather than propagating under `set -e`. Previously a failing python3 invocation would abort the bootstrap call with a non-zero exit.
+- `uninstall.sh`: awk pattern that stripped the installer's source-loop required a literal space before `.sh` that install.sh never wrote, so the source line survived uninstall as orphaned rc clutter. Replaced with a simpler "drop one line after the `# Added by ccage installer` marker" rule that is robust to future changes in the source-line syntax. Caught by the new `tests/test_install_uninstall.bats` round-trip suite (10 tests).
 
 ### Documentation
 - README "Limitations" section: documents the `timeout`/`nohup` function-bypass, `set -u` unsafety, and nested-worktree race. The first two surfaced via `tests/validate-e2e.sh` validation pass; both are scheduled to be fixed (or, in the function-bypass case, made tolerable) before v0.1.0.
