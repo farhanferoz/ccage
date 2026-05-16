@@ -422,7 +422,14 @@ _ccage_intercept_resume() {
     } >&2
 
     local response decision
-    read -rn 1 -s response < /dev/tty
+    # bash uses `-n N` for "read N chars"; zsh uses `-k N`. Branch on shell so
+    # the prompt's single-keypress UX works in both. Discovered in Tier 2 review.
+    if [ -n "${ZSH_VERSION:-}" ]; then
+        # shellcheck disable=SC3045,SC2162  # -k is zsh-only; -r doesn't apply to zsh's -k
+        read -k 1 -s response < /dev/tty
+    else
+        read -rn 1 -s response < /dev/tty
+    fi
     printf '%s\n' "$response" >&2
     decision=$(_ccage_resume_decide "$response")
 
