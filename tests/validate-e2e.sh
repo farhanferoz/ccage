@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
+# shellcheck disable=SC2030,SC2031
+# SC2030/2031: every test subshell intentionally gets a clean PATH/HOME;
+# the "modification is local" / "might be lost" warnings are by design.
 #
 # tests/validate-e2e.sh — end-to-end validation of ccage behavior.
 #

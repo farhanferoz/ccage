@@ -30,6 +30,7 @@ Drops a tiny shell function over `claude` that:
 7. Exports `DISABLE_AUTOUPDATER=1`. Parallel sessions racing on a self-update can corrupt the install; skip the updater and bump the CLI manually.
 8. Ships a `ccusage-all` helper that runs [`ccusage`](https://www.npmjs.com/package/ccusage) across every isolated config dir and aggregates the output.
 9. Ships a `ccage handoff` CLI that produces an offline Markdown brief from any session JSONL — useful as a context bootstrap for a fresh session when you'd otherwise pay `claude -r`'s structural cache-rewrite tax. Pure jq, zero API calls. See [docs/FEATURES.md](docs/FEATURES.md) and [docs/PHASE-6-HANDOFF-SPEC.md](docs/PHASE-6-HANDOFF-SPEC.md).
+10. Intercepts `claude -c` / `claude -r <id>` and shows the estimated cache-rewrite cost before launch, with three choices: resume, switch to a handoff brief, or cancel. Background: Claude Code's resume always cache-misses the message prefix regardless of TTL (GitHub anthropics/claude-code [#42309](https://github.com/anthropics/claude-code/issues/42309), [#43657](https://github.com/anthropics/claude-code/issues/43657)), so every resume on a long Opus session costs real money. Silence with `CCAGE_NO_RESUME_PROMPT=1`; tune threshold via `CCAGE_RESUME_PROMPT_MIN_USD` (default $0.25).
 9. Ships a `ccage handoff` CLI that turns any session JSONL on disk into a Markdown brief you can paste into a fresh `claude` session — useful for avoiding `claude -r`'s structural prompt-cache rewrite tax. Pure shell + jq, zero API calls.
 
 ### Bonus: dodges the `settings.json` write race

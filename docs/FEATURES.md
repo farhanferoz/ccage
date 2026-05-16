@@ -225,6 +225,62 @@ Resilient to malformed JSONL lines — every jq invocation uses raw-input + `fro
 
 ---
 
+## Resume cost interception [shipped — Phase 6b]
+
+When you invoke `claude -c` (continue) or `claude -r <session-id>` (resume), the wrapper computes the cache-rewrite cost from the session's on-disk `usage` history and prompts before launch. Background: Claude Code's resume always misses the message-prefix cache, regardless of TTL (GitHub anthropics/claude-code #42309, #43657 — `processSessionStartHooks` and `reorderAttachmentsForAPI` shuffle bytes at `messages[0]`). Each cold resume pays ~1.25× input rate on the rewritten prefix; on a long Opus session that's $0.50–$2+ per resume.
+
+### When the prompt fires
+
+| Args | Action |
+|---|---|
+| `-c`, `--continue` | Intercept, use most-recent session by mtime |
+| `-r <uuid-prefix>`, `--resume <uuid-prefix>` | Intercept, use the named session |
+| Bare `-r` / bare `--resume` (no id) | Pass through (Claude Code may show its own picker — we can't predict the choice) |
+| Anything else | Pass through |
+
+### Gates that suppress the prompt
+
+| Condition | Effect |
+|---|---|
+| `CCAGE_DISABLE=1` | Wrapper bypassed entirely |
+| `CCAGE_NO_RESUME_PROMPT=1` | Interception skipped |
+| Stdin is not a tty (`[ ! -t 0 ]`) | Skipped (no way to prompt) |
+| No session JSONL found for current `$PWD` | Skipped (Claude Code will report the error itself) |
+| Estimated rewrite cost below `CCAGE_RESUME_PROMPT_MIN_USD` (default `0.25`) | Skipped |
+
+### What the prompt shows
+
+```
+ccage: Continuing most-recent session 4f616b4b · 4h 12m ago · claude-opus-4-7
+       Resume will rewrite ~70K tokens (message prefix). Estimated cost: $1.10–$1.65.
+       (Claude Code resume always misses cache; not a TTL issue — see GitHub #42309, #43657.)
+       [r]esume / [h]andoff / [c]ancel?
+```
+
+Cost is a range (±25% empirical uncertainty band), computed as `peak_cache_read − ~19K tools+system prefix`, times the model's cache-write rate from the inline pricing table.
+
+### Decisions
+
+- `r` / `R` / Enter → resume as normal.
+- `h` / `H` → exec `ccage handoff` against the same session, then cancel the resume so the user can paste the brief into a fresh `claude`.
+- Any other key → cancel.
+
+### Env
+
+| Var | Default | Effect |
+|---|---|---|
+| `CCAGE_NO_RESUME_PROMPT` | unset | If `1`, never prompt — always pass through. |
+| `CCAGE_RESUME_PROMPT_MIN_USD` | `0.25` | Skip prompt when estimated cost falls below this dollar threshold. |
+
+### Limitations
+
+- Cost is an estimate. The ±25% band reflects empirical precision from sampled JSONLs; rare sessions may fall outside.
+- 1M-context-tier sessions use a different rate that this table doesn't track — estimates can be ~2× low on those.
+- Pricing data is hardcoded inline in `share/claude-isolation.sh` (mirrored in `share/ccage-handoff.sh`). The `# updated:` header notes the last refresh date.
+- If Anthropic ever fixes the structural resume cache miss, the prompt becomes noise — silence it with `CCAGE_NO_RESUME_PROMPT=1`. A future `ccage doctor` check is planned to auto-detect and hint at this.
+
+---
+
 ## `ccage handoff` [shipped — Phase 6a]
 
 Standalone CLI that produces a Markdown handoff brief from a Claude Code session JSONL. Designed for the workflow "I want to start a fresh `claude` session instead of paying `claude -r`'s structural cache-rewrite tax."
