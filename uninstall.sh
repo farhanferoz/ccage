@@ -47,8 +47,8 @@ if [ -f "$prefix/share/ccage/ccage-handoff.sh" ]; then
     printf 'removed %s/share/ccage/ccage-handoff.sh\n' "$prefix"
 fi
 # rmdir empty share/ccage dir if we left it behind, but don't force.
-if [ -d "$prefix/share/ccage" ]; then
-    rmdir "$prefix/share/ccage" 2>/dev/null && printf 'removed empty %s/share/ccage\n' "$prefix" || true
+if [ -d "$prefix/share/ccage" ] && rmdir "$prefix/share/ccage" 2>/dev/null; then
+    printf 'removed empty %s/share/ccage\n' "$prefix"
 fi
 
 [ -f "$rcd/claude-overrides.sh" ] && printf 'left %s/claude-overrides.sh in place (user data)\n' "$rcd"
@@ -61,14 +61,14 @@ if [ -f "$rc" ] && grep -qF 'Added by ccage installer' "$rc"; then
         tmp="$(mktemp)"
         # Marker contract (must match install.sh):
         #   line N:    # Added by ccage installer. ...
-        #   line N+1:  <source-loop>
-        # Remove both lines. The simple "drop one line after the marker"
-        # approach is robust to source-loop syntax tweaks; the previous
-        # regex-based approach silently failed to match when install.sh's
-        # source line was reformatted (left an orphaned `for f in` line).
+        #   line N+1:  for f in "<rcd>"/*.sh; do ...; done; unset f
+        # Remove both. Pattern-guard the source-loop deletion so a stray
+        # marker line (e.g. user pasted twice, or hand-edited the loop away)
+        # does NOT silently eat an unrelated following line.
         awk '
             /^# Added by ccage installer/ { skip=1; next }
-            skip { skip=0; next }
+            skip && /^for f in .*; done; unset f$/ { skip=0; next }
+            skip { skip=0 }
             { print }
         ' "$rc" > "$tmp"
         mv "$tmp" "$rc"

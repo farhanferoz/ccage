@@ -49,7 +49,7 @@ while [ $# -gt 0 ]; do
         --no-ccusage) install_ccusage=0; shift ;;
         --no-cli)     install_cli=0; shift ;;
         --prefix)     prefix="$2"; shift 2 ;;
-        -h|--help)    sed -n '2,28p' "$0"; exit 0 ;;
+        -h|--help)    awk '/^#/{print; next} {exit}' "$0" | sed '1d'; exit 0 ;;
         *) printf 'unknown flag: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
@@ -95,8 +95,8 @@ if [ "$install_cli" = 1 ]; then
     esac
 fi
 
-if [ -f "$rc" ] && grep -qF "$rcd" "$rc" 2>/dev/null; then
-    printf 'note: %s already references %s — not modifying rc\n' "$rc" "$rcd"
+if [ -f "$rc" ] && grep -qF 'Added by ccage installer' "$rc" 2>/dev/null; then
+    printf 'note: %s already has the ccage source block — not modifying rc\n' "$rc"
 elif [ "$dry_run" = 1 ]; then
     printf '+ append ccage source block to %s\n' "$rc"
 else
