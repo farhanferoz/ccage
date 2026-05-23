@@ -30,8 +30,7 @@ _ccage_resolve_lib() {
     for lib_candidate in \
         "${CCAGE_LIB:-}" \
         "$bin_dir/../share" \
-        "$bin_dir/../share/ccage" \
-        "$bin_dir/../lib/ccage"
+        "$bin_dir/../share/ccage"
     do
         [ -n "$lib_candidate" ] || continue
         if [ -f "$lib_candidate/ccage-handoff.sh" ]; then
@@ -39,8 +38,7 @@ _ccage_resolve_lib() {
             return 0
         fi
     done
-    # shellcheck disable=SC2016  # literal '$CCAGE_LIB' in user-facing hint
-    # shellcheck disable=SC2016  # $CCAGE_LIB is literal text shown in the error message
+    # shellcheck disable=SC2016  # $CCAGE_LIB is literal text in the error message
     printf 'ccage: cannot locate share/ccage-handoff.sh — set $CCAGE_LIB?\n' >&2
     return 2
 }
