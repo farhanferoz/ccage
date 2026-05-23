@@ -24,6 +24,11 @@ jobs:
         run: command -v shellcheck || sudo apt-get install -y shellcheck
         shell: bash
 
+      - name: Install zsh (ubuntu)
+        if: matrix.os == 'ubuntu-latest' && matrix.shell == 'zsh'
+        run: command -v zsh || sudo apt-get install -y zsh
+        shell: bash
+
       - name: shellcheck
         if: matrix.os == 'ubuntu-latest' && matrix.shell == 'bash'
         run: shellcheck share/*.sh install.sh uninstall.sh

@@ -738,5 +738,5 @@ EOF
     local jsonl
     jsonl=$(_ccage_handoff_locate "$session_dir" "$prefix") || return $?
 
-    PWD="$project" _ccage_handoff_generate "$jsonl" "${pass_args[@]}"
+    PWD="$project" _ccage_handoff_generate "$jsonl" ${pass_args[@]+"${pass_args[@]}"}
 }

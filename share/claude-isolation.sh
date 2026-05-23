@@ -505,5 +505,9 @@ claude() {
     _ccage_extra_args=()
     _ccage_pre_exec_hook "$PWD" "$CLAUDE_CONFIG_DIR"
 
-    command claude "${_ccage_extra_args[@]}" "$@"
+    # ${arr[@]+"${arr[@]}"} is the bash-3.2-safe idiom for expanding a possibly-
+    # empty array under `set -u`. On bash 3.2 (macos default), expanding a
+    # declared-empty array as "${arr[@]}" errors as "unbound variable"; bash 4.4+
+    # treats it as empty. The pre-exec hook may have appended to extra_args, or not.
+    command claude ${_ccage_extra_args[@]+"${_ccage_extra_args[@]}"} "$@"
 }
