@@ -62,8 +62,9 @@ setup() {
     mkdir -p "$dir"
     cp "$FIXTURES/minimal.jsonl" "$dir/abc-old.jsonl"
     cp "$FIXTURES/minimal.jsonl" "$dir/xyz-new.jsonl"
-    touch -d '2020-01-01' "$dir/abc-old.jsonl"
-    touch -d '2026-01-01' "$dir/xyz-new.jsonl"
+    # POSIX -t format: [[CC]YY]MMDDhhmm — portable across GNU touch and BSD touch (macOS).
+    touch -t 202001010000 "$dir/abc-old.jsonl"
+    touch -t 202601010000 "$dir/xyz-new.jsonl"
     run _ccage_handoff_locate "$dir"
     [ "$status" -eq 0 ]
     [ "$output" = "$dir/xyz-new.jsonl" ]
