@@ -53,8 +53,6 @@ _ccage_sha1() {
 }
 
 # ---- extension hook stubs (no-ops; redefine in a companion file) ----
-# When redefining _ccage_config_dir_override, also set _CCAGE_OVERRIDE_ACTIVE=1
-# so ccage knows to call it (avoids a subshell fork when no override is active).
 _ccage_config_dir_override() { return 1; }
 _ccage_pre_exec_hook() { :; }
 _CCAGE_OVERRIDE_ACTIVE=0
@@ -256,51 +254,64 @@ _ccage_is_resume_invocation() {
     return 1
 }
 
-# Estimate cache-rewrite cost as a range. Echoes: "<lo>\t<hi>\t<model>\t<tokens>"
-# where lo/hi are dollar amounts (2 decimal) and tokens is the estimated
-# message-prefix rewrite size (peak cache_read minus ~19K tools+system prefix).
-# Empty session or no substantive cache_read → "0.00\t0.00\tunknown\t0".
+# Single-pass session summary — folds peak cache_read, last model, session id,
+# and last timestamp out of one streaming jq invocation. Replaces 4-6 jq
+# slurps on the interceptor hot path.
+# Echoes tab-separated: peak<TAB>model<TAB>session_id<TAB>last_ts.
+# Empty / missing file → "0\tunknown\t\t".
+_ccage_resume_session_summary() {
+    local jsonl="$1"
+    [ -f "$jsonl" ] || { printf '0\tunknown\t\t\n'; return 0; }
+    jq -Rrn '
+        reduce (inputs | fromjson? // empty) as $r (
+            {peak: 0, model: "unknown", session_id: "", last_ts: ""};
+            ( if .session_id == "" and ($r.sessionId // null) != null
+              then .session_id = $r.sessionId else . end )
+            | ( if ($r.timestamp // null) != null
+                then .last_ts = $r.timestamp else . end )
+            | ( if $r.type == "assistant" then
+                  ( if ($r.message.model // null) != null
+                      and $r.message.model != "<synthetic>"
+                    then .model = $r.message.model else . end )
+                  | ( ($r.message.usage.cache_read_input_tokens // 0) as $cur
+                      | if $cur > 1000 and $cur > .peak
+                        then .peak = $cur else . end )
+                else . end )
+        )
+        | "\(.peak)\t\(.model)\t\(.session_id)\t\(.last_ts)"
+    ' "$jsonl" 2>/dev/null || printf '0\tunknown\t\t\n'
+}
+
+# Pure shell + awk: given (peak_cache_read, model), compute the cost range.
+# Echoes "<lo>\t<hi>\t<rewrite_tokens>" with the ±25% band.
+_ccage_resume_compute_cost() {
+    local peak="$1" model="$2"
+    local rewrite=$((peak - 19000))     # subtract ~19K tools+system prefix
+    [ "$rewrite" -lt 0 ] && rewrite=0
+    if [ "$rewrite" -eq 0 ]; then
+        printf '0.00\t0.00\t0\n'
+        return 0
+    fi
+    local rate
+    rate=$(_ccage_resume_price_cache_write "$model")
+    awk -v r="$rewrite" -v p="$rate" 'BEGIN {
+        mid = r / 1000000 * p
+        printf "%.2f\t%.2f\t%d\n", mid * 0.75, mid * 1.25, r
+    }'
+}
+
+# Back-compat shim — preserves the public TSV signature
+# (lo<TAB>hi<TAB>model<TAB>rewrite) for tests and any external callers.
+# Internally now one jq pass via _ccage_resume_session_summary.
 _ccage_resume_estimate_cost_usd() {
     local jsonl="$1"
     [ -f "$jsonl" ] || { printf '0.00\t0.00\tunknown\t0\n'; return 0; }
-
-    # Peak cache_read across substantive turns.
-    local peak
-    peak=$(jq -Rrs '
-        split("\n") | .[] | select(length > 0) | fromjson? // empty |
-        select(.type == "assistant")
-        | .message.usage.cache_read_input_tokens // 0
-        | select(. > 1000)
-    ' "$jsonl" 2>/dev/null | sort -rn | head -1)
-    peak="${peak:-0}"
-
-    # Last model used (skip <synthetic>).
-    local model
-    model=$(jq -Rrs '
-        split("\n") | .[] | select(length > 0) | fromjson? // empty |
-        select(.type == "assistant" and .message.model != null and .message.model != "<synthetic>")
-        | .message.model
-    ' "$jsonl" 2>/dev/null | tail -1)
-    model="${model:-unknown}"
-
-    # Rewrite tokens ≈ peak_cache_read − ~19K (tools+system prefix, which
-    # hits at account level even after structural resume).
-    local rewrite=$((peak - 19000))
-    [ "$rewrite" -lt 0 ] && rewrite=0
-
-    if [ "$rewrite" -eq 0 ]; then
-        printf '0.00\t0.00\t%s\t0\n' "$model"
-        return 0
-    fi
-
-    local rate
-    rate=$(_ccage_resume_price_cache_write "$model")
-
-    # ±25% uncertainty band — empirical precision from sampled JSONLs.
-    awk -v r="$rewrite" -v p="$rate" -v m="$model" 'BEGIN {
-        mid = r / 1000000 * p
-        printf "%.2f\t%.2f\t%s\t%d\n", mid * 0.75, mid * 1.25, m, r
-    }'
+    local peak model
+    IFS=$'\t' read -r peak model _ _ < <(_ccage_resume_session_summary "$jsonl")
+    : "${peak:=0}"; : "${model:=unknown}"
+    local lo hi rewrite
+    IFS=$'\t' read -r lo hi rewrite < <(_ccage_resume_compute_cost "$peak" "$model")
+    printf '%s\t%s\t%s\t%s\n' "$lo" "$hi" "$model" "$rewrite"
 }
 
 # Should we prompt? Returns 0 if yes, non-zero if cost is below the threshold
@@ -396,16 +407,21 @@ _ccage_intercept_resume() {
         return 0
     fi
 
-    if ! _ccage_resume_should_prompt "$jsonl"; then return 0; fi
+    # ONE jq pass over the JSONL — peak, model, session id, last timestamp.
+    local peak model session_id last_ts
+    IFS=$'\t' read -r peak model session_id last_ts \
+        < <(_ccage_resume_session_summary "$jsonl")
+    : "${peak:=0}"; : "${model:=unknown}"; : "${session_id:=unknown}"
 
-    # Pull the data we'll show in the prompt copy.
-    local lo hi model rewrite
-    IFS=$'\t' read -r lo hi model rewrite < <(_ccage_resume_estimate_cost_usd "$jsonl")
-    local session_id
-    session_id=$(jq -Rrs 'split("\n") | .[] | select(length > 0) | fromjson? // empty | select(.sessionId != null) | .sessionId' "$jsonl" 2>/dev/null | head -1)
-    session_id="${session_id:-unknown}"
-    local last_ts
-    last_ts=$(jq -Rrs 'split("\n") | .[] | select(length > 0) | fromjson? // empty | select(.timestamp != null) | .timestamp' "$jsonl" 2>/dev/null | tail -1)
+    # Pure-shell cost computation from the cached peak.
+    local lo hi rewrite
+    IFS=$'\t' read -r lo hi rewrite \
+        < <(_ccage_resume_compute_cost "$peak" "$model")
+
+    # Threshold gate (inline — same logic as _ccage_resume_should_prompt).
+    local threshold="${CCAGE_RESUME_PROMPT_MIN_USD:-0.25}"
+    awk -v hi="$hi" -v t="$threshold" 'BEGIN { exit (hi >= t) ? 0 : 1 }' || return 0
+
     local age
     age=$(_ccage_resume_age_human "$last_ts")
 
