@@ -99,19 +99,8 @@ _ccage_handoff_locate() {
     esac
 }
 
-# Per-record extractors below use streaming (`jq -Rr 'fromjson? // empty'`)
-# rather than slurp. On a long Opus session JSONL (50+ MB realistic, hundreds
-# of MB possible) slurp peak-RSS hits ~10× file size; streaming keeps memory
-# constant per record. `fromjson?` still tolerates malformed lines (drops
-# them silently), so partial-write resilience is preserved.
-#
-# The preamble was retained for backward-compat with the shared variable —
-# `split("\n") | .[] | ...` on a one-line input is a harmless no-op (single
-# element array) so functions that switched from -Rrs to -Rr still work.
-#
-# Three helpers (count_prompts, count_assistants, prompts_json) still slurp
-# because they aggregate across all records to produce a single value. Those
-# are each called once per brief; their slurp is bounded.
+# Streamed per-record preamble — `fromjson?` drops malformed lines silently
+# (preserves partial-write resilience). Memory stays constant per record.
 _CCAGE_HANDOFF_JQ_PREAMBLE='split("\n") | .[] | select(length > 0) | fromjson? // empty'
 
 # ---- token totals -----------------------------------------------------------
@@ -299,6 +288,81 @@ _ccage_handoff_last_assistant_text() {
     ' "$jsonl" 2>/dev/null | tail -1
 }
 
+# ---- single-pass collector --------------------------------------------------
+# Walks the JSONL ONCE via streaming `reduce inputs`, accumulating every field
+# the brief needs into one JSON object. Replaces 11 separate file-scans on the
+# generate hot path. The 11 small per-section helpers above are kept intact
+# for unit-test coverage; only the production caller uses this fast path.
+#
+# Echoes one compact JSON object. Empty / missing file → object of defaults.
+_ccage_handoff_collect() {
+    local jsonl="$1"
+    [ -f "$jsonl" ] || {
+        printf '%s\n' '{"session_id":null,"first_ts":null,"last_ts":null,"last_model":null,"assistant_count":0,"in":0,"out":0,"cw":0,"cr":0,"prompts":[],"files":{},"bash_commands":[],"last_text":null}'
+        return 0
+    }
+    jq -cRn '
+        reduce (inputs | fromjson? // empty) as $r (
+            { session_id: null, first_ts: null, last_ts: null, last_model: null,
+              assistant_count: 0, in: 0, out: 0, cw: 0, cr: 0,
+              prompts: [], files: {}, bash_commands: [], last_text: null };
+            # session id: first non-null
+            ( if .session_id == null and ($r.sessionId // null) != null
+              then .session_id = $r.sessionId else . end )
+            # timestamps: first + last seen
+            | ( if ($r.timestamp // null) != null then
+                  ( if .first_ts == null then .first_ts = $r.timestamp else . end )
+                  | .last_ts = $r.timestamp
+                else . end )
+            # assistant turns: model, counts, tokens, files/commands/last-text from content
+            | ( if $r.type == "assistant" then
+                  .assistant_count += 1
+                  | ( if ($r.message.model // null) != null
+                        and $r.message.model != "<synthetic>"
+                      then .last_model = $r.message.model else . end )
+                  | .in += ($r.message.usage.input_tokens // 0)
+                  | .out += ($r.message.usage.output_tokens // 0)
+                  | .cw  += ($r.message.usage.cache_creation_input_tokens // 0)
+                  | .cr  += ($r.message.usage.cache_read_input_tokens // 0)
+                  | reduce ($r.message.content[]?
+                            | select(.type == "text" or .type == "tool_use")) as $c (.;
+                      if $c.type == "text" and (($c.text // "") | length) > 0 then
+                          .last_text = $c.text
+                      elif $c.type == "tool_use" then
+                          if ($c.name == "Read" or $c.name == "Edit" or $c.name == "Write") then
+                              ( ($c.input.file_path // $c.input.path // "") as $p
+                                | if $p != "" then
+                                    .files[$p] = (.files[$p] // {Read: 0, Edit: 0, Write: 0})
+                                    | .files[$p][$c.name] += 1
+                                  else . end )
+                          elif $c.name == "Bash" then
+                              ( ($c.input.command // "") as $cmd
+                                | if $cmd != "" then .bash_commands += [$cmd] else . end )
+                          else . end
+                      else . end
+                    )
+                else . end )
+            # user prompts: filter meta + tool-result + synthetic slash-command echoes
+            | ( if $r.type == "user"
+                  and ($r.isMeta // false) == false
+                  and ($r.toolUseResult // null) == null then
+                  ( $r.message.content
+                    | if type == "string" then .
+                      elif type == "array" then
+                          ([.[]? | select(.type == "text") | .text] | join("\n"))
+                      else "" end ) as $text
+                  | ( if ($text | length) > 0
+                        and (($text | startswith("<command-name>")) | not)
+                        and (($text | startswith("<local-command-stdout>")) | not)
+                        and (($text | startswith("<system-reminder>")) | not)
+                        and (($text | startswith("<command-message>")) | not)
+                        and (($text | startswith("<command-args>")) | not)
+                      then .prompts += [$text] else . end )
+                else . end )
+        )
+    ' "$jsonl" 2>/dev/null
+}
+
 # ---- timestamps -------------------------------------------------------------
 _ccage_handoff_first_timestamp() {
     local jsonl="$1"
@@ -411,28 +475,30 @@ _ccage_handoff_generate() {
     [ -n "$jsonl" ] || { printf 'ccage handoff: missing JSONL path\n' >&2; return 2; }
     [ -f "$jsonl" ] || { printf 'ccage handoff: not a file: %s\n' "$jsonl" >&2; return 2; }
 
-    # ---- collect data ----
-    local session_id first_ts last_ts model
-    session_id=$(_ccage_handoff_session_id "$jsonl")
-    first_ts=$(_ccage_handoff_first_timestamp "$jsonl")
-    last_ts=$(_ccage_handoff_last_timestamp "$jsonl")
-    model=$(_ccage_handoff_last_model "$jsonl")
+    # ---- collect data (ONE jq pass over the JSONL) ----
+    local handoff_data
+    handoff_data=$(_ccage_handoff_collect "$jsonl")
 
-    local prompt_count assistant_count
-    prompt_count=$(_ccage_handoff_count_prompts "$jsonl")
-    assistant_count=$(_ccage_handoff_count_assistants "$jsonl")
-
-    local totals
-    totals=$(_ccage_handoff_token_totals "$jsonl")
-    # parse totals into vars
+    # Pull all scalar fields with ONE jq invocation against the small JSON.
+    local session_id first_ts last_ts model assistant_count prompt_count
     local in_tok out_tok cw_tok cr_tok
-    in_tok=$(printf '%s\n' "$totals" | sed -n 's/.*input=\([0-9]*\).*/\1/p')
-    out_tok=$(printf '%s\n' "$totals" | sed -n 's/.*output=\([0-9]*\).*/\1/p')
-    cw_tok=$(printf '%s\n' "$totals" | sed -n 's/.*cache_write=\([0-9]*\).*/\1/p')
-    cr_tok=$(printf '%s\n' "$totals" | sed -n 's/.*cache_read=\([0-9]*\).*/\1/p')
+    IFS=$'\t' read -r session_id first_ts last_ts model \
+                       assistant_count prompt_count \
+                       in_tok out_tok cw_tok cr_tok < <(
+        jq -r '[
+            (.session_id // "unknown"),
+            (.first_ts // ""),
+            (.last_ts // ""),
+            (.last_model // "unknown"),
+            .assistant_count, (.prompts | length),
+            .in, .out, .cw, .cr
+        ] | @tsv' <<<"$handoff_data"
+    )
+    : "${session_id:=unknown}"; : "${model:=unknown}"
+    : "${in_tok:=0}"; : "${out_tok:=0}"; : "${cw_tok:=0}"; : "${cr_tok:=0}"
 
     local cost_so_far
-    cost_so_far=$(_ccage_handoff_cost "${in_tok:-0}" "${out_tok:-0}" "${cw_tok:-0}" "${cr_tok:-0}" "$model")
+    cost_so_far=$(_ccage_handoff_cost "$in_tok" "$out_tok" "$cw_tok" "$cr_tok" "$model")
 
     # age in seconds
     local age_sec=""
@@ -499,12 +565,10 @@ _ccage_handoff_generate() {
         fi
 
         if [ "$total_prompts" -gt 0 ]; then
-            local prompts_json
-            prompts_json=$(_ccage_handoff_prompts_json "$jsonl")
-            # extract last N prompts from JSON array, numbered
-            printf '%s' "$prompts_json" | jq -r --argjson n "$shown_n" --argjson start "$((total_prompts - shown_n))" '
-                .[$start:] | to_entries | .[] | "\($start + .key + 1). \(.value)\n"
-            '
+            # Extract the last N prompts from the cached JSON blob (no JSONL re-read).
+            jq -r --argjson n "$shown_n" --argjson start "$((total_prompts - shown_n))" '
+                .prompts[$start:] | to_entries | .[] | "\($start + .key + 1). \(.value)\n"
+            ' <<<"$handoff_data"
             if [ "$total_prompts" -gt "$max_prompts" ]; then
                 printf '\n_(%d earlier prompt(s) elided — see raw JSONL for full history)_\n' \
                     $((total_prompts - shown_n))
@@ -513,10 +577,15 @@ _ccage_handoff_generate() {
             printf '_(no user prompts recorded in this session)_\n'
         fi
 
-        # Files touched section
+        # Files touched section — sort by total touches desc (Read + Edit + Write).
         printf '\n## Files touched\n\n'
         local files_table
-        files_table=$(_ccage_handoff_files_touched "$jsonl")
+        files_table=$(jq -r '
+            .files | to_entries
+            | map(. + {total: (.value.Read + .value.Edit + .value.Write)})
+            | sort_by(-.total)
+            | .[] | "\(.key)\t\(.value.Read)\t\(.value.Edit)\t\(.value.Write)"
+        ' <<<"$handoff_data")
         if [ -n "$files_table" ]; then
             printf '| Path | Read | Edit | Write |\n'
             printf '|---|---:|---:|---:|\n'
@@ -526,10 +595,18 @@ _ccage_handoff_generate() {
             printf '_(no files touched via Read/Edit/Write in this session)_\n'
         fi
 
-        # Commands section
+        # Commands section — dedup + trivial-filter in awk (same as the standalone helper).
         printf '\n## Commands run\n\n'
         local commands
-        commands=$(_ccage_handoff_bash_commands "$jsonl")
+        commands=$(jq -r '.bash_commands[]?' <<<"$handoff_data" | awk '
+            {
+                trimmed = $0
+                gsub(/^[ \t]+|[ \t]+$/, "", trimmed)
+                if (trimmed == "pwd" || trimmed == "ls" || trimmed == "true" || \
+                    trimmed == "clear" || trimmed == "exit" || trimmed == "cd") next
+                print
+            }
+        ' | awk '!seen[$0]++')
         if [ -n "$commands" ]; then
             # cap at 40
             printf '%s\n' "$commands" | head -40 | awk '{ print "- `" $0 "`" }'
@@ -540,7 +617,7 @@ _ccage_handoff_generate() {
         # Last assistant turn
         printf '\n## Last assistant turn\n\n'
         local last_text
-        last_text=$(_ccage_handoff_last_assistant_text "$jsonl")
+        last_text=$(jq -r '.last_text // ""' <<<"$handoff_data")
         if [ -n "$last_text" ]; then
             local words
             words=$(printf '%s' "$last_text" | awk '{n+=NF} END {print n+0}')
