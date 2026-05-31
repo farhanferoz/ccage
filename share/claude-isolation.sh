@@ -157,6 +157,134 @@ _ccage_bootstrap_dir() {
     _ccage_share_dirs "$dir"
 }
 
+# ---- seed session-docs hooks into a cage's settings.json (opt-in) -----------
+# Phase 7. Gated by CCAGE_SESSION_DOCS. Idempotently MERGES a `hooks` block into
+# the cage's settings.json (preserving statusLine, enabledPlugins, effortLevel,
+# and any other keys) referencing the fixed scripts in ~/.claude/hooks/:
+#   SessionStart (startup|resume|clear|compact) → resume_autoload.sh
+#   PostToolUse  (Write|Edit)                   → resume_budget_check.sh
+# Because the scripts live at a FIXED path (they don't rotate per request) this
+# does NOT bash the prompt cache — a documented exception to ccage's "UI-only
+# seeding" rule. Runs every launch, so it self-heals and backfills existing
+# cages on their next `claude`.
+#
+# Sub-opt-outs: CCAGE_NO_AUTOLOAD=1 (skip the auto-read), CCAGE_NO_BUDGET_HOOK=1
+# (skip the budget guard). CCAGE_HOOKS_DIR overrides the script dir.
+_ccage_seed_session_docs_hooks() {
+    [ -n "${CCAGE_SESSION_DOCS:-}" ] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+
+    local dir="$1"
+    local hooks_dir="${CCAGE_HOOKS_DIR:-$HOME/.claude/hooks}"
+
+    local want_autoload=1 want_budget=1
+    [ -n "${CCAGE_NO_AUTOLOAD:-}" ] && want_autoload=0
+    [ -n "${CCAGE_NO_BUDGET_HOOK:-}" ] && want_budget=0
+    [ "$want_autoload" = 0 ] && [ "$want_budget" = 0 ] && return 0
+
+    # Fast path: this runs on EVERY caged launch (once opted in), so skip the
+    # python fork when the wanted hooks are already present — the steady state.
+    # Mirrors how _ccage_patch_onboarding greps before forking python.
+    local settings="$dir/settings.json"
+    if [ -f "$settings" ]; then
+        local need=0
+        { [ "$want_autoload" = 1 ] && ! grep -q 'resume_autoload.sh'     "$settings" 2>/dev/null; } && need=1
+        { [ "$want_budget"   = 1 ] && ! grep -q 'resume_budget_check.sh' "$settings" 2>/dev/null; } && need=1
+        [ "$need" = 0 ] && return 0
+    fi
+
+    python3 - "$settings" "$hooks_dir" "$want_autoload" "$want_budget" <<'PY' 2>/dev/null || true
+import json, os, sys, tempfile
+# KEEP IN SYNC with _ccage_doctor_seed in share/ccage-doctor.sh (same merge;
+# the doctor copy adds an apply flag + a changed/unchanged stdout signal).
+settings_path, hooks_dir = sys.argv[1], sys.argv[2]
+want_autoload, want_budget = sys.argv[3] == "1", sys.argv[4] == "1"
+autoload_cmd = "bash " + os.path.join(hooks_dir, "resume_autoload.sh")
+budget_cmd   = "bash " + os.path.join(hooks_dir, "resume_budget_check.sh")
+
+# Preserve an existing file's mode; never clobber a present-but-unparseable
+# settings.json (Claude Code rejects it too — leave it for the user to fix).
+mode = None
+if os.path.exists(settings_path):
+    try:
+        mode = os.stat(settings_path).st_mode & 0o777
+    except OSError:
+        pass
+    try:
+        with open(settings_path) as f:
+            data = json.load(f)
+    except ValueError:
+        sys.exit(0)
+    except OSError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+else:
+    data = {}
+
+hooks = data.get("hooks")
+if not isinstance(hooks, dict):
+    hooks = {}
+
+def script_base(cmd):
+    return os.path.basename(cmd.split()[-1]) if cmd else ""
+
+def has_cmd(entries, cmd):
+    # Dedup on the hook script's BASENAME, not the full path, so a differing
+    # CCAGE_HOOKS_DIR never appends a duplicate entry (matches the basename
+    # semantics of the wrapper's grep fast-path and the doctor copy).
+    want = script_base(cmd)
+    if not isinstance(entries, list):
+        return False
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        for h in (e.get("hooks") or []):
+            if isinstance(h, dict) and script_base(h.get("command") or "") == want:
+                return True
+    return False
+
+changed = False
+
+if want_autoload and not has_cmd(hooks.get("SessionStart"), autoload_cmd):
+    ss = hooks.get("SessionStart")
+    if not isinstance(ss, list):
+        ss = []
+    ss.append({"matcher": "startup|resume|clear|compact",
+               "hooks": [{"type": "command", "command": autoload_cmd}]})
+    hooks["SessionStart"] = ss
+    changed = True
+
+if want_budget and not has_cmd(hooks.get("PostToolUse"), budget_cmd):
+    ptu = hooks.get("PostToolUse")
+    if not isinstance(ptu, list):
+        ptu = []
+    ptu.append({"matcher": "Write|Edit",
+                "hooks": [{"type": "command", "command": budget_cmd}]})
+    hooks["PostToolUse"] = ptu
+    changed = True
+
+if changed:
+    data["hooks"] = hooks
+    d = os.path.dirname(settings_path) or "."
+    os.makedirs(d, exist_ok=True)
+    # mkstemp gives a unique name on the target's filesystem, so two concurrent
+    # same-cage launches can't collide on a fixed temp path or race os.replace.
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".settings.", suffix=".ccage.tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, settings_path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+PY
+}
+
 # ---- baseline .claudesignore (only if the project has none) ----
 _ccage_write_signore() {
     local target_dir="$1"
@@ -492,6 +620,7 @@ claude() {
     dir="$(_ccage_config_dir_for "$PWD")"
     export CLAUDE_CONFIG_DIR="$dir"
     _ccage_bootstrap_dir "$CLAUDE_CONFIG_DIR" "$PWD"
+    _ccage_seed_session_docs_hooks "$CLAUDE_CONFIG_DIR"
     _ccage_write_signore "$PWD"
 
     [ -z "${CCAGE_KEEP_ATTRIBUTION:-}" ] && export CLAUDE_CODE_ATTRIBUTION_HEADER=0

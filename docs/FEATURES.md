@@ -332,6 +332,64 @@ After write, prints the path to stdout, hints the next step on stderr, and copie
 
 ---
 
+## Session continuity — `/checkpoint`, auto-read, `ccage doctor` [shipped — Phase 7]
+
+Closes the loop between the structural `ccage handoff` brief and a repo's durable `RESUME.md`. The old continuity loop was four fumble-prone steps (run the handoff skill → select → copy → `/clear` → paste). The new loop is two commands with zero copy/paste: **`/checkpoint` → `/clear`** (state auto-loads on the next request). Everything here is inert until a cage opts in with `CCAGE_SESSION_DOCS=1`, and every piece is reversible.
+
+### `/checkpoint` skill
+
+`share/skills/checkpoint/SKILL.md` (+ deterministic `checkpoint-init.sh`). Writes the session state **into `RESUME.md`** (slot-aware: `RESUME.<slot>.md` when `CCAGE_SLOT` is set), merging it with any threads carried in, and rolls older detail down into `CHANGELOG.md` so `RESUME.md` stays lean. `/checkpoint --tidy` additionally runs memory hygiene (regroup `MEMORY.md`, prune dead index links / orphan notes). `checkpoint-init.sh` is idempotent and adds `RESUME.md` / `CHANGELOG.md` to `.git/info/exclude` so continuity files never get committed.
+
+### Auto-read hook (SessionStart)
+
+`share/hooks/resume_autoload.sh`, registered on `SessionStart` for `startup|resume|clear|compact`. A SessionStart hook's stdout is injected into the model's context, so after `/clear` the prior `RESUME.md` is reloaded automatically — that is the whole point of the `clear` source. The hook is slot-aware (mirrors the wrapper's `CCAGE_SLOT` validation), always exits 0, and emits at most two one-line health NOTEs: *RESUME over budget → run `/checkpoint`* and *memory dir messy → run `/checkpoint --tidy`*.
+
+> Auto-read, **not** auto-clear. `/clear` stays a deliberate user action (consistent with the PHASE-6 non-goal). The hook only re-injects state; it never clears for you.
+
+> **Trust note.** `RESUME.md` is normally a *personal, locally-authored* file (it's added to `.git/info/exclude`, so it never travels with the repo). But if you clone a repo that ships a `RESUME.md`, the auto-read hook will inject that attacker-authored text into your session context at every `SessionStart` — a prompt-injection surface. This is no worse than Claude Code already reading repo files, but it happens automatically; treat an inherited `RESUME.md` as untrusted repo content.
+
+### Budget guard hook (PostToolUse)
+
+`share/hooks/resume_budget_check.sh`, registered on `PostToolUse(Write|Edit)`. When a `RESUME.md` / `RESUME.<slot>.md` grows past `MAX` (3) `## Session` blocks it surfaces a non-blocking reminder to archive old blocks into `CHANGELOG`. Silent + exit 0 in every other case. Needs `jq`.
+
+### Per-cage seeding (merge, never share)
+
+`_ccage_seed_session_docs_hooks` in `share/claude-isolation.sh` merges the two hook entries into the cage's own `settings.json` on bootstrap when `CCAGE_SESSION_DOCS=1`. It is a **merge** — every pre-existing key (`statusLine`, `theme`, `plugins`, `effortLevel`, …) is preserved; only a missing `SessionStart`/`PostToolUse` entry is added. `settings.json` is never symlink-shared between cages (consistent with the UI-only-seeding discipline). A grep fast-path skips the python merge once a cage is already seeded.
+
+### `ccage doctor` — one-shot cross-cage sweep
+
+`share/ccage-doctor.sh` (dispatched by `bin/ccage doctor`). For every cage under `${CCAGE_ROOT:-$HOME}/${CCAGE_PREFIX:-.claude-}*` that carries a `.owning_path`:
+
+1. **Backfill** the session-docs hooks block into its `settings.json` (the same safe, idempotent merge), resurrecting the budget hook and wiring the auto-read hook into cages created before Phase 7.
+2. **Report** a worklist: owning repos with a bloated `RESUME*.md` (slot-aware glob — every `RESUME.md` and `RESUME.<slot>.md` is checked) to trim with `/checkpoint`, and every `projects/*/memory` dir that looks unorganized to clean with `/checkpoint --tidy`.
+
+`--dry-run` previews both without writing. Zero API calls (shell + `python3` for the JSON merge). Run it once after upgrading to retrofit existing cages.
+
+### Opt-outs
+
+- `CCAGE_SESSION_DOCS` unset → none of the above is seeded (full opt-out; the default).
+- `CCAGE_NO_AUTOLOAD=1` → seed only the budget hook, not the auto-read hook.
+- `CCAGE_NO_BUDGET_HOOK=1` → seed only the auto-read hook, not the budget guard.
+- `install.sh --no-session-docs` → don't install the hooks, the `/checkpoint` skill, or the `~/.claude/CLAUDE.md` anchor at all.
+- `uninstall.sh` removes all session-docs assets and strips the marker-delimited `CLAUDE.md` anchor (never touching a repo's `RESUME.md`/`CHANGELOG.md` or a cage's seeded `settings.json`).
+
+### Config
+
+| Var | Default | Effect |
+|---|---|---|
+| `CCAGE_SESSION_DOCS` | unset | Master opt-in. Seed the hooks block into a cage's `settings.json` on bootstrap. |
+| `CCAGE_NO_AUTOLOAD` | unset | Skip seeding the SessionStart auto-read hook. |
+| `CCAGE_NO_BUDGET_HOOK` | unset | Skip seeding the PostToolUse budget hook. |
+| `CCAGE_RESUME_BUDGET_LINES` | `250` | Line budget before the auto-read hook / doctor flag a bloated RESUME. |
+| `CCAGE_MEMORY_ORPHAN_MAX` | `3` | Un-indexed memory files tolerated before flagging the dir as messy. |
+| `CCAGE_HOOKS_DIR` | `~/.claude/hooks` | Where the hook scripts are installed and referenced from. |
+
+### Dependencies
+
+`python3` (for the settings.json merge in seeding + `ccage doctor`) and `jq` (for the budget hook). `install.sh` requires `jq` whenever the CLI **or** the session-docs assets are installed.
+
+---
+
 ## `ccusage-all` [shipped]
 
 Function defined in `share/claude-ccusage.sh`. Iterates every `$CCAGE_ROOT/$CCAGE_PREFIX*` directory with a `projects/` subdir, exports `CLAUDE_CONFIG_DIR`, and runs `npx -y ccusage "$@"` against each.

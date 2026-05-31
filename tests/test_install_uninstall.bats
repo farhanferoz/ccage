@@ -11,6 +11,9 @@ setup() {
     FAKE_HOME="$BATS_TEST_TMPDIR/home"
     mkdir -p "$FAKE_HOME"
     REPO_ROOT="$BATS_TEST_DIRNAME/.."
+    # Session-docs paths default to ~/.claude (under FAKE_HOME); make sure the
+    # runner's own ccage env doesn't redirect them elsewhere.
+    unset CCAGE_SHARE_FROM CCAGE_HOOKS_DIR
 }
 
 @test "install then uninstall is a round-trip (up to trailing blank lines)" {
@@ -149,4 +152,96 @@ setup() {
     run "$FAKE_HOME/.local/bin/ccage" handoff --help
     [ "$status" -eq 0 ]
     [[ "$output" == *"Usage:"* ]]
+}
+
+# ---- Phase 7 session-docs assets (hooks + /checkpoint skill + CLAUDE.md anchor) ----
+
+@test "install: session-docs hooks land in ~/.claude/hooks (executable)" {
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    [ -x "$FAKE_HOME/.claude/hooks/resume_autoload.sh" ]
+    [ -x "$FAKE_HOME/.claude/hooks/resume_budget_check.sh" ]
+}
+
+@test "install: /checkpoint skill lands in the master skills dir" {
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    [ -f "$FAKE_HOME/.claude/skills/checkpoint/SKILL.md" ]
+    [ -x "$FAKE_HOME/.claude/skills/checkpoint/checkpoint-init.sh" ]
+}
+
+@test "install: CLAUDE.md anchor appended once and idempotent on re-run" {
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    [ "$(grep -c 'ccage:session-docs:start' "$FAKE_HOME/.claude/CLAUDE.md")" -eq 1 ]
+}
+
+@test "install: CLAUDE.md anchor preserves pre-existing content" {
+    mkdir -p "$FAKE_HOME/.claude"
+    printf '%s\n' '# my global instructions' 'be terse' > "$FAKE_HOME/.claude/CLAUDE.md"
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    grep -qx '# my global instructions' "$FAKE_HOME/.claude/CLAUDE.md"
+    grep -qx 'be terse' "$FAKE_HOME/.claude/CLAUDE.md"
+    grep -q 'ccage:session-docs:start' "$FAKE_HOME/.claude/CLAUDE.md"
+}
+
+@test "install --no-session-docs: hooks, skill, anchor all skipped" {
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --no-session-docs --prefix "$FAKE_HOME/.local" >/dev/null
+    [ ! -e "$FAKE_HOME/.claude/hooks/resume_autoload.sh" ]
+    [ ! -e "$FAKE_HOME/.claude/skills/checkpoint" ]
+    [ ! -e "$FAKE_HOME/.claude/CLAUDE.md" ]
+}
+
+@test "install --dry-run: no session-docs files created" {
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --dry-run --prefix "$FAKE_HOME/.local" >/dev/null
+    [ ! -e "$FAKE_HOME/.claude/hooks/resume_autoload.sh" ]
+    [ ! -e "$FAKE_HOME/.claude/skills/checkpoint" ]
+    [ ! -e "$FAKE_HOME/.claude/CLAUDE.md" ]
+}
+
+@test "uninstall: removes hooks, skill, and the CLAUDE.md anchor (keeps other content)" {
+    mkdir -p "$FAKE_HOME/.claude"
+    printf '%s\n' '# keep me' > "$FAKE_HOME/.claude/CLAUDE.md"
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh"   --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    HOME="$FAKE_HOME" "$REPO_ROOT/uninstall.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    [ ! -e "$FAKE_HOME/.claude/hooks/resume_autoload.sh" ]
+    [ ! -e "$FAKE_HOME/.claude/hooks/resume_budget_check.sh" ]
+    [ ! -e "$FAKE_HOME/.claude/skills/checkpoint/SKILL.md" ]
+    ! grep -q 'ccage:session-docs:start' "$FAKE_HOME/.claude/CLAUDE.md"
+    grep -qx '# keep me' "$FAKE_HOME/.claude/CLAUDE.md"
+}
+
+# F4 regression: the anchor strip must rewrite CLAUDE.md in place WITHOUT
+# changing its permission bits. The old cross-filesystem mktemp+mv stamped the
+# file with mktemp's 0600; ccage_filter_inplace clones the mode via `cp -p`.
+# ls perm string (cut -c1-10) is identical on GNU and BSD, so this is portable.
+@test "uninstall: stripping the CLAUDE.md anchor preserves file permissions" {
+    mkdir -p "$FAKE_HOME/.claude"
+    printf '%s\n' '# keep me' > "$FAKE_HOME/.claude/CLAUDE.md"
+    chmod 0640 "$FAKE_HOME/.claude/CLAUDE.md"
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh"   --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    HOME="$FAKE_HOME" "$REPO_ROOT/uninstall.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    [ "$(ls -ld "$FAKE_HOME/.claude/CLAUDE.md" | cut -c1-10)" = "-rw-r-----" ]
+}
+
+# Dry-run must never touch the disk — including the rmdir of an empty leftover
+# dir, which previously ran unconditionally.
+@test "uninstall --dry-run does not rmdir empty leftover dirs" {
+    mkdir -p "$FAKE_HOME/.claude/skills/checkpoint"
+    mkdir -p "$FAKE_HOME/.local/share/ccage"
+    HOME="$FAKE_HOME" "$REPO_ROOT/uninstall.sh" --shell bash --dry-run --prefix "$FAKE_HOME/.local" >/dev/null
+    [ -d "$FAKE_HOME/.claude/skills/checkpoint" ]
+    [ -d "$FAKE_HOME/.local/share/ccage" ]
+}
+
+# A symlinked CLAUDE.md (dotfile managers) must be edited THROUGH the link, not
+# replaced by a regular file leaving the real target unstripped.
+@test "uninstall: strips the anchor through a symlinked CLAUDE.md, keeping the link" {
+    mkdir -p "$FAKE_HOME/.claude" "$FAKE_HOME/dotfiles"
+    printf '%s\n' '# real claude md' > "$FAKE_HOME/dotfiles/CLAUDE.md"
+    ln -s "$FAKE_HOME/dotfiles/CLAUDE.md" "$FAKE_HOME/.claude/CLAUDE.md"
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh"   --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    grep -q 'ccage:session-docs:start' "$FAKE_HOME/dotfiles/CLAUDE.md"   # anchor hit the target
+    HOME="$FAKE_HOME" "$REPO_ROOT/uninstall.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    [ -L "$FAKE_HOME/.claude/CLAUDE.md" ]                                 # link preserved
+    ! grep -q 'ccage:session-docs:start' "$FAKE_HOME/dotfiles/CLAUDE.md"  # anchor stripped from target
+    grep -qx '# real claude md' "$FAKE_HOME/dotfiles/CLAUDE.md"
 }

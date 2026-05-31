@@ -81,6 +81,7 @@ run_in_proj() {
     unset CCAGE_DISABLE CCAGE_KEEP_ATTRIBUTION CCAGE_KEEP_AUTOUPDATER
     unset CCAGE_SHARE_FROM CCAGE_SHARE_DIRS CCAGE_SLOT
     unset CCAGE_NO_ONBOARDING_PATCH CCAGE_NO_AUTO_SIGNORE
+    unset CCAGE_SESSION_DOCS CCAGE_NO_AUTOLOAD CCAGE_NO_BUDGET_HOOK CCAGE_HOOKS_DIR
     cd "$pwd_arg"
     # shellcheck disable=SC2030  # subshell-local by design
     HOME=$FAKE_HOME
@@ -276,6 +277,49 @@ check "CCAGE_DISABLE=1 with -c: claude invoked"       grep -qx "MOCK_INVOKED" "$
 )
 check "non-resume invocation: no prompt"              bash -c "! grep -q '\[r\]esume' '$TMP/stderr-g-print.log' 2>/dev/null"
 check "non-resume invocation: claude invoked"         grep -qx "MOCK_INVOKED" "$TMP/log-g-print"
+
+# ===== 11. session-docs hooks seeding through the wrapper (Phase 7) =====
+# Opt-in: with CCAGE_SESSION_DOCS=1 the wrapper merges a hooks block into the
+# cage's settings.json before exec'ing claude. Sandbox only — fake HOME + a
+# temp hooks dir; no real cage is touched.
+echo "[11] CCAGE_SESSION_DOCS seeds the hooks block into the cage"
+HOOKS_E="$TMP/hooks-e"; mkdir -p "$HOOKS_E" "$TMP/projH"
+run_in_proj "$TMP/projH" "$TMP/log-h" CCAGE_SESSION_DOCS=1 CCAGE_HOOKS_DIR="$HOOKS_E"
+DIR_H=$(grep '^CLAUDE_CONFIG_DIR=' "$TMP/log-h" | cut -d= -f2-)
+check "seeding created settings.json"        test -f "$DIR_H/settings.json"
+check "SessionStart auto-read hook seeded"   grep -q 'resume_autoload.sh'     "$DIR_H/settings.json"
+check "PostToolUse budget hook seeded"       grep -q 'resume_budget_check.sh' "$DIR_H/settings.json"
+
+# Opt-in respected: no flag → no hooks block.
+mkdir -p "$TMP/projI"
+run_in_proj "$TMP/projI" "$TMP/log-i"
+DIR_I=$(grep '^CLAUDE_CONFIG_DIR=' "$TMP/log-i" | cut -d= -f2-)
+check "no hooks block without CCAGE_SESSION_DOCS" \
+    bash -c "! grep -q 'resume_autoload.sh' '$DIR_I/settings.json' 2>/dev/null"
+
+# ===== 12. /checkpoint bootstrap → resume_autoload re-injection (deterministic) =====
+# The full loop's human steps (/clear) can't be scripted, but the two scriptable
+# halves can: the skill's helper bootstraps the files, and the SessionStart hook
+# re-injects RESUME exactly as it would after /clear.
+echo "[12] checkpoint bootstrap, then auto-read re-injects RESUME"
+REPO_J="$TMP/repoJ"; mkdir -p "$REPO_J"
+( cd "$REPO_J" && git init -q 2>/dev/null || true )
+( cd "$REPO_J" && bash "$REPO/share/skills/checkpoint/checkpoint-init.sh" bootstrap >/dev/null )
+check "bootstrap created RESUME.md"     test -f "$REPO_J/RESUME.md"
+check "bootstrap created CHANGELOG.md"  test -f "$REPO_J/CHANGELOG.md"
+( cd "$REPO_J" && CLAUDE_CONFIG_DIR="$TMP/cage-j" bash "$REPO/share/hooks/resume_autoload.sh" ) > "$TMP/injected-j.txt" 2>/dev/null
+check "auto-read re-injects RESUME content" grep -q '## State' "$TMP/injected-j.txt"
+
+# ===== 13. ccage doctor backfills cages (sandbox root) =====
+echo "[13] ccage doctor backfills the hooks block across cages"
+DROOT="$TMP/doctor-root"; DHOOKS="$TMP/doctor-hooks"
+mkdir -p "$DROOT/.claude-one" "$DROOT/.claude-two"
+printf '%s\n' "$TMP/repo-one" > "$DROOT/.claude-one/.owning_path"
+printf '%s\n' "$TMP/repo-two" > "$DROOT/.claude-two/.owning_path"
+CCAGE_ROOT="$DROOT" CCAGE_PREFIX=.claude- CCAGE_HOOKS_DIR="$DHOOKS" \
+    "$REPO/bin/ccage" doctor >/dev/null 2>&1 || true
+check "doctor seeded cage one" grep -q 'resume_autoload.sh'     "$DROOT/.claude-one/settings.json"
+check "doctor seeded cage two" grep -q 'resume_budget_check.sh' "$DROOT/.claude-two/settings.json"
 
 # ===== Real claude integration (opt-in) =====
 if [ "${1:-}" = "--with-real-claude" ]; then

@@ -6,7 +6,16 @@
 #   <rcd>/claude-isolation.sh     — wrapper (config-dir pivot, bootstrapping)
 #   <rcd>/claude-ccusage.sh       — ccusage-all aggregator (independent)
 #   <prefix>/share/ccage/ccage-handoff.sh — handoff brief generator library
-#   <prefix>/bin/ccage            — CLI dispatcher (uses the library)
+#   <prefix>/share/ccage/ccage-doctor.sh  — doctor (backfill + worklist) library
+#   <prefix>/bin/ccage            — CLI dispatcher (uses the libraries)
+#   ~/.claude/hooks/resume_autoload.sh      — SessionStart auto-read hook
+#   ~/.claude/hooks/resume_budget_check.sh  — PostToolUse RESUME budget guard
+#   <share-from>/skills/checkpoint/         — /checkpoint skill (reaches cages
+#                                             via the existing skills symlink)
+#   ~/.claude/CLAUDE.md                     — short session-continuity anchor
+#     (the last group is the Phase 7 "session docs" feature; skip with
+#      --no-session-docs. Auto-wiring into cages stays opt-in at runtime via
+#      CCAGE_SESSION_DOCS.)
 #
 # An example overrides file lives in the repo at share/claude-overrides.sh.example.
 # Copy it to <rcd>/claude-overrides.sh if you want user-specific behavior
@@ -17,7 +26,8 @@
 #   ./install.sh                       # install for the current shell
 #   ./install.sh --shell bash|zsh      # force a specific shell target
 #   ./install.sh --no-ccusage          # skip claude-ccusage.sh
-#   ./install.sh --no-cli              # skip bin/ccage + handoff library
+#   ./install.sh --no-cli              # skip bin/ccage + handoff/doctor library
+#   ./install.sh --no-session-docs     # skip hooks + /checkpoint skill + anchor
 #   ./install.sh --prefix DIR          # CLI/lib prefix (default: ~/.local)
 #   ./install.sh --dry-run             # print what would be done, do nothing
 #
@@ -40,30 +50,35 @@ shell=""
 dry_run=0
 install_ccusage=1
 install_cli=1
+install_session_docs=1
 prefix="$HOME/.local"
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --shell)      shell="$2"; shift 2 ;;
-        --dry-run)    dry_run=1;  shift   ;;
-        --no-ccusage) install_ccusage=0; shift ;;
-        --no-cli)     install_cli=0; shift ;;
-        --prefix)     prefix="$2"; shift 2 ;;
-        -h|--help)    awk '/^#/{print; next} {exit}' "$0" | sed '1d'; exit 0 ;;
+        --shell)            shell="$2"; shift 2 ;;
+        --dry-run)          dry_run=1;  shift   ;;
+        --no-ccusage)       install_ccusage=0; shift ;;
+        --no-cli)           install_cli=0; shift ;;
+        --no-session-docs)  install_session_docs=0; shift ;;
+        --prefix)           prefix="$2"; shift 2 ;;
+        -h|--help)          awk '/^#/{print; next} {exit}' "$0" | sed '1d'; exit 0 ;;
         *) printf 'unknown flag: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
 
 # ---- dependency check ------------------------------------------------------
-if [ "$install_cli" = 1 ] && ! command -v jq >/dev/null 2>&1; then
+# jq backs two parts: `ccage handoff` (CLI) and the session-docs budget hook
+# (resume_budget_check.sh). Require it if EITHER is being installed — otherwise
+# `--no-cli` alone would skip the check yet still deploy the jq-dependent hook.
+if { [ "$install_cli" = 1 ] || [ "$install_session_docs" = 1 ]; } && ! command -v jq >/dev/null 2>&1; then
     cat >&2 <<EOF
-ccage: jq is required for the \`ccage handoff\` subcommand but was not found.
-       Install it via your package manager:
+ccage: jq is required for \`ccage handoff\` and the session-docs budget hook,
+       but was not found. Install it via your package manager:
          macOS:        brew install jq
          Debian/Ubuntu: sudo apt install jq
          Fedora:       sudo dnf install jq
          Arch:         sudo pacman -S jq
-       Or re-run with --no-cli to skip the CLI/handoff parts.
+       Or re-run with --no-cli --no-session-docs to skip the jq-dependent parts.
 EOF
     exit 1
 fi
@@ -85,6 +100,7 @@ install_file "$REPO_ROOT/share/claude-isolation.sh" "$rcd/claude-isolation.sh"
 
 if [ "$install_cli" = 1 ]; then
     install_file "$REPO_ROOT/share/ccage-handoff.sh" "$prefix/share/ccage/ccage-handoff.sh"
+    install_file "$REPO_ROOT/share/ccage-doctor.sh"  "$prefix/share/ccage/ccage-doctor.sh"
     install_file "$REPO_ROOT/bin/ccage"              "$prefix/bin/ccage"  0755
 
     # PATH check — warn if $prefix/bin isn't on PATH (don't fail; just hint).
@@ -93,6 +109,40 @@ if [ "$install_cli" = 1 ]; then
         *":$prefix/bin:"*) ;;
         *) printf 'note: %s/bin is not on $PATH — add it so `ccage` is callable.\n' "$prefix" ;;
     esac
+fi
+
+# ---- Phase 7 session-docs: hooks, /checkpoint skill, CLAUDE.md anchor -------
+# The hook scripts go to a FIXED path (~/.claude/hooks) referenced by the seeded
+# settings.json; the skill goes to the master skills dir so the existing skills
+# symlink carries it into every cage. All inert until a cage opts in at runtime
+# via CCAGE_SESSION_DOCS — installing them is safe and reversible.
+if [ "$install_session_docs" = 1 ]; then
+    hooks_dir="${CCAGE_HOOKS_DIR:-$HOME/.claude/hooks}"
+    install_file "$REPO_ROOT/share/hooks/resume_autoload.sh"     "$hooks_dir/resume_autoload.sh"     0755
+    install_file "$REPO_ROOT/share/hooks/resume_budget_check.sh" "$hooks_dir/resume_budget_check.sh" 0755
+
+    share_from="${CCAGE_SHARE_FROM:-$HOME/.claude}"
+    install_file "$REPO_ROOT/share/skills/checkpoint/SKILL.md"           "$share_from/skills/checkpoint/SKILL.md"
+    install_file "$REPO_ROOT/share/skills/checkpoint/checkpoint-init.sh" "$share_from/skills/checkpoint/checkpoint-init.sh" 0755
+
+    # CLAUDE.md anchor — short always-on note, marker-guarded so re-runs are safe.
+    claude_md="$HOME/.claude/CLAUDE.md"
+    if [ -f "$claude_md" ] && grep -qF 'ccage:session-docs:start' "$claude_md" 2>/dev/null; then
+        printf 'note: %s already has the ccage session-docs anchor — not modifying\n' "$claude_md"
+    elif [ "$dry_run" = 1 ]; then
+        printf '+ append session-docs anchor to %s\n' "$claude_md"
+    else
+        mkdir -p "$(dirname "$claude_md")"
+        cat >> "$claude_md" <<'ANCHOR'
+
+<!-- ccage:session-docs:start -->
+## Session continuity (ccage)
+- `RESUME.md` / `CHANGELOG.md` in a repo are personal continuity files, excluded via `.git/info/exclude`. On resume, read `RESUME.md` first.
+- Run `/checkpoint` before `/clear` to save state into `RESUME.md` (older detail rolls into `CHANGELOG.md`). With `CCAGE_SESSION_DOCS=1`, ccage auto-reads `RESUME.md` back after `/clear`. Use `/checkpoint --tidy` for memory hygiene.
+<!-- ccage:session-docs:end -->
+ANCHOR
+        printf 'appended session-docs anchor to %s\n' "$claude_md"
+    fi
 fi
 
 if [ -f "$rc" ] && grep -qF 'Added by ccage installer' "$rc" 2>/dev/null; then

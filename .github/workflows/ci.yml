@@ -31,7 +31,7 @@ jobs:
 
       - name: shellcheck
         if: matrix.os == 'ubuntu-latest' && matrix.shell == 'bash'
-        run: shellcheck share/*.sh install.sh uninstall.sh
+        run: shellcheck share/*.sh share/hooks/*.sh share/skills/checkpoint/*.sh install.sh uninstall.sh
         shell: bash
 
       - name: source smoke test (bash)

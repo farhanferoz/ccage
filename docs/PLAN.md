@@ -15,9 +15,12 @@ Workflow: **Sonnet implements each phase TDD-style; Opus reviews when the phase 
 | 6a — `ccage handoff` | ✅ done — offline brief generator, 42 unit + 14 install + 8 e2e tests |
 | 6b — `-r`/`-c` cost interception | ✅ done — wrapper-level prompt, 28 unit + 3 e2e tests, set -u fix bundled |
 | 6c — Real-world validation + Tier 2 review | ✅ done — gemini surfaced 2 medium defects (cost-label scope, jq slurp memory); both fixed |
+| Session docs / continuity | ✅ done — `/checkpoint` skill + SessionStart auto-read hook + PostToolUse budget guard + per-cage `settings.json` seeding + `ccage doctor` backfill. Spec `docs/PHASE-7-SESSION-DOCS-PLAN.md`. Tier-3 reviewed (simplify + 5-way fan-out + agy second-opinion + adversarial); review fixes applied. |
 | 7 — Publish | ⏸ blocked only on § 5.3 (first push to remote, watch matrix go green) |
 
-End-to-end behavior is also covered by `tests/validate-e2e.sh` (30 mock + 9 real-claude assertions) — see RESUME.md for details.
+> **Naming note.** Two work-streams have carried the "Phase 7" label: the **publish** phase (below) and the later **session docs / continuity** feature (spec'd in `docs/PHASE-7-SESSION-DOCS-PLAN.md`). They are independent; the row above tracks the latter.
+
+End-to-end behavior is also covered by `tests/validate-e2e.sh` (mock + real-claude + session-docs assertions; 53 checks) — see RESUME.md for details.
 
 ## Ground rules
 

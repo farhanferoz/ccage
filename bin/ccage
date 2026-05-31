@@ -7,6 +7,7 @@
 #
 # Subcommands:
 #   handoff   — produce a Markdown brief from a session JSONL
+#   doctor    — backfill session-docs hooks + report a RESUME/memory worklist
 #   -h --help — this message
 
 # Resolve install layout. Two modes:
@@ -51,19 +52,28 @@ case "${1:-}" in
         . "$CCAGE_LIB/ccage-handoff.sh"
         _ccage_handoff_main "$@"
         ;;
+    doctor)
+        shift
+        CCAGE_LIB=$(_ccage_resolve_lib) || exit $?
+        # shellcheck source=../share/ccage-doctor.sh disable=SC1091
+        . "$CCAGE_LIB/ccage-doctor.sh"
+        _ccage_doctor_main "$@"
+        ;;
     -h|--help|"")
         cat <<EOF
 Usage: ccage <command> [args]
 
 Commands:
   handoff   Produce a Markdown brief from a Claude Code session JSONL.
+  doctor    Backfill the session-docs hooks block into every cage and report a
+            worklist of repos needing /checkpoint (RESUME bloat / messy memory).
 
 Env:
   CCAGE_LIB           Override library directory (default: \$(dirname \$0)/../share).
   CCAGE_HANDOFF_DIR   Where handoff briefs are written. Default:
                       \${XDG_DATA_HOME:-~/.local/share}/ccage/handoffs.
 
-ccage handoff -h for handoff-specific help.
+ccage handoff -h / ccage doctor -h for subcommand-specific help.
 EOF
         ;;
     *)
