@@ -394,6 +394,42 @@ Closes the loop between the structural `ccage handoff` brief and a repo's durabl
 
 ---
 
+## `/keepwarm` — bounded cache keep-warm loop [shipped — Phase 8]
+
+Skill at `share/skills/keepwarm/` (installed to the master skills dir; reaches every
+cage via the skills symlink, like `/checkpoint`). Invoke before stepping away:
+
+```
+/keepwarm                   # ping every 55 min, max 6 pings (defaults)
+/keepwarm <interval> <max>  # custom; interval clamped [1,59] min, max [1,24]
+```
+
+The session schedules itself a minimal wake turn each interval; the wake re-reads the
+cached conversation prefix (a ~0.1× cache read) and resets the cache TTL clock. The
+arming announcement always states interval, cap, per-ping cost, projected auto-stop
+time, and that "stop" cancels — defaults are never silent. Real user activity resets
+the ping counter; the cap bounds consecutive unattended pings.
+
+Before arming, the bundled `keepwarm-calc.sh probe` (jq-only, zero API calls) reads
+the newest session JSONL and warns when: the session is on the **5-minute tier** with
+an interval > 4 (cache would die before the first ping — fix with interval 4 or
+`ENABLE_PROMPT_CACHING_1H=1`), or the prefix is small enough (< ~20K tokens) that a
+rewrite costs pennies.
+
+**Economics.** Ping ≈ 0.1× of the prefix; an expired return ≈ 2× (1h-tier write).
+Break-even ≈ 20 pings; the default cap of 6 bounds worst-case waste at ≈ 30% of one
+rewrite while covering ~5.5 h. On subscription plans a ping can also **open a fresh
+5-hour usage window** while you're away — armed long absences trade cache warmth for
+window time.
+
+**Limits.** Only helps when returning to the *same live session* — a warm cache never
+survives `claude -r` (structural miss, GitHub #51764; use `/checkpoint` or
+`ccage handoff` before exiting instead). The schedule dies with the session. Requires
+a Claude Code build with self-scheduling wake-ups (the mechanism behind the bundled
+`/loop`). Skip installing with `./install.sh --no-keepwarm`.
+
+---
+
 ## `ccusage-all` [shipped]
 
 Function defined in `share/claude-ccusage.sh`. Iterates every `$CCAGE_ROOT/$CCAGE_PREFIX*` directory with a `projects/` subdir, exports `CLAUDE_CONFIG_DIR`, and runs `npx -y ccusage "$@"` against each.

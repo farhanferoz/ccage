@@ -162,6 +162,8 @@ PY
 Claude Code's `--resume` / `--continue` reliably cache-misses the message prefix on the first turn after resume — a structural request difference, not TTL expiry (isolated by the 1-hour-TTL controlled experiment in GitHub issue #51764; see also #43657 and #44045; one narrow cause was fixed in Claude Code v2.1.90, the rest remain as of 2.1.13x). On a long Opus session that's $0.50–$2 of cache-write tokens per resume, even seconds after exit — treat ccage's number as a worst-case bound.
 
 > **Separate from the resume bug:** idle gaps longer than the cache TTL also trigger a full rewrite. Claude Code picks the TTL by auth method — Claude subscriptions get the 1-hour tier automatically; API key / Bedrock / Vertex / Foundry default to 5 minutes (opt in to 1 hour with `ENABLE_PROMPT_CACHING_1H=1`, force 5 minutes with `FORCE_PROMPT_CACHING_5M=1`; both upstream Claude Code variables, not ccage's). Subagents always use the 5-minute tier.
+>
+> For planned absences, ccage ships a `/keepwarm` skill: `/keepwarm [interval] [max]` (defaults 55 min × 6) schedules minimal self-wake turns that re-read the cached prefix before it expires — see `docs/FEATURES.md` for costs and limits.
 
 ccage helps two ways:
 
