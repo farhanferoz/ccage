@@ -93,7 +93,6 @@ _Nothing yet._
 ### Notes
 - Keying strategy locked to **Option A** (basename + hash-on-collision). Always-suffix and registry-based alternatives considered and deferred. See `project_ccage_v0_choices` memory for reasoning.
 - Attribution-header suppression does **not** fix the separate `cch=`-in-tool_results cache bug tracked at [anthropics/claude-code#40652](https://github.com/anthropics/claude-code/issues/40652). Users with heavy tool-use sessions should also install [`claude-code-cache-fix`](https://github.com/cnighswonger/claude-code-cache-fix).
-- No AI attribution anywhere per project preference.
 
 ---
 
