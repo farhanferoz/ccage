@@ -51,10 +51,10 @@ bash "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/keepwarm/keepwarm-calc.sh" prob
 
 It prints `transcript=`, `peak_cache_read=` (≈ the cached prefix size in
 tokens), and `tier=` (`1h`, `5m`, or `unknown`). Run it exactly as shown — do
-not add output suppression. If it reports `transcript=none` inside a clearly
-live session, the likely cause is a Bash sandbox blocking reads of the config
-dir — note that in one clause and proceed with "cost unknown"; never let a
-failed probe stop the arming or the announcement.
+not add output suppression. If it prints `probe_note=read-denied`, your Bash
+is sandboxed away from the config dir — tell the user in one clause and
+proceed with "cost unknown"; never let a failed probe stop the arming or the
+announcement.
 
 ## 3. Warn before arming (when warranted)
 

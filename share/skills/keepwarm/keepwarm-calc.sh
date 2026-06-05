@@ -27,14 +27,24 @@ config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 slug="${proj//\//-}"
 session_dir="$config_dir/projects/$slug"
 
-transcript=""
+transcript="" ls_err=""
 if [ -d "$session_dir" ]; then
     # shellcheck disable=SC2012  # ls -t is fine — session UUIDs have no newlines
     transcript=$(ls -t "$session_dir"/*.jsonl 2>/dev/null | head -1)
+else
+    # Distinguish "no sessions yet" from "can't read the config dir" (a
+    # sandboxed Bash denies reads outside the workspace — surface that instead
+    # of a misleading plain `none`).
+    ls_err=$(ls "$config_dir" 2>&1 >/dev/null) || true
 fi
 
 if [ -z "$transcript" ] || [ ! -f "$transcript" ]; then
-    printf 'transcript=none\npeak_cache_read=0\ntier=unknown\n'
+    case "$ls_err" in
+        *[Pp]ermission\ denied*|*[Oo]peration\ not\ permitted*)
+            printf 'transcript=none\npeak_cache_read=0\ntier=unknown\nprobe_note=read-denied (sandboxed Bash?)\n' ;;
+        *)
+            printf 'transcript=none\npeak_cache_read=0\ntier=unknown\n' ;;
+    esac
     exit 0
 fi
 
