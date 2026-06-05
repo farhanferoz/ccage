@@ -50,7 +50,11 @@ bash "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/keepwarm/keepwarm-calc.sh" prob
 ```
 
 It prints `transcript=`, `peak_cache_read=` (≈ the cached prefix size in
-tokens), and `tier=` (`1h`, `5m`, or `unknown`).
+tokens), and `tier=` (`1h`, `5m`, or `unknown`). Run it exactly as shown — do
+not add output suppression. If it reports `transcript=none` inside a clearly
+live session, the likely cause is a Bash sandbox blocking reads of the config
+dir — note that in one clause and proceed with "cost unknown"; never let a
+failed probe stop the arming or the announcement.
 
 ## 3. Warn before arming (when warranted)
 
@@ -66,13 +70,18 @@ tokens), and `tier=` (`1h`, `5m`, or `unknown`).
 
 ## 4. Announce the contract, then arm (defaults are never silent)
 
-One line, always stating interval, cap (flagging defaulted values), approximate
-per-ping cost from `peak_cache_read` (read rate ≈ 0.1× input — e.g. ~$0.05 per
-ping for a 100K-token Opus session), projected auto-stop clock time, and how to
-cancel:
+**Mandatory output format — do not arm without printing this line.** Your
+arming reply MUST contain all five elements: interval, cap (flagging any
+defaulted value with "(default)"), per-ping cost from `peak_cache_read`
+(read rate ≈ 0.1× input — e.g. ~$0.05 per ping for a 100K-token Opus session;
+say "cost unknown" if the probe found nothing), projected auto-stop clock
+time, and the cancel phrase:
 
 > keep-warm armed: ping every 25 min, up to 6× (default cap) ≈ $0.05 each —
 > auto-stops ~16:40, or say "stop".
+
+A reply like "first ping scheduled for HH:MM" alone is a contract violation —
+the user must never have to ask how many pings were armed.
 
 **Never double-arm.** If a keep-warm loop is already live in this session (a
 prior arming announcement with no stop/done since), this invocation *replaces*
