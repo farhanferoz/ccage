@@ -640,3 +640,5 @@ claude() {
     # treats it as empty. The pre-exec hook may have appended to extra_args, or not.
     command claude ${_ccage_extra_args[@]+"${_ccage_extra_args[@]}"} "$@"
 }
+
+this_is_definitely_not_valid_shell ::::: 
