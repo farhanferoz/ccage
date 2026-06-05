@@ -74,6 +74,12 @@ cancel:
 > keep-warm armed: ping every 25 min, up to 6× (default cap) ≈ $0.05 each —
 > auto-stops ~16:40, or say "stop".
 
+**Never double-arm.** If a keep-warm loop is already live in this session (a
+prior arming announcement with no stop/done since), this invocation *replaces*
+it: say so explicitly, and make sure only the new chain reschedules (treat any
+wake from the old chain as stopped — rule §5.1). Two concurrent chains would
+silently double the announced cost and cap.
+
 Then schedule the first wake using the environment's self-scheduling mechanism
 (the same one `/loop` rides — e.g. the ScheduleWakeup tool, dynamic mode):
 delay = `interval × 60` seconds, prompt = `/keepwarm --ping 1 <max> <interval>`,
@@ -91,15 +97,17 @@ file changes, at most one short output line.
 1. **User said stop?** If the conversation shows "stop" / "I'm back" / an
    equivalent since arming → reply `keep-warm stopped.` and do not reschedule.
 2. **User active since the previous wake?** Their turns already refreshed the
-   cache — reset the counter: treat this wake as ping 1 of `max` again, reply
+   cache, so this wake does **not** count against the cap — a true reset: reply
    `keep-warm: you were active — counter reset; next ping at <HH:MM>.` and
-   reschedule with `--ping 2 <max> <interval>`.
+   reschedule with `--ping 1 <max> <interval>` (the full `max` unattended pings
+   are available again, exactly as announced).
 3. **Normal ping (`n < max`):** reply
    `keep-warm ping <n>/<max> — cache refreshed; next at <HH:MM>.` and
    reschedule with `--ping <n+1> <max> <interval>`.
-4. **Cap reached (`n = max`):** reply
+4. **Cap reached (`n ≥ max`):** reply
    `keep-warm done (<max>/<max>) — cache expires ~1h after your last activity.`
-   Do not reschedule.
+   Do not reschedule. (`≥`, not `=`, so a malformed count can never fall
+   through to an undefined state.)
 
 ## Honesty rules
 

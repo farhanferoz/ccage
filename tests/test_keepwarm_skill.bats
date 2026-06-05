@@ -34,7 +34,7 @@ probe() { CLAUDE_CONFIG_DIR="$FAKE_CONFIG" run bash "$HELPER" probe "$PROJ"; }
     probe
     [ "$status" -eq 0 ]
     [[ "$output" == *"transcript=none"* ]]
-    [[ "$output" == *"peak_cache_read=0"* ]]
+    grep -qx 'peak_cache_read=0' <<< "$output"
     [[ "$output" == *"tier=unknown"* ]]
 }
 
@@ -49,7 +49,16 @@ probe() { CLAUDE_CONFIG_DIR="$FAKE_CONFIG" run bash "$HELPER" probe "$PROJ"; }
     probe
     [ "$status" -eq 0 ]
     [[ "$output" == *"transcript=$new"* ]]
-    [[ "$output" == *"peak_cache_read=5000"* ]]
+    # whole-line match: a substring test would also pass on e.g. =50000
+    grep -qx 'peak_cache_read=5000' <<< "$output"
+}
+
+@test "probe: PROJECT_DIR with trailing slash still finds the session dir" {
+    mkdir -p "$(session_dir)"
+    emit_entry "$(session_dir)/s.jsonl" 4242 1000 0
+    CLAUDE_CONFIG_DIR="$FAKE_CONFIG" run bash "$HELPER" probe "$PROJ/"
+    [ "$status" -eq 0 ]
+    grep -qx 'peak_cache_read=4242' <<< "$output"
 }
 
 @test "probe: 1h-dominant session → tier=1h" {
@@ -73,7 +82,7 @@ probe() { CLAUDE_CONFIG_DIR="$FAKE_CONFIG" run bash "$HELPER" probe "$PROJ"; }
     printf '{"message":{"usage":{"cache_read_input_tokens":1234}}}\n' > "$(session_dir)/s.jsonl"
     probe
     [ "$status" -eq 0 ]
-    [[ "$output" == *"peak_cache_read=1234"* ]]
+    grep -qx 'peak_cache_read=1234' <<< "$output"
     [[ "$output" == *"tier=unknown"* ]]
 }
 
@@ -82,7 +91,7 @@ probe() { CLAUDE_CONFIG_DIR="$FAKE_CONFIG" run bash "$HELPER" probe "$PROJ"; }
     printf 'this is not json {{{\n' > "$(session_dir)/s.jsonl"
     probe
     [ "$status" -eq 0 ]
-    [[ "$output" == *"peak_cache_read=0"* ]]
+    grep -qx 'peak_cache_read=0' <<< "$output"
     [[ "$output" == *"tier=unknown"* ]]
 }
 

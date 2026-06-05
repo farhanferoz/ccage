@@ -8,6 +8,10 @@
 #
 # Usage: keepwarm-calc.sh probe [PROJECT_DIR]
 # Exit: 0 on any probe (missing data degrades to none/0/unknown); 2 on usage error.
+#
+# Deliberately self-contained (no sourcing of ccage libs — must work when the
+# CLI is not installed). The slug derivation below is therefore duplicated:
+# KEEP IN SYNC with _ccage_handoff_pwd_to_slug in share/ccage-handoff.sh.
 
 set -u
 
@@ -15,10 +19,11 @@ usage() { printf 'usage: %s probe [PROJECT_DIR]\n' "${0##*/}" >&2; exit 2; }
 
 [ "${1:-}" = "probe" ] || usage
 proj="${2:-$PWD}"
+proj="${proj%/}"   # a trailing slash would put a stray '-' in the slug
 
 config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-# Claude Code derives project slugs from CWD by replacing `/` with `-`.
-# KEEP IN SYNC with _ccage_handoff_pwd_to_slug in share/ccage-handoff.sh.
+# Claude Code derives project slugs from CWD by replacing `/` with `-`
+# (KEEP IN SYNC — see prologue).
 slug="${proj//\//-}"
 session_dir="$config_dir/projects/$slug"
 
