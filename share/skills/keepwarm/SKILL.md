@@ -96,6 +96,17 @@ reason = `keep-warm ping 1/<max>`. If no self-scheduling mechanism exists in
 this environment, do **not** arm — tell the user and suggest
 `/loop <interval>m` as the manual alternative.
 
+## 4b. While armed — re-anchor on activity (the cheap path)
+
+Whenever you handle a **real user turn** while a wake is pending, reschedule
+the pending wake to a full `interval` from now, with `--ping 1` (the user's
+turn already refreshed the cache TTL, so the timer restarts and the full cap
+is available again). This rides a turn that is already paid for — it avoids
+the wake firing early and burning a pointless cache read. Mention nothing
+unless asked; this is silent bookkeeping. (If your environment *stacks*
+scheduled wakes instead of superseding the pending one, skip re-anchoring —
+rely on §5.2 — and never create a second chain.)
+
 ## 5. On a scheduled wake (`--ping <n> <max> <interval>`)
 
 A wake **is** the cache refresh — the request that delivered it already re-read
@@ -105,8 +116,9 @@ file changes, at most one short output line.
 
 1. **User said stop?** If the conversation shows "stop" / "I'm back" / an
    equivalent since arming → reply `keep-warm stopped.` and do not reschedule.
-2. **User active since the previous wake?** Their turns already refreshed the
-   cache, so this wake does **not** count against the cap — a true reset: reply
+2. **User active since the previous wake?** (Reached only when §4b re-anchoring
+   didn't happen.) Their turns already refreshed the cache, so this wake does
+   **not** count against the cap — a true reset: reply
    `keep-warm: you were active — counter reset; next ping at <HH:MM>.` and
    reschedule with `--ping 1 <max> <interval>` (the full `max` unattended pings
    are available again, exactly as announced).
