@@ -315,11 +315,14 @@ SIGNORE
 # Resume cost interception (Phase 6b)
 #
 # claude -r / claude -c trigger a structural cache miss on the message prefix
-# every time, regardless of TTL (Claude Code's processSessionStartHooks +
-# reorderAttachmentsForAPI shuffle bytes at messages[0]; see GitHub
-# anthropics/claude-code #42309, #43657). Each cold resume rewrites the full
-# accumulated cache at ~1.25× input rate. On a long Opus session that's real
-# money — $0.50 to $2+ per resume.
+# even inside the TTL window (Claude Code's processSessionStartHooks +
+# reorderAttachmentsForAPI shuffle bytes at messages[0]; isolated by the
+# 1-hour-TTL controlled experiment in anthropics/claude-code #51764; see also
+# #43657, #44045 — one narrow cause was fixed in CC v2.1.90, the rest remain).
+# A cold resume rewrites the accumulated prefix at the cache-write rate
+# (1.25× input on the 5m tier, 2× on the 1h tier). On a long Opus session
+# that's real money — $0.50 to $2+ per resume. Treat the estimate as a
+# worst-case bound.
 #
 # The interceptor:
 #   1. Detects -c / --continue / -r <uuid> / --resume <uuid> in args
@@ -572,7 +575,7 @@ _ccage_intercept_resume() {
         printf 'ccage: %s session %s · %s · %s\n' "$verb" "${session_id:0:8}" "$age" "$model"
         printf '       Resume will rewrite ~%dK tokens (message prefix). Estimated cost: $%s–$%s.\n' \
             $((rewrite / 1000)) "$lo" "$hi"
-        printf '       (Claude Code resume always misses cache; not a TTL issue — see GitHub #42309, #43657.)\n'
+        printf '       (Resume cache misses are structural, not TTL — see GitHub #51764, #43657. Worst-case estimate.)\n'
         printf '       [r]esume / [h]andoff / [c]ancel? '
     } >&2
 

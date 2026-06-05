@@ -99,7 +99,7 @@ Idempotency is the contract: hooks must only add missing keys, never overwrite e
 
 ## Resume cost interception (`-r` / `-c`) [shipped]
 
-The `claude()` shell function intercepts resume invocations to surface the cache-rewrite cost before launch. Motivation: Claude Code's `--resume` / `--continue` always cache-miss the message prefix (structural diff at `messages[0]`, not TTL — see GitHub #42309, #43657). On long sessions this is real money ($0.50–$2/resume on Opus).
+The `claude()` shell function intercepts resume invocations to surface the cache-rewrite cost before launch. Motivation: Claude Code's `--resume` / `--continue` reliably cache-miss the message prefix even inside the TTL window (structural diff at `messages[0]` — isolated by the 1-hour-TTL controlled experiment in GitHub #51764; see also #43657, #44045; one narrow cause fixed in Claude Code v2.1.90). On long sessions this is real money ($0.50–$2/resume on Opus).
 
 ### Detection
 
@@ -115,7 +115,7 @@ The `claude()` shell function intercepts resume invocations to surface the cache
 ```
 ccage: Continuing most-recent session 4f616b4b · 8h ago · claude-opus-4-7
        Resume will rewrite ~70K tokens (message prefix). Estimated cost: $1.10–$1.65.
-       (Claude Code resume always misses cache; not a TTL issue — see GitHub #42309, #43657.)
+       (Resume cache misses are structural, not TTL — see GitHub #51764, #43657. Worst-case estimate.)
        [r]esume / [h]andoff / [c]ancel?
 ```
 
@@ -171,7 +171,7 @@ Hardcoded in `share/claude-isolation.sh`. Refresh the `# updated:` header and bu
 
 ## `ccage handoff` — offline session brief [shipped]
 
-Generates a Markdown handoff brief from a Claude Code session JSONL. **Zero API calls** — pure shell + jq. Use case: avoid `claude -r`/`-c`'s structural prompt-cache rewrite tax (Claude Code resumes always cache-miss on the message prefix — see GitHub issues #42309, #43657). Generate a brief from the prior session, start a fresh `claude`, paste the brief as the first message.
+Generates a Markdown handoff brief from a Claude Code session JSONL. **Zero API calls** — pure shell + jq. Use case: avoid `claude -r`/`-c`'s structural prompt-cache rewrite tax (Claude Code resumes reliably cache-miss the message prefix — see GitHub issues #51764, #43657). Generate a brief from the prior session, start a fresh `claude`, paste the brief as the first message.
 
 ### Usage
 
@@ -227,7 +227,7 @@ Resilient to malformed JSONL lines — every jq invocation uses raw-input + `fro
 
 ## Resume cost interception [shipped — Phase 6b]
 
-When you invoke `claude -c` (continue) or `claude -r <session-id>` (resume), the wrapper computes the cache-rewrite cost from the session's on-disk `usage` history and prompts before launch. Background: Claude Code's resume always misses the message-prefix cache, regardless of TTL (GitHub anthropics/claude-code #42309, #43657 — `processSessionStartHooks` and `reorderAttachmentsForAPI` shuffle bytes at `messages[0]`). Each cold resume pays ~1.25× input rate on the rewritten prefix; on a long Opus session that's $0.50–$2+ per resume.
+When you invoke `claude -c` (continue) or `claude -r <session-id>` (resume), the wrapper computes the cache-rewrite cost from the session's on-disk `usage` history and prompts before launch. Background: Claude Code's resume reliably misses the message-prefix cache even inside the TTL window (GitHub anthropics/claude-code #51764 — a 1-hour-TTL controlled experiment isolating the resume event; see also #43657, #44045 — `processSessionStartHooks` and `reorderAttachmentsForAPI` shuffle bytes at `messages[0]`; one narrow cause fixed in Claude Code v2.1.90). Each cold resume pays the cache-write rate (1.25× input on the 5-minute tier, 2× on the 1-hour tier) on the rewritten prefix; on a long Opus session that's $0.50–$2+ per resume. Treat the estimate as a worst-case bound.
 
 ### When the prompt fires
 
@@ -253,11 +253,15 @@ When you invoke `claude -c` (continue) or `claude -r <session-id>` (resume), the
 ```
 ccage: Continuing most-recent session 4f616b4b · 4h 12m ago · claude-opus-4-7
        Resume will rewrite ~70K tokens (message prefix). Estimated cost: $1.10–$1.65.
-       (Claude Code resume always misses cache; not a TTL issue — see GitHub #42309, #43657.)
+       (Resume cache misses are structural, not TTL — see GitHub #51764, #43657. Worst-case estimate.)
        [r]esume / [h]andoff / [c]ancel?
 ```
 
-Cost is a range (±25% empirical uncertainty band), computed as `peak_cache_read − ~19K tools+system prefix`, times the model's cache-write rate from the inline pricing table.
+Cost is a range (±25% empirical uncertainty band), computed as `peak_cache_read − ~19K tools+system prefix`, times the model's cache-write rate from the inline pricing table. The table uses the 5-minute-tier write rate (1.25× input); on the 1-hour tier (the default for Claude-subscription auth) writes cost 2×, so true worst-case is ~1.6× the shown range. For subscription auth the dollar figure is notional — usage is plan-included — but still tracks quota weight.
+
+### Cache lifetime (upstream Claude Code variables — ccage does not set these)
+
+Claude Code picks the prompt-cache TTL by auth method: **Claude subscriptions get the 1-hour tier automatically**; API key / Bedrock / Vertex / Foundry default to 5 minutes. `ENABLE_PROMPT_CACHING_1H=1` opts into 1 hour (Claude Code ≥ 2.1.108; the older `ENABLE_PROMPT_CACHING_1H_BEDROCK` is deprecated but honored); `FORCE_PROMPT_CACHING_5M=1` forces 5 minutes. Subagents always use the 5-minute tier. Which tier a request actually got is recorded in the session JSONL under `message.usage.cache_creation` (`ephemeral_1h_input_tokens` / `ephemeral_5m_input_tokens`).
 
 ### Decisions
 

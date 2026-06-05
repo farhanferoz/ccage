@@ -4,7 +4,9 @@ All notable changes to ccage. Format follows [Keep a Changelog](https://keepacha
 
 ## [Unreleased]
 
-_Nothing yet._
+### Documentation
+- **Corrected the resume cache-miss citations** (README, `docs/FEATURES.md`, the interceptor's prompt line + header comment in `share/claude-isolation.sh`). #42309 is a `[DOCS]` request about a narrower regression (deferred tools/MCP, v2.1.69 → fixed v2.1.90), not the structural bug itself; the load-bearing citation is now **#51764** (1-hour-TTL controlled experiment isolating the resume event) plus #43657 / #44045. "Always misses" softened to "reliably misses; worst-case estimate" — one cause is fixed upstream, the rest remain as of CC 2.1.13x.
+- **Documented Claude Code's auth-dependent cache TTL** (README note + `docs/FEATURES.md` subsection): subscriptions get the 1-hour tier automatically; API key/Bedrock/Vertex/Foundry default to 5 minutes; upstream env vars `ENABLE_PROMPT_CACHING_1H` / `FORCE_PROMPT_CACHING_5M` (CC ≥ 2.1.108); subagents always 5m. Noted that the cost prompt uses the 5m-tier write rate, so 1h-tier worst case is ~1.6× the shown range.
 
 ## [0.1.0] — 2026-06-05
 

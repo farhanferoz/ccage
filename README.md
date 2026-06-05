@@ -30,7 +30,7 @@ Drops a tiny shell function over `claude` that:
 7. Exports `DISABLE_AUTOUPDATER=1`. Parallel sessions racing on a self-update can corrupt the install; skip the updater and bump the CLI manually.
 8. Ships a `ccusage-all` helper that runs [`ccusage`](https://www.npmjs.com/package/ccusage) across every isolated config dir and aggregates the output.
 9. Ships a `ccage handoff` CLI that produces an offline Markdown brief from any session JSONL — useful as a context bootstrap for a fresh session when you'd otherwise pay `claude -r`'s structural cache-rewrite tax. Pure jq, zero API calls. See [docs/FEATURES.md](docs/FEATURES.md) and [docs/PHASE-6-HANDOFF-SPEC.md](docs/PHASE-6-HANDOFF-SPEC.md).
-10. Intercepts `claude -c` / `claude -r <id>` and shows the estimated cache-rewrite cost before launch, with three choices: resume, switch to a handoff brief, or cancel. Background: Claude Code's resume always cache-misses the message prefix regardless of TTL (GitHub anthropics/claude-code [#42309](https://github.com/anthropics/claude-code/issues/42309), [#43657](https://github.com/anthropics/claude-code/issues/43657)), so every resume on a long Opus session costs real money. Silence with `CCAGE_NO_RESUME_PROMPT=1`; tune threshold via `CCAGE_RESUME_PROMPT_MIN_USD` (default $0.25).
+10. Intercepts `claude -c` / `claude -r <id>` and shows the estimated cache-rewrite cost before launch, with three choices: resume, switch to a handoff brief, or cancel. Background: Claude Code's resume reliably cache-misses the message prefix even inside the TTL window — a structural request difference at `messages[0]`, isolated by a 1-hour-TTL controlled experiment in [#51764](https://github.com/anthropics/claude-code/issues/51764) (see also [#43657](https://github.com/anthropics/claude-code/issues/43657), [#44045](https://github.com/anthropics/claude-code/issues/44045); one narrow cause was fixed in Claude Code v2.1.90, the rest remain) — so resuming a long Opus session usually costs real money. Silence with `CCAGE_NO_RESUME_PROMPT=1`; tune threshold via `CCAGE_RESUME_PROMPT_MIN_USD` (default $0.25).
 11. Ships an optional session-continuity loop — `/checkpoint` skill + auto-read hook + `ccage doctor` — so state survives `/clear` without copy/paste. See [Session continuity](#session-continuity-checkpoint--auto-read).
 
 ### Bonus: dodges the `settings.json` write race
@@ -159,7 +159,9 @@ PY
 
 ## Avoiding `-r`/`-c`'s cache rewrite cost
 
-Claude Code's `--resume` / `--continue` always cache-misses the message prefix on the first turn after resume (structural diff, not TTL — see GitHub issues #42309, #43657). On a long Opus session that's $0.50–$2 of cache-write tokens every resume, even seconds after `/clear`.
+Claude Code's `--resume` / `--continue` reliably cache-misses the message prefix on the first turn after resume — a structural request difference, not TTL expiry (isolated by the 1-hour-TTL controlled experiment in GitHub issue #51764; see also #43657 and #44045; one narrow cause was fixed in Claude Code v2.1.90, the rest remain as of 2.1.13x). On a long Opus session that's $0.50–$2 of cache-write tokens per resume, even seconds after exit — treat ccage's number as a worst-case bound.
+
+> **Separate from the resume bug:** idle gaps longer than the cache TTL also trigger a full rewrite. Claude Code picks the TTL by auth method — Claude subscriptions get the 1-hour tier automatically; API key / Bedrock / Vertex / Foundry default to 5 minutes (opt in to 1 hour with `ENABLE_PROMPT_CACHING_1H=1`, force 5 minutes with `FORCE_PROMPT_CACHING_5M=1`; both upstream Claude Code variables, not ccage's). Subagents always use the 5-minute tier.
 
 ccage helps two ways:
 
