@@ -31,7 +31,7 @@ Drops a tiny shell function over `claude` that:
 8. Ships a `ccusage-all` helper that runs [`ccusage`](https://www.npmjs.com/package/ccusage) across every isolated config dir and aggregates the output.
 9. Ships a `ccage handoff` CLI that produces an offline Markdown brief from any session JSONL — useful as a context bootstrap for a fresh session when you'd otherwise pay `claude -r`'s structural cache-rewrite tax. Pure jq, zero API calls. See [docs/FEATURES.md](docs/FEATURES.md) and [docs/PHASE-6-HANDOFF-SPEC.md](docs/PHASE-6-HANDOFF-SPEC.md).
 10. Intercepts `claude -c` / `claude -r <id>` and shows the estimated cache-rewrite cost before launch, with three choices: resume, switch to a handoff brief, or cancel. Background: Claude Code's resume always cache-misses the message prefix regardless of TTL (GitHub anthropics/claude-code [#42309](https://github.com/anthropics/claude-code/issues/42309), [#43657](https://github.com/anthropics/claude-code/issues/43657)), so every resume on a long Opus session costs real money. Silence with `CCAGE_NO_RESUME_PROMPT=1`; tune threshold via `CCAGE_RESUME_PROMPT_MIN_USD` (default $0.25).
-9. Ships a `ccage handoff` CLI that turns any session JSONL on disk into a Markdown brief you can paste into a fresh `claude` session — useful for avoiding `claude -r`'s structural prompt-cache rewrite tax. Pure shell + jq, zero API calls.
+11. Ships an optional session-continuity loop — `/checkpoint` skill + auto-read hook + `ccage doctor` — so state survives `/clear` without copy/paste. See [Session continuity](#session-continuity-checkpoint--auto-read).
 
 ### Bonus: dodges the `settings.json` write race
 
@@ -194,6 +194,19 @@ The brief contains: user prompts (chronological), files Read/Edit/Written, Bash 
 
 Requires `jq` (`brew install jq`, `apt install jq`, etc). See `docs/FEATURES.md` for the full reference.
 
+## Session continuity (`/checkpoint` + auto-read)
+
+Long sessions end at `/clear` — and the next one starts cold. ccage ships an optional loop that closes the gap:
+
+- **`/checkpoint` skill** — writes session state into the repo's `RESUME.md` (slot-aware under `CCAGE_SLOT`), rolling older detail into `CHANGELOG.md` to keep it lean. Both files are excluded from git via `.git/info/exclude` — they're personal, not product. `--tidy` also reorganizes the cage's memory dir.
+- **Auto-read hook** — a `SessionStart` hook re-injects `RESUME.md` into context on startup, resume, `/clear`, and compaction. The loop becomes `/checkpoint` → `/clear` → state reloaded. No copy, no paste.
+- **Budget hook** — a non-blocking `PostToolUse` reminder when a `RESUME` file grows past 3 session blocks.
+- **`ccage doctor`** — one-shot sweep across every existing cage: backfills the two hook entries into each `settings.json` (idempotent merge, existing keys preserved) and prints a worklist of bloated `RESUME*.md` files and messy memory dirs. `--dry-run` previews without writing.
+
+`install.sh` deploys the hooks and the skill (skip all of it with `--no-session-docs`). Seeding the hook entries into cages is opt-in via `CCAGE_SESSION_DOCS=1`; per-hook opt-outs are `CCAGE_NO_AUTOLOAD=1` and `CCAGE_NO_BUDGET_HOOK=1`.
+
+> **Caveat:** the auto-read hook injects `RESUME.md` from whatever repo you're in — including one you just cloned. A malicious repo could ship a crafted `RESUME.md` as a prompt-injection vector. Documented in `docs/FEATURES.md`; disable per-cage with `CCAGE_NO_AUTOLOAD=1` if you work in untrusted checkouts.
+
 ## Uninstall
 
 ```sh
@@ -215,6 +228,9 @@ All off by default. Set any of these before launching `claude`:
 | `CCAGE_NO_ONBOARDING_PATCH=1` | Don't pre-set `hasCompletedOnboarding`. |
 | `CCAGE_NO_RESUME_PROMPT=1` | Skip the resume cost prompt for `-r`/`-c`. |
 | `CCAGE_RESUME_PROMPT_MIN_USD` | Threshold below which the prompt is skipped (default `0.25`). |
+| `CCAGE_SESSION_DOCS=1` | Opt **in**: seed the session-continuity hooks into each cage's `settings.json`. |
+| `CCAGE_NO_AUTOLOAD=1` | Don't seed the `RESUME.md` auto-read hook. |
+| `CCAGE_NO_BUDGET_HOOK=1` | Don't seed the RESUME-size reminder hook. |
 | `CCAGE_ROOT=/some/dir` | Parent directory for isolated configs (default `$HOME`). |
 | `CCAGE_PREFIX=.claude-` | Directory name prefix (default `.claude-`). |
 | `CCAGE_HANDOFF_DIR` | Where `ccage handoff` writes briefs (default `~/.local/share/ccage/handoffs`). |
