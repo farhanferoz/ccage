@@ -16,6 +16,9 @@
 #     (the last group is the Phase 7 "session docs" feature; skip with
 #      --no-session-docs. Auto-wiring into cages stays opt-in at runtime via
 #      CCAGE_SESSION_DOCS.)
+#   <share-from>/skills/keepwarm/           — /keepwarm skill (Phase 8; skip
+#                                             with --no-keepwarm; per-session,
+#                                             user-invoked, inert otherwise)
 #
 # An example overrides file lives in the repo at share/claude-overrides.sh.example.
 # Copy it to <rcd>/claude-overrides.sh if you want user-specific behavior
@@ -28,6 +31,7 @@
 #   ./install.sh --no-ccusage          # skip claude-ccusage.sh
 #   ./install.sh --no-cli              # skip bin/ccage + handoff/doctor library
 #   ./install.sh --no-session-docs     # skip hooks + /checkpoint skill + anchor
+#   ./install.sh --no-keepwarm         # skip the /keepwarm skill
 #   ./install.sh --prefix DIR          # CLI/lib prefix (default: ~/.local)
 #   ./install.sh --dry-run             # print what would be done, do nothing
 #
@@ -51,6 +55,7 @@ dry_run=0
 install_ccusage=1
 install_cli=1
 install_session_docs=1
+install_keepwarm=1
 prefix="$HOME/.local"
 
 while [ $# -gt 0 ]; do
@@ -60,6 +65,7 @@ while [ $# -gt 0 ]; do
         --no-ccusage)       install_ccusage=0; shift ;;
         --no-cli)           install_cli=0; shift ;;
         --no-session-docs)  install_session_docs=0; shift ;;
+        --no-keepwarm)      install_keepwarm=0; shift ;;
         --prefix)           prefix="$2"; shift 2 ;;
         -h|--help)          awk '/^#/{print; next} {exit}' "$0" | sed '1d'; exit 0 ;;
         *) printf 'unknown flag: %s\n' "$1" >&2; exit 2 ;;
@@ -143,6 +149,16 @@ if [ "$install_session_docs" = 1 ]; then
 ANCHOR
         printf 'appended session-docs anchor to %s\n' "$claude_md"
     fi
+fi
+
+# ---- Phase 8: /keepwarm skill ------------------------------------------------
+# Per-session, user-invoked cache keep-warm. Reaches cages via the existing
+# skills symlink, same as /checkpoint. Inert until invoked — no hooks, no
+# settings.json seeding.
+if [ "$install_keepwarm" = 1 ]; then
+    share_from="${CCAGE_SHARE_FROM:-$HOME/.claude}"
+    install_file "$REPO_ROOT/share/skills/keepwarm/SKILL.md"         "$share_from/skills/keepwarm/SKILL.md"
+    install_file "$REPO_ROOT/share/skills/keepwarm/keepwarm-calc.sh" "$share_from/skills/keepwarm/keepwarm-calc.sh" 0755
 fi
 
 if [ -f "$rc" ] && grep -qF 'Added by ccage installer' "$rc" 2>/dev/null; then

@@ -321,6 +321,16 @@ CCAGE_ROOT="$DROOT" CCAGE_PREFIX=.claude- CCAGE_HOOKS_DIR="$DHOOKS" \
 check "doctor seeded cage one" grep -q 'resume_autoload.sh'     "$DROOT/.claude-one/settings.json"
 check "doctor seeded cage two" grep -q 'resume_budget_check.sh' "$DROOT/.claude-two/settings.json"
 
+# ===== 14. /keepwarm probe (deterministic, Phase 8) =====
+echo "[14] keepwarm probe reads peak + tier from the newest session JSONL"
+KWCFG="$TMP/kw-cfg"; KWPROJ="$TMP/kw-proj"
+mkdir -p "$KWCFG/projects/${KWPROJ//\//-}" "$KWPROJ"
+printf '{"message":{"usage":{"cache_read_input_tokens":42000,"cache_creation":{"ephemeral_1h_input_tokens":9000,"ephemeral_5m_input_tokens":0}}}}\n' \
+    > "$KWCFG/projects/${KWPROJ//\//-}/s.jsonl"
+CLAUDE_CONFIG_DIR="$KWCFG" bash "$REPO/share/skills/keepwarm/keepwarm-calc.sh" probe "$KWPROJ" > "$TMP/kw-probe.txt"
+check "probe reports prefix size" grep -q 'peak_cache_read=42000' "$TMP/kw-probe.txt"
+check "probe reports cache tier"  grep -q 'tier=1h'               "$TMP/kw-probe.txt"
+
 # ===== Real claude integration (opt-in) =====
 if [ "${1:-}" = "--with-real-claude" ]; then
     echo

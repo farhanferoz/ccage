@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Remove ccage. Leaves per-project config dirs, credentials, and any
 # user-written claude-overrides.sh alone — those are user data. Also removes the
-# Phase 7 session-docs assets (hooks, /checkpoint skill, CLAUDE.md anchor) but
-# never touches a repo's RESUME.md / CHANGELOG.md, nor per-cage seeded settings.
+# Phase 7 session-docs assets (hooks, /checkpoint skill, CLAUDE.md anchor) and
+# the Phase 8 /keepwarm skill, but never touches a repo's RESUME.md /
+# CHANGELOG.md, nor per-cage seeded settings.
 #
 # Usage:
 #   ./uninstall.sh                   # uninstall for the current shell
@@ -76,6 +77,18 @@ if [ -d "$share_from/skills/checkpoint" ]; then
         printf '+ rmdir %s/skills/checkpoint (if empty)\n' "$share_from"
     elif rmdir "$share_from/skills/checkpoint" 2>/dev/null; then
         printf 'removed empty %s/skills/checkpoint\n' "$share_from"
+    fi
+fi
+
+# /keepwarm skill (Phase 8) — same removal semantics as /checkpoint.
+for f in "$share_from/skills/keepwarm/SKILL.md" "$share_from/skills/keepwarm/keepwarm-calc.sh"; do
+    if [ -f "$f" ]; then run rm -f "$f"; printf 'removed %s\n' "$f"; fi
+done
+if [ -d "$share_from/skills/keepwarm" ]; then
+    if [ "$dry_run" = 1 ]; then
+        printf '+ rmdir %s/skills/keepwarm (if empty)\n' "$share_from"
+    elif rmdir "$share_from/skills/keepwarm" 2>/dev/null; then
+        printf 'removed empty %s/skills/keepwarm\n' "$share_from"
     fi
 fi
 

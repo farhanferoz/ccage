@@ -75,8 +75,10 @@ covering trigger phrases ("keep warm", "keep the cache alive", "stepping away",
 "/keepwarm"). Body instructs the agent to:
 
 1. **Parse args:** `/keepwarm [interval-minutes] [max-pings]` — defaults **55** and
-   **6**. Validate: interval clamped to [1, 590] (≤4 recommended on the 5-minute tier
-   — API-key auth), max-pings clamped to [1, 24]. Bad input → say so, use defaults.
+   **6**. Validate: interval clamped to **[1, 59]** (the scheduler's single hop caps
+   at 60 min, and any interval ≥ the TTL would let the cache die between pings;
+   ≤4 recommended on the 5-minute tier — API-key auth), max-pings clamped to [1, 24].
+   Bad input → say so, use defaults.
 2. **Sanity checks before arming (cheap, local):**
    - If the session transcript's peak `cache_read_input_tokens` is small
      (< ~20K), tell the user a rewrite would cost pennies and ask whether to bother.
@@ -162,11 +164,18 @@ to the **same live session** — never before a `claude -r`.
    the `CCAGE_SHARE_FROM` symlink.
 7. shellcheck clean (helper script, if any).
 
-**Manual validation recipe:** in a live caged session, `/keepwarm 1 2` → walk away 2
-min → expect two one-line pings ~60 s apart, then auto-stop; confirm in the session
-JSONL that each ping's `usage.cache_read_input_tokens` ≈ the prefix size (hit, not
-rewrite). Control: same idle without the skill on a 5m-tier (`FORCE_PROMPT_CACHING_5M=1`)
-session → `cache_creation` spike on return.
+**Manual validation recipe (two parts):**
+
+1. *Loop mechanics* — in a live caged session, `/keepwarm 1 2` → walk away 2 min →
+   expect two one-line pings ~60 s apart, then auto-stop; each ping's
+   `usage.cache_read_input_tokens` ≈ the prefix size (hit, not rewrite).
+2. *Refresh-on-read assertion (load-bearing)* — part 1 alone can't distinguish
+   "refresh worked" from "cache hadn't expired yet." Force the short tier:
+   `FORCE_PROMPT_CACHING_5M=1` session, `/keepwarm 4 2`. Ping 2 lands at t≈8 min —
+   **past** the original 5-minute expiry — so it can only be a `cache_read` if ping 1
+   actually reset the TTL clock. Assert ping 2's usage shows a read, not a
+   `cache_creation` spike. Control: same 8-minute idle *without* the skill →
+   `cache_creation` spike on return.
 
 ## Implementation order (TDD; each step = commit, green gate before next)
 
@@ -197,6 +206,10 @@ the helper script ships).
 
 ## Open questions (resolve during 8a/8c)
 
+0. Verify `ENABLE_PROMPT_CACHING_1H` and `FORCE_PROMPT_CACHING_5M` exist and work in
+   the installed Claude Code version — the tier-mismatch hint and the validation
+   recipe's control both depend on them (docs-verified 2026-06-05, CC ≥ 2.1.108;
+   never exercised on this machine).
 1. Minimum Claude Code version for self-scheduling wakeups (check changelog; record in FEATURES.md).
 2. Helper script: ship `keepwarm-calc.sh` or keep checks as skill-prose jq? (Decide by line count at implementation.)
 3. Does a pending wakeup surviving into an *active* conversation annoy (one stray

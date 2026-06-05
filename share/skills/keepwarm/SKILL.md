@@ -105,6 +105,9 @@ file changes, at most one short output line.
 
 - Pings cost real quota (≈ a cache-read of the whole conversation each). Never
   arm without an explicit user request, and never exceed the announced cap.
+- On subscription plans, a ping that fires while no usage window is active
+  **opens a fresh 5-hour rate-limit window** — the user may return to a window
+  that is already hours old. Mention this when arming for a long absence.
 - The schedule does not survive a session restart — if asked, say so.
 - A warm cache does **not** help `claude -r` / `--resume` (structural cache
   miss regardless of warmth). If the user plans to exit, point at `/checkpoint`
