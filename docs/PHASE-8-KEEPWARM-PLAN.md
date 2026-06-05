@@ -98,8 +98,12 @@ covering trigger phrases ("keep warm", "keep the cache alive", "stepping away",
    silently re-anchored to the latest activity (their turns already refreshed the
    cache); user says "stop"/"I'm back" → stop; session restarted → the schedule is
    gone naturally (wakeups don't survive restarts — document this).
-5. **Quota honesty:** when arming, state the per-ping cost in plain terms (≈ a
-   cache-read of the conversation, ~0.1× of one full turn's input) and the cap.
+5. **Quota honesty (defaults are never silent):** when arming, announce the full
+   contract in one line — interval, cap (flagging which values were defaulted),
+   approximate per-ping cost (≈ a cache-read of the conversation, ~0.1× of one full
+   turn's input), the projected auto-stop time, and how to cancel. Example:
+   `keep-warm armed: ping every 25 min, up to 6× (default cap) ≈ $0.05 each —
+   auto-stops ~16:40, or say "stop".`
 
 ### Why the harness scheduler and not shell timers
 
