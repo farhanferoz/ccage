@@ -4,6 +4,10 @@ All notable changes to ccage. Format follows [Keep a Changelog](https://keepacha
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.1.0] — 2026-06-05
+
 ### Added — session continuity (Phase 7)
 - **`/checkpoint` skill** (`share/skills/checkpoint/`). Writes session state into a repo's `RESUME.md` (slot-aware: `RESUME.<slot>.md` under `CCAGE_SLOT`), merging carried threads and rolling older detail into `CHANGELOG.md` to keep `RESUME.md` lean. `--tidy` adds memory hygiene (regroup `MEMORY.md`, prune dead links / orphan notes). Deterministic `checkpoint-init.sh` is idempotent and excludes the continuity files via `.git/info/exclude`. Replaces the four-step copy/paste handoff loop with `/checkpoint` → `/clear`.
 - **Auto-read hook** (`share/hooks/resume_autoload.sh`, `SessionStart` for `startup|resume|clear|compact`). Re-injects `RESUME.md` into context after `/clear` — deleting the manual copy + paste. Slot-aware, always exits 0, emits at most two one-line health NOTEs (RESUME over budget / memory dir messy). Auto-read only; `/clear` stays a deliberate user action (auto-clear remains a non-goal).
@@ -19,8 +23,6 @@ All notable changes to ccage. Format follows [Keep a Changelog](https://keepacha
 - **In-place file rewrites preserve permissions and stay on one filesystem.** `uninstall.sh`'s `CLAUDE.md` / rc strips used a bare `mktemp` (in `$TMPDIR`) + `mv`, a cross-filesystem copy that isn't atomic and stamped the destination with `mktemp`'s `0600` — silently tightening a user's `CLAUDE.md` / `.bashrc`. New shared `ccage_filter_inplace` (`share/ccage-lib.sh`) writes a scratch file in the target's own directory, clones the mode via `cp -p`, then renames. Covered by a perms-preservation round-trip test.
 - **`install.sh` requires `jq` when session-docs are installed.** The dependency check fired only when the CLI was installed, but the session-docs budget hook also needs `jq`; `--no-cli` alone would skip the check yet still deploy the `jq`-dependent hook. The check now fires when the CLI **or** the session-docs assets are being installed.
 - **`uninstall.sh` anchor strip anchors its marker regexes to whole lines** (`^…$`), matching the rc strip, so a body line that merely quotes the marker text can't start/stop the skip range. (`uninstall.sh`)
-
-## [0.1.0] — 2026-05-23
 
 ### Fixed (2026-05-23 publish attempt — surfaced by first GH CI matrix run)
 - **bash 3.2 empty-array hazard.** macOS ships bash 3.2.57 by default; expanding a declared-empty array as `"${arr[@]}"` under `set -u` errors as "unbound variable" (bash 4.4+ treats it as empty). Fixed at 2 call sites — `share/claude-isolation.sh:508` (`command claude "${_ccage_extra_args[@]}" "$@"`) and `share/ccage-handoff.sh:741` (`_ccage_handoff_generate "$jsonl" "${pass_args[@]}"`) — with the portable `${arr[@]+"${arr[@]}"}` guard. Caught by `test_set_u_safety.bats:35` failing on the `macos-latest × bash` CI cell on first push to GH. Commit `8d23c60`.
