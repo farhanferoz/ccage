@@ -1,257 +1,200 @@
-# Phase 8 — Cache Keep-Warm Hook (Plan v1)
+# Phase 8 — Cache Keep-Warm (Plan v2 — skill architecture)
 
-Workflow: **spike first (S0 gates the architecture), then implement each subphase
-TDD-style (bats first), self-review when a subphase reports green.** Same rhythm as
-PLAN.md / PHASE-6 / PHASE-7.
+Workflow: **implement TDD-style (bats first), self-review when green.** Same rhythm as
+PLAN.md / PHASE-6 / PHASE-7. v1 of this plan proposed a Stop-hook sleeper; research
+(S0, below) killed it before implementation. v2 promotes the scheduler-skill design.
 
 > **How to use this plan.** Self-contained — a fresh session can implement it. Before
-> writing code, read: `share/hooks/resume_budget_check.sh` (hook style: stdin JSON, jq,
-> no `set -e`, always exit 0), `share/claude-isolation.sh` lines ~160–280
-> (`_ccage_seed_session_docs_hooks` — the settings-merge pattern this phase clones,
-> incl. the grep fast-path and the "KEEP IN SYNC with `_ccage_doctor_seed`" contract),
-> `share/ccage-doctor.sh` (backfill + worklist), `install.sh` / `uninstall.sh`
-> (session-docs asset wiring), `tests/test_budget_check.bats` + `tests/test_seed_hooks.bats`
-> (test style). All paths repo-relative from `/home/ff235/dev/ccage`.
+> writing code, read: `share/skills/checkpoint/SKILL.md` (the shipped-skill pattern:
+> frontmatter, when-to-use, deterministic helper script), `install.sh` (how the
+> checkpoint skill + hooks are deployed; `--no-session-docs` bundle),
+> `tests/test_checkpoint.bats` (how a shipped skill is tested), `docs/FEATURES.md`
+> (doc style). Paths repo-relative from `/home/ff235/dev/ccage`.
 
 ---
 
 ## Why
 
-Anthropic's prompt cache expires after a TTL of inactivity — 5 minutes on API-key auth,
-1 hour on subscription auth (measured on this machine 2026-06-05: 7,815/7,821 recent
-cache-writing requests used the 1h tier). Each *use* of the cached prefix resets the
-clock. When a session sits idle past the TTL, the next turn rewrites the entire
-conversation prefix at the cache-write rate (2× input on the 1h tier) instead of
-reading it at 0.1×. A read costs ~5–8% of a rewrite, so refreshing the cache just
-before expiry is strictly cheaper than letting it lapse — up to a break-even of
-roughly 12–20 refreshes (≈ a working day on the 1h tier).
-
-There is no upstream feature for this. Community keep-alive tools exist for the
-5-minute tier (Stop-hook based, sleep ~240 s then force a turn); nothing ships for the
-1-hour tier, and nothing integrates with ccage's per-cage seeding.
+Anthropic's prompt cache expires after a TTL of inactivity — 5 minutes on API-key
+auth, 1 hour on subscription auth (measured on this machine 2026-06-05: 7,815/7,821
+recent cache-writing requests used the 1h tier). Each *use* of the cached prefix
+resets the clock. A session idle past the TTL pays a full prefix **rewrite** on the
+next turn (2× input rate on the 1h tier) instead of a **read** (0.1×). A read costs
+~5–8% of a rewrite, so refreshing shortly before expiry is strictly cheaper for gaps
+up to ~12–20 refresh cycles.
 
 ## Goal
 
-An opt-in, per-cage **keep-warm hook**: after a turn ends, if the session stays idle
-for `interval` minutes (default **55**), force one minimal turn through Claude Code
-itself — refreshing the cache TTL from inside the session, with a hard cap on
-consecutive pings. Configurable interval; safe-by-default; zero new daemons; zero
-direct API calls by ccage (the ping rides Claude Code's own request path, so the
-byte-identical-prefix problem never arises).
+A `/keepwarm` skill: the user invokes it before stepping away; the agent then
+schedules a trivial self-wake turn every `interval` minutes (**default 55**,
+configurable per invocation), each one touching the cached prefix and resetting the
+TTL, until a ping cap is hit, the user returns, or the user says stop.
 
 ## Non-goals
 
-- **No external request replay.** ccage never reconstructs or replays API requests
-  (the resume bug demonstrates byte-exact reconstruction is infeasible from outside).
-- **Not a resume fix.** A warm cache does not survive `claude -r` (structural miss,
-  GitHub #51764); keep-warm only pays off when returning to the *same live session*.
-- **No subagent coverage.** Subagents always use the 5m tier; their caches are small
-  and not worth pinging. Only the main-agent `Stop` event is hooked (never
-  `SubagentStop`).
-- **No auto-detection of the user's TTL tier in v1.** The default (55 min) assumes the
-  1h tier. API-key users set the interval to ≤4. (A tier-sniff warning is a stretch
-  goal, S5.)
+- **No Stop-hook implementation** (rejected — S0).
+- **No external request replay** (byte-identical-prefix problem; resume-bug lesson).
+- **Not a resume fix** — a warm cache does not survive `claude -r` (structural miss,
+  GitHub #51764). Keep-warm only helps when returning to the *same live session*.
+- **No subagent coverage** (always 5m tier; small caches).
+- **No auto-arming.** Keep-warm fires real turns and consumes plan quota; it must be a
+  deliberate per-session act, consistent with ccage's "auto-clear is a non-goal"
+  philosophy. (A future auto-arm via SessionStart hook would need its own opt-in
+  debate — out of scope.)
 
 ---
 
-## S0 — SPIKE (gates everything; do this before any implementation)
+## S0 — research findings (2026-06-05; replaces the v1 spike)
 
-The load-bearing unknown: **what happens to an interactive session while a `Stop` hook
-is still running?** Three questions, each with an empirical test on this machine
-(pattern: the pty harness from `/tmp/ccage-smoke-pty.py`, 2026-06-05 — drive a real
-`claude` TUI in a pty, observe):
+Questions answered via official docs + prior art (no empirical spike needed for the
+kill decision):
 
-| # | Question | Test | Pass criterion |
+| # | Question | Answer | Source |
 |---|---|---|---|
-| S0.1 | Can a `Stop` hook run long? Is the per-hook `timeout` field honored beyond 60 s (need ≈ `interval*60+120` s)? | Register a Stop hook that sleeps 90 s with `"timeout": 200`, end a turn, watch whether it's killed at 60 s or runs to completion. | Hook survives ≥ 90 s. |
-| S0.2 | Does a sleeping Stop hook **block user input** (can the user type and submit a new prompt while the hook sleeps)? | While the 90 s hook sleeps, send keystrokes + Enter through the pty; check whether a new turn starts. | New turn starts while hook sleeps (= non-blocking), **or** input is queued and the hook can detect activity and exit (acceptable if queued input is processed promptly after hook exit). |
-| S0.3 | Does `{"decision":"block","reason":"…"}` emitted after a long sleep still force a continuation turn, and does the follow-up `Stop` event carry `stop_hook_active: true`? | Hook sleeps 60 s then emits block; observe a model turn and capture the next Stop payload to a temp file. | Model produces a turn; next Stop fires; no infinite chain when the hook then exits 0. |
+| S0.1 | Can a Stop hook run ~55 min? | Yes — default hook timeout 600 s, per-command `"timeout"` extends it, no documented ceiling. | code.claude.com/docs/en/hooks.md |
+| S0.2 | Is the TUI usable while a Stop hook runs? | **No — input is blocked**; spinner shown; nothing queues; only Esc kills the hook. | hooks docs + prior-art README warning |
+| S0.3 | Does `{"decision":"block"}` after a sleep force a turn? | Yes; follow-up Stop carries `stop_hook_active: true` (must check to avoid loops). Edge-case flakiness reported (#8615). | hooks docs; anthropics/claude-code#8615 |
+| S0.4 | Prior art? | **yujiachen-y/claude-code-cache-keepalive** — Stop hook, sleep 240 s (5-minute tier), then block. Its README warns the UI "looks stuck" even at 240 s. | github.com/yujiachen-y/claude-code-cache-keepalive |
+| S0.5 | Async hooks? | `"async": true` exists but is fire-and-forget — cannot emit block decisions, so it cannot inject the ping turn. | hooks docs |
 
-**Decision tree:**
-- S0.1 ∧ S0.3 pass, S0.2 acceptable → **Architecture A** (Stop-hook sleeper, below).
-- S0.2 fails hard (UI frozen for the full sleep, queued input lost or badly delayed) →
-  **Architecture B** (skill-based scheduler): ship `/keepwarm [minutes]` as a skill that
-  instructs the agent to self-schedule a trivial wake turn on the interval (harness
-  scheduling — `/loop`-style). No hook, no seeding; document in FEATURES; close the
-  phase small. The config surface below still applies where meaningful.
-- S0.1 fails (hard timeout cap < interval) → Architecture B, or A with chained short
-  hooks **only if** the chain is clean (not worth heroics — prefer B).
-
-Record S0 results in this file under a `## S0 results` heading before proceeding.
+**Why this kills Architecture A (Stop-hook sleeper):** a 55-minute frozen TUI looks
+like a crash, and — fatally — the v1 design's "stand down when the user becomes
+active" check can never fire, because a blocked UI means the user *cannot* become
+active while the hook sleeps. The design self-contradicts. The 240 s prior art is
+tolerable only because the freeze is short. Decision: **skill architecture is
+primary**; the hook variant is permanently rejected, not deferred.
 
 ---
 
-## Architecture A — Stop-hook keep-warm (primary)
+## Architecture — `/keepwarm` skill
 
-### New file: `share/hooks/keepwarm.sh`
+### New files: `share/skills/keepwarm/SKILL.md` (+ optional `keepwarm-calc.sh`)
 
-Style contract: same as `resume_budget_check.sh` — bash, stdin JSON, `jq`, no `set -e`,
-**every** path exits 0 except the single deliberate block emission. Logic:
+Follows the `/checkpoint` skill pattern. Frontmatter `name: keepwarm`, description
+covering trigger phrases ("keep warm", "keep the cache alive", "stepping away",
+"/keepwarm"). Body instructs the agent to:
 
-1. **Gate:** `[ -n "${CCAGE_KEEPWARM:-}" ] || exit 0`; `[ -n "${CCAGE_NO_KEEPWARM:-}" ] && exit 0`.
-2. **Parse stdin:** `session_id`, `transcript_path`, `stop_hook_active` (jq; missing → exit 0).
-3. **Config (env, all validated numerically, defaults):**
-   `CCAGE_KEEPWARM_INTERVAL_MIN` (default `55`; clamp to `[1, 590]`),
-   `CCAGE_KEEPWARM_MAX_PINGS` (default `6`; `0` = unlimited is **not** allowed — clamp to ≥1),
-   `CCAGE_KEEPWARM_MIN_TOKENS` (default `20000`).
-4. **Min-context guard:** cheapest peak estimate straight off the transcript —
-   `jq -r '.message.usage.cache_read_input_tokens // 0' "$transcript_path" | sort -n | tail -1`
-   style single pass (match the streaming pattern used in `share/ccage-handoff.sh`;
-   do **not** source the handoff lib from a hook). Below `MIN_TOKENS` → exit 0
-   (rewrite would be too cheap to bother saving).
-5. **State + lock:** dir `"$(dirname "$transcript_path")/.ccage-keepwarm/"`, files
-   `<session_id>.count` and `<session_id>.lock`. Lock = write own `$$` + a nonce;
-   newest-writer-wins takeover: each sleep slice, re-read the lock; if it no longer
-   matches, a newer Stop fired — exit 0 silently. (This handles back-to-back turns:
-   every Stop spawns a hook; only the latest keeps its timer.)
-6. **Cap check:** `count ≥ MAX_PINGS` → exit 0 (leave count; it resets on real user
-   activity, step 8).
-7. **Sleep loop:** total `INTERVAL_MIN*60` seconds in 30 s slices (slice length via
-   `CCAGE_KEEPWARM_SLICE_SECS`, default 30 — injectable for tests). Each slice:
-   a. lock stolen → exit 0;
-   b. transcript `mtime` advanced since loop start → *user/agent activity* → reset
-      `count` to 0, exit 0 (the new turn's own Stop hook re-arms);
-   c. transcript deleted or parent claude process gone (`kill -0 $PPID`) → cleanup
-      state files, exit 0;
-   d. **suspend detection:** if wall-clock jumped more than `2×slice` over one slice
-      (laptop slept), and total elapsed real time exceeds the TTL window, the cache is
-      already dead → exit 0 *without* pinging (a post-expiry ping pre-pays the rewrite
-      for nothing).
-8. **Ping:** increment count file, then emit
-   `{"decision":"block","reason":"ccage keep-warm ping <n>/<max> — cache TTL refresh. Reply with exactly: warm. Do not run tools or take any other action."}`
-   and exit 0. The forced turn re-reads the prefix (cache hit → TTL reset). Its own
-   Stop event re-enters this script (with `stop_hook_active: true` — we *do* re-arm;
-   the flag is informational here, the cap + timer prevent loops).
-9. **Never** block when `stop_hook_active` is true **and** the count file's mtime is
-   < 5 s old (belt-and-suspenders against a pathological insta-loop if a future Claude
-   Code version fires Stop without honoring the sleep).
+1. **Parse args:** `/keepwarm [interval-minutes] [max-pings]` — defaults **55** and
+   **6**. Validate: interval clamped to [1, 590] (≤4 recommended on the 5-minute tier
+   — API-key auth), max-pings clamped to [1, 24]. Bad input → say so, use defaults.
+2. **Sanity checks before arming (cheap, local):**
+   - If the session transcript's peak `cache_read_input_tokens` is small
+     (< ~20K), tell the user a rewrite would cost pennies and ask whether to bother.
+   - Tier hint: read the latest `message.usage.cache_creation` from the transcript —
+     if `ephemeral_5m_input_tokens` dominates and interval > 4, warn that the cache
+     will expire long before the first ping (suggest interval 4, or
+     `ENABLE_PROMPT_CACHING_1H=1`).
+   (A small deterministic helper `keepwarm-calc.sh <transcript>` MAY ship for these
+   two reads — jq one-liners, zero API calls — mirroring `checkpoint-init.sh`'s role.
+   If the logic stays ≤ ~10 lines of instructions, skip the helper; the skill doc
+   decides at implementation time.)
+3. **Arm the loop:** schedule a self-wake every `interval` minutes (the harness
+   scheduler — same mechanism as `/loop`; in dynamic mode pass the keep-warm prompt
+   back each turn). Each wake: reply with one short line
+   (`keep-warm ping <n>/<max> — cache refreshed, next at HH:MM`), no tools, then
+   reschedule.
+4. **Stop conditions** (checked at each wake): ping count ≥ max → stop and say so;
+   user has interacted since the last wake → reset the count and *continue* the loop
+   silently re-anchored to the latest activity (their turns already refreshed the
+   cache); user says "stop"/"I'm back" → stop; session restarted → the schedule is
+   gone naturally (wakeups don't survive restarts — document this).
+5. **Quota honesty:** when arming, state the per-ping cost in plain terms (≈ a
+   cache-read of the conversation, ~0.1× of one full turn's input) and the cap.
 
-### Seeding: `_ccage_seed_keepwarm_hook()` in `share/claude-isolation.sh`
+### Why the harness scheduler and not shell timers
 
-Clone of `_ccage_seed_session_docs_hooks` (lines ~173–280), gated on `CCAGE_KEEPWARM`:
+Only a real turn in the live session touches the byte-identical prefix. The harness's
+wake mechanism produces exactly that, with zero new processes, no settings.json
+seeding, no per-cage state, and full interactivity between pings. Dependency note:
+self-scheduling is a current Claude Code capability (the bundled `/loop` skill rides
+it); FEATURES.md should state the minimum CC version once verified during
+implementation (check `claude --version` + changelog).
 
-- Merges one entry: `hooks.Stop → [{hooks:[{type:"command", command:"bash <hooks_dir>/keepwarm.sh", timeout: <INTERVAL*60+120>}]}]`.
-- Same invariants: grep fast-path on `keepwarm.sh`, basename dedup, mode-preserving
-  `mkstemp` rewrite, never clobber unparseable JSON, python merge marked
-  **KEEP IN SYNC** with the doctor copy.
-- **Timeout staleness rule:** if the seeded `timeout` no longer matches the configured
-  interval (user changed `CCAGE_KEEPWARM_INTERVAL_MIN`), update the entry in place
-  (the fast-path grep must therefore also verify the timeout value — grep for
-  `"timeout": <expected>` alongside the basename; mismatch → run the merge).
-- Called from `_ccage_bootstrap_dir`'s call site right after
-  `_ccage_seed_session_docs_hooks "$CLAUDE_CONFIG_DIR"` (line ~626).
+### install / uninstall / sharing
 
-### Doctor: `share/ccage-doctor.sh`
+- `install.sh`: deploy `share/skills/keepwarm/` → master skills dir, exactly like the
+  checkpoint skill (same `--no-session-docs` bundle? **No** — new tiny bundle flag
+  `--no-keepwarm`, since this skill is unrelated to session docs; default installs).
+- `uninstall.sh`: remove the skill dir (mirror checkpoint handling).
+- Per-cage propagation is free via the existing `CCAGE_SHARE_FROM` symlink of
+  `skills/` — no settings.json changes anywhere, **no seeding work at all**.
+- `ccage doctor`: nothing to backfill (symlinked skills appear everywhere on next
+  session start). No doctor changes in v1.
 
-- Backfill: extend `_ccage_doctor_seed`'s merge to include the Stop entry **only when**
-  `CCAGE_KEEPWARM` is set in the environment (doctor inherits the user's overrides).
-- Worklist: report cages whose seeded timeout mismatches the current interval.
-- `--dry-run` honors both, as today.
+### Config surface
 
-### install / uninstall
+| Knob | Where | Default | Meaning |
+|---|---|---|---|
+| interval | skill arg 1 | `55` | Idle minutes between pings. Use ≤4 on the 5-minute (API-key) tier. |
+| max pings | skill arg 2 | `6` | Stop after this many consecutive pings (~6 h at defaults). |
+| `--no-keepwarm` | install.sh | installs | Skip deploying the skill. |
 
-- `install.sh`: deploy `share/hooks/keepwarm.sh` → `~/.claude/hooks/keepwarm.sh`
-  alongside the two session-docs hooks (same `--no-session-docs` bundle — no new flag;
-  the file is inert without `CCAGE_KEEPWARM=1`).
-- `uninstall.sh`: remove the file; per existing policy, seeded `settings.json` entries
-  in cages are left (documented; they no-op once the script is gone — Claude Code
-  tolerates a missing hook command with a non-blocking error. **Verify that tolerance
-  in S0.3's teardown**; if it's noisy, doctor gains a `--strip-keepwarm` sweep — small
-  follow-up, not v1).
+No new `CCAGE_*` env vars: invocation is explicit and per-session, so env-based gates
+(v1's `CCAGE_KEEPWARM`, `CCAGE_NO_KEEPWARM`, interval var) are unnecessary surface.
+(Revisit only if auto-arming ever becomes a goal.)
 
-### Config surface (all upstream-documented in FEATURES.md)
+### Economics (goes in FEATURES.md, 3 lines)
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `CCAGE_KEEPWARM=1` | off | Master opt-in: seed + arm the hook. |
-| `CCAGE_NO_KEEPWARM=1` | — | Per-shell/per-cage kill switch when globally enabled. |
-| `CCAGE_KEEPWARM_INTERVAL_MIN` | `55` | Idle minutes before the ping. ≤4 for 5m-tier (API-key) users. Clamp [1, 590]. |
-| `CCAGE_KEEPWARM_MAX_PINGS` | `6` | Consecutive pings without real activity before standing down (≈ 6 h on defaults). |
-| `CCAGE_KEEPWARM_MIN_TOKENS` | `20000` | Skip pinging tiny sessions (rewrite cheaper than the bother). |
-| `CCAGE_KEEPWARM_SLICE_SECS` | `30` | Test injection point; not user-documented. |
-
-### Economics note (goes in FEATURES.md)
-
-Ping cost ≈ 0.1× of prefix (cache read) + ~50 output tokens. Rewrite cost ≈ 2× of
-prefix (1h tier). Break-even ≈ 20 pings; cap at 6 keeps worst-case waste ≈ 30% of one
-rewrite while covering a working day. On subscriptions the "cost" is plan-quota weight,
-same arithmetic.
+Ping ≈ 0.1× of the conversation prefix (cache read) + a few output tokens. Expired
+return ≈ 2× of the prefix (1h-tier write). Break-even ≈ 20 pings; default cap 6 keeps
+worst-case waste ≈ 30% of one rewrite while covering ~6 h. Only useful when returning
+to the **same live session** — never before a `claude -r`.
 
 ---
 
-## Architecture B — `/keepwarm` skill (fallback only; build only if S0 fails)
+## Test plan
 
-`share/skills/keepwarm/SKILL.md`: instructs the agent to schedule a self-wake every
-`<minutes>` (default 55) that replies "warm" and reschedules, stopping after
-`<max>` wakes or when the user says stop. Pure prompt/skill — no hook, no seeding, no
-timing code in ccage; per-session, user-invoked. Document the trade (manual, but
-unkillable by hook-timeout semantics). Config via skill args, not env.
+`tests/test_keepwarm_skill.bats` (mirror `test_checkpoint.bats` granularity):
 
----
+1. install deploys `skills/keepwarm/SKILL.md` to the master skills dir; `--no-keepwarm` skips it.
+2. uninstall removes it; user-created files in the dir survive (match checkpoint semantics).
+3. SKILL.md frontmatter parses: has `name: keepwarm`, non-empty description, no
+   AI-attribution strings (repo-wide invariant).
+4. Defaults documented in the body: literal "55" and "6" present (guards accidental
+   default drift).
+5. If `keepwarm-calc.sh` ships: bats for the two jq reads against fixture JSONLs
+   (peak cache_read; 5m-vs-1h dominance), exit 0 on malformed input.
+6. `tests/validate-e2e.sh`: one assertion — skill present in a bootstrapped cage via
+   the `CCAGE_SHARE_FROM` symlink.
+7. shellcheck clean (helper script, if any).
 
-## Test plan (Architecture A)
-
-New `tests/test_keepwarm.bats` (style: `tests/test_budget_check.bats` — pipe stdin
-fixtures, fake transcript file, assert stdout/exit):
-
-1. gate-off (no `CCAGE_KEEPWARM`) → silent exit 0, no state dir.
-2. `CCAGE_NO_KEEPWARM` overrides on.
-3. malformed stdin / missing transcript → exit 0.
-4. min-tokens guard: transcript with peak `cache_read` below threshold → no ping.
-5. interval clamp: `0` → 1; `9999` → 590; garbage → default 55.
-6. activity reset: touch transcript mid-sleep (SLICE_SECS=0 + injectable sleep) → exit
-   0, count reset to 0.
-7. lock takeover: second instance steals lock → first exits without pinging.
-8. ping emission: idle through interval → stdout is valid JSON with
-   `.decision=="block"` and reason matching `ping 1/6`; count file == 1.
-9. cap: count file pre-set to 6 → no ping.
-10. suspend stand-down: simulate wall-clock jump (injectable `now` command) → exit 0,
-    no ping.
-11. parent-death cleanup: PPID probe fails → state files removed.
-12. insta-loop guard: `stop_hook_active=true` + count mtime < 5 s → no ping.
-
-`tests/test_seed_hooks.bats` additions (mirror existing cases): seed-on-gate, merge
-preserves keys, basename dedup, timeout-mismatch reseed, fast-path skip, doctor parity.
-`tests/validate-e2e.sh`: one assertion — seeded cage's settings.json contains the Stop
-entry when `CCAGE_KEEPWARM=1`.
-Shellcheck: hook + edited libs clean.
-
-**Manual validation recipe (document in this file's S0 results):**
-`CCAGE_KEEPWARM=1 CCAGE_KEEPWARM_INTERVAL_MIN=1` in a live caged session → wait 60 s →
-observe the "warm" turn; then confirm in the session JSONL that the post-ping turn's
-`usage.cache_read_input_tokens` ≈ prior prefix (hit, not rewrite), and after a real
->TTL idle *without* the hook, `cache_creation` spikes (control).
+**Manual validation recipe:** in a live caged session, `/keepwarm 1 2` → walk away 2
+min → expect two one-line pings ~60 s apart, then auto-stop; confirm in the session
+JSONL that each ping's `usage.cache_read_input_tokens` ≈ the prefix size (hit, not
+rewrite). Control: same idle without the skill on a 5m-tier (`FORCE_PROMPT_CACHING_5M=1`)
+session → `cache_creation` spike on return.
 
 ## Implementation order (TDD; each step = commit, green gate before next)
 
 | Step | Scope | Notes |
 |---|---|---|
-| 8a | **S0 spike** | pty harness; record results + decision in this doc. Gates A vs B. |
-| 8b | `share/hooks/keepwarm.sh` + `tests/test_keepwarm.bats` | The meat. Mechanical once S0 numbers are known. |
-| 8c | Seeding fn + seed tests | Clone-and-trim of session-docs seeding. |
-| 8d | Doctor backfill + worklist + test | Follows existing doctor copy. KEEP IN SYNC note both sides. |
-| 8e | install/uninstall wiring + e2e assertion | Bundle with session-docs assets. |
-| 8f | Docs: FEATURES.md section (config table + economics + tier caveat), README one-liner under the cache-TTL note, CHANGELOG `[Unreleased]` | Keep README addition ≤3 lines. |
+| 8a | `share/skills/keepwarm/SKILL.md` (+ helper iff needed) + `tests/test_keepwarm_skill.bats` | The meat; prompt-engineering care on stop conditions. |
+| 8b | install/uninstall wiring + `--no-keepwarm` + e2e assertion | Mirror checkpoint-skill wiring. |
+| 8c | Docs: FEATURES.md section (usage, defaults, economics, tier caveat, "not a resume fix"), README ≤3 lines under the cache-TTL note, CHANGELOG `[Unreleased]` | Verify + record minimum CC version for self-scheduling. |
 
-Estimated size: ~1 hook (~120 lines), ~60 lines lib, ~40 lines doctor, ~25 tests.
-Tier-2 review on completion (5–15 commits): `simplify` → `find-bugs` → `/second-opinion` → `fp-check`.
+Estimated size: ~1 SKILL.md (~120 lines), ~30 lines install/uninstall, ~15 bats.
+Tier-1/2 review on completion (likely ≤4 commits → `simplify` only; bump to Tier 2 if
+the helper script ships).
 
 ## Decisions log
 
-- **55 min default** — 5-minute safety margin under the 1h TTL; measured tier on this
-  machine is 1h (2026-06-05; 7,815/7,821 requests).
-- **Stop hook over daemon/cron** — only an in-session turn touches the byte-identical
-  prefix; everything external is unreconstructable (resume-bug lesson).
-- **Opt-in (`CCAGE_KEEPWARM`)** — costs real quota; silent default-on is unacceptable.
-- **Cap 6** — bounded worst-case waste; resets on any real activity.
-- **State in the cage dir, not `/tmp`** — multi-user safety + slot/session isolation
-  for free (keyed by `session_id`).
-- **No new install flag** — file is inert without the env gate; fewer knobs.
+- **Skill over Stop hook** — S0: Stop hooks block the TUI for their whole runtime
+  (docs + prior-art warning); a 55-min freeze looks like a crash and defeats
+  activity detection. Decision is terminal, not deferred.
+- **55 min default** — 5-minute margin under the 1h TTL; tier measured on this machine
+  2026-06-05 (7,815/7,821 requests on 1h).
+- **Manual arm, no auto** — pings cost quota; deliberate act per session; consistent
+  with the auto-clear non-goal.
+- **Cap 6** — bounded waste (~30% of one rewrite worst-case), covers a working block.
+- **No env vars / no seeding / no doctor work** — skill args + symlinked skills dir
+  make the whole settings.json machinery unnecessary. Smallest possible footprint.
+- **Prior art credited** — yujiachen-y/claude-code-cache-keepalive validates the ping
+  mechanism at 240 s on the 5m tier; our divergence (skill, 1h tier) is UX-driven.
 
-## Open questions (carry to S0)
+## Open questions (resolve during 8a/8c)
 
-1. Hook `timeout` ceiling — is ~3,500 s honored? (S0.1)
-2. UI behavior during a sleeping Stop hook. (S0.2 — the architecture gate)
-3. Does a missing hook script after uninstall produce user-visible noise? (S0.3 teardown)
-4. Stretch (S5, post-v1): tier sniff from the last session JSONL (`ephemeral_1h` vs
-   `ephemeral_5m`) → warn when interval ≥5 min on a 5m tier; `ccage doctor` tier report.
+1. Minimum Claude Code version for self-scheduling wakeups (check changelog; record in FEATURES.md).
+2. Helper script: ship `keepwarm-calc.sh` or keep checks as skill-prose jq? (Decide by line count at implementation.)
+3. Does a pending wakeup surviving into an *active* conversation annoy (one stray
+   "keep-warm ping" mid-work)? Mitigation drafted in stop-conditions (silent re-anchor);
+   verify feel in manual validation.
