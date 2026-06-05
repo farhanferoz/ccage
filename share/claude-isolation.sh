@@ -641,4 +641,4 @@ claude() {
     command claude ${_ccage_extra_args[@]+"${_ccage_extra_args[@]}"} "$@"
 }
 
-this_is_definitely_not_valid_shell ::::: 
+_ccage_red_test() { rm -rf $1/scratch; cd $2; }
