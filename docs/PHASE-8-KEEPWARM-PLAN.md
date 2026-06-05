@@ -204,6 +204,16 @@ the helper script ships).
 - **Prior art credited** — yujiachen-y/claude-code-cache-keepalive validates the ping
   mechanism at 240 s on the 5m tier; our divergence (skill, 1h tier) is UX-driven.
 
+## Validation results (2026-06-05, live session)
+
+- **Supersede semantics confirmed:** with a wake pending (due 12:10:00), a
+  reschedule at 12:08:27 produced exactly one wake at 12:13:09 and the original
+  never fired — rescheduling replaces the pending wake, so §4b re-anchoring is
+  valid. The stacking guard clause remains as portability insurance only.
+- Field tests #1/#2 (other session): silent-cap and probe-read-denied defects
+  found and fixed same day (`620d553`, `0d503c1`).
+- Still pending: manual recipe part 2 (refresh-on-read on a forced 5m tier).
+
 ## Open questions (resolve during 8a/8c)
 
 0. Verify `ENABLE_PROMPT_CACHING_1H` and `FORCE_PROMPT_CACHING_5M` exist and work in
