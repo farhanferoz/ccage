@@ -17,6 +17,8 @@
 # Config:
 #   CCAGE_ROOT                   — parent dir for isolated configs (default: $HOME)
 #   CCAGE_PREFIX                 — dir name prefix (default: .claude-)
+#   CCAGE_PLUGINS_FROM           — folder of plugin dirs to load into every cage
+#                                  via --plugin-dir (opt-in; default: unset)
 #
 # Extension hooks (redefine in a companion file — see Extension model below):
 #   _ccage_config_dir_override PWD
@@ -485,6 +487,10 @@ _ccage_resume_locate_jsonl() {
     if [ -n "$id_prefix" ]; then
         local matches=()
         local f
+        # zsh aborts a function on a no-match glob (NOMATCH default); disable it
+        # locally so "id matches nothing" returns cleanly in both shells (bash
+        # leaves the pattern literal, rejected by the -f test).
+        if [ -n "${ZSH_VERSION:-}" ]; then setopt local_options no_nomatch 2>/dev/null; fi
         for f in "$session_dir/$id_prefix"*.jsonl; do
             [ -f "$f" ] && matches+=("$f")
         done
@@ -612,6 +618,38 @@ _ccage_intercept_resume() {
     esac
 }
 
+# ---- shared plugins (launch-time --plugin-dir injection) ----
+# Opt-in: point CCAGE_PLUGINS_FROM at a folder of plugin directories (each a dir
+# holding .claude-plugin/plugin.json) and ccage loads them into EVERY cage via
+# `--plugin-dir`, with no per-project install. CCAGE_PLUGINS_FROM may itself be a
+# single plugin dir. Unlike commands/agents/skills (symlink-shared into the cage),
+# plugins are session-loaded at launch — Claude reads the dir directly, so there is
+# nothing to copy and no cage state to mutate. Unset / missing / empty → no-op; it
+# never fails the launch. Appends to the already-initialized _ccage_extra_args array.
+_ccage_collect_plugin_dirs() {
+    local root="${CCAGE_PLUGINS_FROM:-}"
+    [ -n "$root" ] || return 0
+    [ -d "$root" ] || return 0
+
+    # CCAGE_PLUGINS_FROM given as a single plugin dir.
+    if [ -f "$root/.claude-plugin/plugin.json" ]; then
+        _ccage_extra_args+=(--plugin-dir "$root")
+        return 0
+    fi
+
+    # Otherwise a library: each immediate child that is itself a plugin. zsh aborts
+    # a function on a no-match glob (NOMATCH is default-on); bash leaves the pattern
+    # literal (rejected by the -d test). Disable nomatch locally in zsh so an empty
+    # library is a clean no-op in both shells.
+    if [ -n "${ZSH_VERSION:-}" ]; then setopt local_options no_nomatch 2>/dev/null; fi
+    local d
+    for d in "$root"/*; do
+        if [ -d "$d" ] && [ -f "$d/.claude-plugin/plugin.json" ]; then
+            _ccage_extra_args+=(--plugin-dir "$d")
+        fi
+    done
+}
+
 # ---- the wrapper ----
 claude() {
     if [ -n "${CCAGE_DISABLE:-}" ]; then
@@ -636,6 +674,7 @@ claude() {
 
     _ccage_extra_args=()
     _ccage_pre_exec_hook "$PWD" "$CLAUDE_CONFIG_DIR"
+    _ccage_collect_plugin_dirs   # opt-in: --plugin-dir flags for CCAGE_PLUGINS_FROM
 
     # ${arr[@]+"${arr[@]}"} is the bash-3.2-safe idiom for expanding a possibly-
     # empty array under `set -u`. On bash 3.2 (macos default), expanding a

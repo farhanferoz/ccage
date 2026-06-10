@@ -266,6 +266,47 @@ Registers **stdio** servers only (`command` + `args`). Remote MCP servers (`"typ
 
 ---
 
+## Shared plugins across cages (`CCAGE_PLUGINS_FROM`) [shipped]
+
+Claude Code stores installed plugins under the active `CLAUDE_CONFIG_DIR`, so each cage has its own plugin store — install a plugin in one cage and it is absent in the others. ccage symlink-shares `commands`/`agents`/`skills` from the master but **not** plugins (their store carries mutable per-session state; see [UI-only seeding discipline](#ui-only-seeding-discipline)). `CCAGE_PLUGINS_FROM` closes that gap without sharing the store.
+
+### How it works
+
+Point `CCAGE_PLUGINS_FROM` at a folder of plugin directories. On every launch the wrapper appends a `--plugin-dir <dir>` for each one, and Claude Code **session-loads** the plugin straight from that directory — no install into the cage's plugin store.
+
+```
+export CCAGE_PLUGINS_FROM="$HOME/.claude/plugins-shared"
+# plugins-shared/
+#   my-plugin/.claude-plugin/plugin.json    ← each immediate child that is a plugin
+#   another/.claude-plugin/plugin.json
+```
+
+`CCAGE_PLUGINS_FROM` may also be a single plugin dir (one holding `.claude-plugin/plugin.json` directly). Unset / missing / empty is a clean no-op that never fails a launch. Populate the folder once (clone or unpack plugins) and every cage — current and future — loads them.
+
+### Why it doesn't break isolation (or depend on Claude internals)
+
+- It uses `--plugin-dir`, a **supported Claude Code launch flag**, not a reach into the plugin store. Nothing is copied into a cage and no cage state is mutated, so there is no dependence on Claude Code's internal store layout (which can change between versions).
+- Plugins load fresh from the shared folder each session, so activity in one cage cannot mutate what another sees.
+- The only trust interaction is the standard once-per-workspace folder-trust dialog Claude already shows; `--plugin-dir` adds no separate per-plugin prompt.
+
+### Cost — keep the set deliberate
+
+A loaded plugin is "always on" in every session, so its commands/skills/tools are available everywhere. That standing cost is small: Claude loads only a one-line description per command/skill (the body loads on use), and **tool definitions are deferred by default** (MCP tool search, `ENABLE_TOOL_SEARCH=auto`), so even a plugin that bundles a tool server adds only its name upfront and its schema on demand. Still, prefer a small, curated set — the plugins you genuinely want everywhere. Skip them for one launch with `CCAGE_PLUGINS_FROM= claude …`, or globally by leaving the variable unset.
+
+### Plugins vs. the rest
+
+| What | How it reaches a cage | Shared? |
+|---|---|---|
+| commands / agents / skills | symlinked from the master (`CCAGE_SHARE_FROM`) | yes, by default |
+| MCP servers | `ccage enable-mcp` → project `.mcp.json` | opt-in per project |
+| plugins | `--plugin-dir` at launch (`CCAGE_PLUGINS_FROM`) | opt-in, all cages |
+
+### Requirements
+
+- Claude Code with `--plugin-dir` support (Claude Code 2.x; verified on 2.1.170).
+
+---
+
 ## Resume cost interception [shipped — Phase 6b]
 
 When you invoke `claude -c` (continue) or `claude -r <session-id>` (resume), the wrapper computes the cache-rewrite cost from the session's on-disk `usage` history and prompts before launch. Background: Claude Code's resume reliably misses the message-prefix cache even inside the TTL window (GitHub anthropics/claude-code #51764 — a 1-hour-TTL controlled experiment isolating the resume event; see also #43657, #44045 — `processSessionStartHooks` and `reorderAttachmentsForAPI` shuffle bytes at `messages[0]`; one narrow cause fixed in Claude Code v2.1.90). Each cold resume pays the cache-write rate (1.25× input on the 5-minute tier, 2× on the 1-hour tier) on the rewritten prefix; on a long Opus session that's $0.50–$2+ per resume. Treat the estimate as a worst-case bound.
@@ -448,8 +489,15 @@ cage via the skills symlink, like `/checkpoint`). Invoke before stepping away:
 The session schedules itself a minimal wake turn each interval; the wake re-reads the
 cached conversation prefix (a ~0.1× cache read) and resets the cache TTL clock. The
 arming announcement always states interval, cap, per-ping cost, projected auto-stop
-time, and that "stop" cancels — defaults are never silent. Real user activity resets
-the ping counter; the cap bounds consecutive unattended pings.
+time, and that "stop" cancels — defaults are never silent.
+
+**Activity handling is best-effort.** While you're active, the loop tries to re-anchor
+each pending ping past your turn so it never fires — but that re-anchoring is
+model-driven (not a hook), so once you're deep in other work a pending ping can still
+fire at its original time. When it does, it's treated as a free counter-reset: it does
+**not** consume the cap, but it **still costs one cache read** — being active lowers a
+slipped ping to a single cheap read, it does not make it zero. The cap bounds
+consecutive *unattended* pings.
 
 Before arming, the bundled `keepwarm-calc.sh probe` (jq-only, zero API calls) reads
 the newest session JSONL and warns when: the session is on the **5-minute tier** with

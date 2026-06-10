@@ -6,6 +6,14 @@ All notable changes to ccage. Format follows [Keep a Changelog](https://keepacha
 
 _Nothing yet._
 
+## [0.4.0] — 2026-06-10
+
+### Added — shared plugins across cages (`CCAGE_PLUGINS_FROM`)
+- **Load a curated set of plugins into every cage with no per-project install** (`share/claude-isolation.sh`). Point `CCAGE_PLUGINS_FROM` at a folder of plugin directories (each holding `.claude-plugin/plugin.json`) and the wrapper appends a `--plugin-dir` for each on every launch, so Claude **session-loads** them from that one folder in every cage — present and future. Opt-in (default unset); a single plugin dir is also accepted; unset / missing / empty is a no-op that never fails the launch. Unlike `commands`/`agents`/`skills` (symlink-shared into the cage), plugins load at launch via a supported Claude Code flag, so nothing is copied and no cage state is mutated — **no dependence on Claude Code's internal plugin-store layout**, and the only trust interaction is the normal once-per-workspace folder-trust dialog. Tool-search deferral (on by default) keeps even tool-bringing plugins cheap to keep available. Tests: `tests/test_plugins_from.bats` (6, incl. zsh no-match-glob safety and a space-in-path case).
+
+### Documentation
+- **Corrected the `/keepwarm` activity-handling claim** (README + `docs/FEATURES.md`). The prior "re-anchors on your activity, so it costs nothing while you're working" overstated it: re-anchoring is **best-effort** (model-driven, not a hook), so a pending ping can still fire after you've been active. When it does it's a free counter-reset — it does not consume the ping cap, but it still costs one cache read. The docs now say so.
+
 ## [0.3.0] — 2026-06-10
 
 ### Added — `ccage enable-mcp` / `disable-mcp`

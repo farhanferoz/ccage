@@ -32,8 +32,9 @@ Drops a tiny shell function over `claude` that:
 9. Ships a `ccage handoff` CLI that produces an offline Markdown brief from any session JSONL — useful as a context bootstrap for a fresh session when you'd otherwise pay `claude -r`'s structural cache-rewrite tax. Pure jq, zero API calls. See [docs/FEATURES.md](docs/FEATURES.md) and [docs/PHASE-6-HANDOFF-SPEC.md](docs/PHASE-6-HANDOFF-SPEC.md).
 10. Intercepts `claude -c` / `claude -r <id>` and shows the estimated cache-rewrite cost before launch, with three choices: resume, switch to a handoff brief, or cancel. Background: Claude Code's resume reliably cache-misses the message prefix even inside the TTL window — a structural request difference at `messages[0]`, isolated by a 1-hour-TTL controlled experiment in [#51764](https://github.com/anthropics/claude-code/issues/51764) (see also [#43657](https://github.com/anthropics/claude-code/issues/43657), [#44045](https://github.com/anthropics/claude-code/issues/44045); one narrow cause was fixed in Claude Code v2.1.90, the rest remain) — so resuming a long Opus session usually costs real money. Silence with `CCAGE_NO_RESUME_PROMPT=1`; tune threshold via `CCAGE_RESUME_PROMPT_MIN_USD` (default $0.25).
 11. Ships an optional session-continuity loop — `/checkpoint` skill + auto-read hook + `ccage doctor` — so state survives `/clear` without copy/paste. See [Session continuity](#session-continuity-checkpoint--auto-read).
-12. Ships a `/keepwarm` skill — a bounded cache keep-warm loop for planned absences. `/keepwarm [interval] [max]` (defaults 55 min × 6) schedules minimal self-wake turns that re-read the cached conversation prefix before the cache TTL expires, avoiding the full rewrite on return; it re-anchors on your activity, so it costs nothing while you're actually working. Costs, limits, and the tier caveat: [docs/FEATURES.md](docs/FEATURES.md).
+12. Ships a `/keepwarm` skill — a bounded cache keep-warm loop for planned absences. `/keepwarm [interval] [max]` (defaults 55 min × 6) schedules minimal self-wake turns that re-read the cached conversation prefix before the cache TTL expires, avoiding the full rewrite on return; while you're active it re-anchors pending pings on a best-effort basis (a ping that still slips through is a free reset — it won't consume the cap, though it's still one cheap cache-read). Costs, limits, and the tier caveat: [docs/FEATURES.md](docs/FEATURES.md).
 13. Ships `ccage enable-mcp` / `disable-mcp` — opt a single project into an MCP server via a project-scoped `.mcp.json`, the isolation-safe way (MCP registrations stay per-project; only agents/skills are globally shared). Settles "why isn't my MCP-backed tool picked up in this cage?" once. See [Per-project MCP opt-in](#per-project-mcp-opt-in-ccage-enable-mcp).
+14. Ships `CCAGE_PLUGINS_FROM` — load a curated folder of plugins into every cage with **no per-project install** (the wrapper passes `--plugin-dir` at launch, so Claude session-loads them). Install once, available everywhere, like your shared skills. See [Shared plugins across cages](#shared-plugins-across-cages-ccage_plugins_from).
 
 ### Bonus: dodges the `settings.json` write race
 
@@ -210,6 +211,16 @@ ccage enable-mcp playwright-test -- npx playwright run-test-mcp-server --headles
 
 It writes a project-scoped `.mcp.json` in the current dir (override with `--dir`), which Claude Code reads on startup — approve the server once on first launch. Isolation-safe by construction: it touches **only** `<dir>/.mcp.json`, never a cage's `.claude.json` (no live-session write race) or the `~/.claude` master (no blend into other projects). Idempotent, preserves other servers, `--dry-run` previews. Remove with `ccage disable-mcp <name>`. Full reference: [docs/FEATURES.md](docs/FEATURES.md).
 
+## Shared plugins across cages (`CCAGE_PLUGINS_FROM`)
+
+Plugins normally install **per config dir**, so under ccage you'd reinstall a plugin in every cage. `CCAGE_PLUGINS_FROM` removes that: point it at one folder of plugin directories (each holding `.claude-plugin/plugin.json`) and the wrapper passes a `--plugin-dir` for each on every launch, so Claude session-loads them from that single folder in every cage — present and future.
+
+```
+export CCAGE_PLUGINS_FROM="$HOME/.claude/plugins-shared"   # a folder of plugin dirs
+```
+
+Install once, available everywhere — the same model as your shared `commands`/`agents`/`skills`. It uses a supported Claude Code launch flag, so nothing is copied into a cage and no cage state is mutated (no dependence on Claude Code's internal plugin store). Opt-in (unset = off); a single plugin dir works too; an unset/missing/empty folder is a no-op that never fails a launch. Loaded plugins are "always on" in every session, so keep the set small and deliberate — though Claude defers tool definitions by default (tool search), so even tool-bringing plugins stay cheap to keep available. Skip it for one launch with `CCAGE_PLUGINS_FROM= claude …`. Full reference: [docs/FEATURES.md](docs/FEATURES.md).
+
 ## Session continuity (`/checkpoint` + auto-read)
 
 Long sessions end at `/clear` — and the next one starts cold. ccage ships an optional loop that closes the gap:
@@ -249,6 +260,7 @@ All off by default. Set any of these before launching `claude`:
 | `CCAGE_NO_BUDGET_HOOK=1` | Don't seed the RESUME-size reminder hook. |
 | `CCAGE_ROOT=/some/dir` | Parent directory for isolated configs (default `$HOME`). |
 | `CCAGE_PREFIX=.claude-` | Directory name prefix (default `.claude-`). |
+| `CCAGE_PLUGINS_FROM=/dir` | Opt **in**: load every plugin dir under `/dir` (or `/dir` itself if it is one) into all cages via `--plugin-dir`. Default unset. |
 | `CCAGE_HANDOFF_DIR` | Where `ccage handoff` writes briefs (default `~/.local/share/ccage/handoffs`). |
 
 ## FAQ
