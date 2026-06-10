@@ -6,9 +6,11 @@
 # the libraries ship together, with $CCAGE_LIB pointing at the lib dir.
 #
 # Subcommands:
-#   handoff   — produce a Markdown brief from a session JSONL
-#   doctor    — backfill session-docs hooks + report a RESUME/memory worklist
-#   -h --help — this message
+#   handoff      — produce a Markdown brief from a session JSONL
+#   doctor       — backfill session-docs hooks + report a RESUME/memory worklist
+#   enable-mcp   — opt the current project into an MCP server (project .mcp.json)
+#   disable-mcp  — remove an MCP server from the current project's .mcp.json
+#   -h --help    — this message
 
 # Resolve install layout. Two modes:
 #   1. Running from the source tree (development): bin/ccage → ../share/
@@ -59,21 +61,39 @@ case "${1:-}" in
         . "$CCAGE_LIB/ccage-doctor.sh"
         _ccage_doctor_main "$@"
         ;;
+    enable-mcp)
+        shift
+        CCAGE_LIB=$(_ccage_resolve_lib) || exit $?
+        # shellcheck source=../share/ccage-enable-mcp.sh disable=SC1091
+        . "$CCAGE_LIB/ccage-enable-mcp.sh"
+        _ccage_enable_mcp_main "$@"
+        ;;
+    disable-mcp)
+        shift
+        CCAGE_LIB=$(_ccage_resolve_lib) || exit $?
+        # shellcheck source=../share/ccage-enable-mcp.sh disable=SC1091
+        . "$CCAGE_LIB/ccage-enable-mcp.sh"
+        _ccage_disable_mcp_main "$@"
+        ;;
     -h|--help|"")
         cat <<EOF
 Usage: ccage <command> [args]
 
 Commands:
-  handoff   Produce a Markdown brief from a Claude Code session JSONL.
-  doctor    Backfill the session-docs hooks block into every cage and report a
-            worklist of repos needing /checkpoint (RESUME bloat / messy memory).
+  handoff       Produce a Markdown brief from a Claude Code session JSONL.
+  doctor        Backfill the session-docs hooks block into every cage and report
+                a worklist of repos needing /checkpoint (RESUME bloat / messy memory).
+  enable-mcp    Opt the current project into an MCP server (writes a project-scoped
+                .mcp.json — never a cage's .claude.json). MCP stays per-project by
+                design; agents/skills are the globally shared part.
+  disable-mcp   Remove an MCP server from the current project's .mcp.json.
 
 Env:
   CCAGE_LIB           Override library directory (default: \$(dirname \$0)/../share).
   CCAGE_HANDOFF_DIR   Where handoff briefs are written. Default:
                       \${XDG_DATA_HOME:-~/.local/share}/ccage/handoffs.
 
-ccage handoff -h / ccage doctor -h for subcommand-specific help.
+ccage handoff -h / ccage doctor -h / ccage enable-mcp -h for subcommand help.
 EOF
         ;;
     *)

@@ -33,6 +33,7 @@ Drops a tiny shell function over `claude` that:
 10. Intercepts `claude -c` / `claude -r <id>` and shows the estimated cache-rewrite cost before launch, with three choices: resume, switch to a handoff brief, or cancel. Background: Claude Code's resume reliably cache-misses the message prefix even inside the TTL window — a structural request difference at `messages[0]`, isolated by a 1-hour-TTL controlled experiment in [#51764](https://github.com/anthropics/claude-code/issues/51764) (see also [#43657](https://github.com/anthropics/claude-code/issues/43657), [#44045](https://github.com/anthropics/claude-code/issues/44045); one narrow cause was fixed in Claude Code v2.1.90, the rest remain) — so resuming a long Opus session usually costs real money. Silence with `CCAGE_NO_RESUME_PROMPT=1`; tune threshold via `CCAGE_RESUME_PROMPT_MIN_USD` (default $0.25).
 11. Ships an optional session-continuity loop — `/checkpoint` skill + auto-read hook + `ccage doctor` — so state survives `/clear` without copy/paste. See [Session continuity](#session-continuity-checkpoint--auto-read).
 12. Ships a `/keepwarm` skill — a bounded cache keep-warm loop for planned absences. `/keepwarm [interval] [max]` (defaults 55 min × 6) schedules minimal self-wake turns that re-read the cached conversation prefix before the cache TTL expires, avoiding the full rewrite on return; it re-anchors on your activity, so it costs nothing while you're actually working. Costs, limits, and the tier caveat: [docs/FEATURES.md](docs/FEATURES.md).
+13. Ships `ccage enable-mcp` / `disable-mcp` — opt a single project into an MCP server via a project-scoped `.mcp.json`, the isolation-safe way (MCP registrations stay per-project; only agents/skills are globally shared). Settles "why isn't my MCP-backed tool picked up in this cage?" once. See [Per-project MCP opt-in](#per-project-mcp-opt-in-ccage-enable-mcp).
 
 ### Bonus: dodges the `settings.json` write race
 
@@ -198,6 +199,16 @@ ccage handoff --stdout
 The brief contains: user prompts (chronological), files Read/Edit/Written, Bash commands run, the last assistant turn, token totals, and a cost estimate. It's written to `~/.local/share/ccage/handoffs/<project>-<session>-<timestamp>.md` and auto-copied to the clipboard if `pbcopy`/`wl-copy`/`xclip`/`xsel` is available.
 
 Requires `jq` (`brew install jq`, `apt install jq`, etc). See `docs/FEATURES.md` for the full reference.
+
+## Per-project MCP opt-in (`ccage enable-mcp`)
+
+ccage keeps MCP registrations **per-project** on purpose — sharing them across cages is the cross-session cache-bashing it exists to prevent. So there's no "global MCP"; agents and skills are the shared part (symlinked from `~/.claude`), and MCP servers are opt-in per project. `ccage enable-mcp` is that opt-in:
+
+```
+ccage enable-mcp playwright-test -- npx playwright run-test-mcp-server --headless
+```
+
+It writes a project-scoped `.mcp.json` in the current dir (override with `--dir`), which Claude Code reads on startup — approve the server once on first launch. Isolation-safe by construction: it touches **only** `<dir>/.mcp.json`, never a cage's `.claude.json` (no live-session write race) or the `~/.claude` master (no blend into other projects). Idempotent, preserves other servers, `--dry-run` previews. Remove with `ccage disable-mcp <name>`. Full reference: [docs/FEATURES.md](docs/FEATURES.md).
 
 ## Session continuity (`/checkpoint` + auto-read)
 

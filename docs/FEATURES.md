@@ -225,6 +225,47 @@ Resilient to malformed JSONL lines — every jq invocation uses raw-input + `fro
 
 ---
 
+## `ccage enable-mcp` — per-project MCP opt-in [shipped]
+
+ccage gives every project its own `CLAUDE_CONFIG_DIR`, and MCP registrations live in that cage's `.claude.json`. They are **deliberately not shared** across cages — sharing them re-creates the cross-session cache-bashing ccage exists to prevent (see [UI-only seeding discipline](#ui-only-seeding-discipline): never seed `mcpServers` from a shared master). So there is no "global MCP", on purpose.
+
+That leaves a recurring question: *"I shipped an agent/tool that needs an MCP server — why isn't it picked up in this cage?"* The answer splits in two:
+
+- **Agents and skills ARE shared.** Each cage symlinks `agents/`, `skills/`, `commands/` from the master (`CCAGE_SHARE_FROM`, default `~/.claude`). Drop an agent `.md` in `~/.claude/agents/` and it appears in every cage.
+- **MCP servers stay opt-in per project.** `ccage enable-mcp` is that opt-in: it writes a project-scoped `.mcp.json` in the project's launch dir, which Claude Code reads on startup (prompting once to approve the server).
+
+### Usage
+
+```
+ccage enable-mcp <name> [--dir DIR] [--dry-run] -- <command> [args...]
+ccage disable-mcp <name> [--dir DIR] [--dry-run]
+```
+
+```
+# enable a Playwright test-runner MCP for the current project
+ccage enable-mcp playwright-test -- npx playwright run-test-mcp-server --headless
+```
+
+### Why it can't break isolation
+
+The command writes **only** `DIR/.mcp.json` (default `$PWD`):
+
+- It never touches a cage's `.claude.json`, so it can't lose the live-session `.claude.json` write race against a running session.
+- It never touches the `~/.claude` master, so the server can't blend into other projects.
+- A project `.mcp.json` is scoped to that one directory; another project elsewhere has its own (or none).
+
+It is idempotent (re-enabling an identical entry is a no-op; a changed command updates in place), and `--dry-run` previews without writing. The merge is conservative: it preserves any other servers and unrelated top-level keys, and re-enabling an existing server rewrites only its `command`/`args` — any other keys you added to that entry (e.g. `env`) survive. `disable-mcp` removes the server and deletes the file if that leaves it empty.
+
+### Scope
+
+Registers **stdio** servers only (`command` + `args`). Remote MCP servers (`"type": "http"` / `"sse"` with a `url`) can't be expressed through this command — add those by editing `.mcp.json` directly; `disable-mcp <name>` still removes them.
+
+### Dependencies
+
+- `python3` (atomic JSON merge + write). No `jq` needed at runtime.
+
+---
+
 ## Resume cost interception [shipped — Phase 6b]
 
 When you invoke `claude -c` (continue) or `claude -r <session-id>` (resume), the wrapper computes the cache-rewrite cost from the session's on-disk `usage` history and prompts before launch. Background: Claude Code's resume reliably misses the message-prefix cache even inside the TTL window (GitHub anthropics/claude-code #51764 — a 1-hour-TTL controlled experiment isolating the resume event; see also #43657, #44045 — `processSessionStartHooks` and `reorderAttachmentsForAPI` shuffle bytes at `messages[0]`; one narrow cause fixed in Claude Code v2.1.90). Each cold resume pays the cache-write rate (1.25× input on the 5-minute tier, 2× on the 1-hour tier) on the rewritten prefix; on a long Opus session that's $0.50–$2+ per resume. Treat the estimate as a worst-case bound.

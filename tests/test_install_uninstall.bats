@@ -128,23 +128,26 @@ setup() {
     [ ! -e "$FAKE_HOME/.local/bin/ccage" ]
 }
 
-@test "install: bin/ccage and handoff library land at prefix" {
+@test "install: bin/ccage and libraries land at prefix" {
     HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
     [ -x "$FAKE_HOME/.local/bin/ccage" ]
     [ -f "$FAKE_HOME/.local/share/ccage/ccage-handoff.sh" ]
+    [ -f "$FAKE_HOME/.local/share/ccage/ccage-enable-mcp.sh" ]
 }
 
-@test "install --no-cli: bin/ccage and handoff lib not installed" {
+@test "install --no-cli: bin/ccage and libraries not installed" {
     HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --no-cli --prefix "$FAKE_HOME/.local" >/dev/null
     [ ! -e "$FAKE_HOME/.local/bin/ccage" ]
     [ ! -e "$FAKE_HOME/.local/share/ccage/ccage-handoff.sh" ]
+    [ ! -e "$FAKE_HOME/.local/share/ccage/ccage-enable-mcp.sh" ]
 }
 
-@test "uninstall: bin/ccage and handoff library removed" {
+@test "uninstall: bin/ccage and libraries removed" {
     HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
     HOME="$FAKE_HOME" "$REPO_ROOT/uninstall.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
     [ ! -e "$FAKE_HOME/.local/bin/ccage" ]
     [ ! -e "$FAKE_HOME/.local/share/ccage/ccage-handoff.sh" ]
+    [ ! -e "$FAKE_HOME/.local/share/ccage/ccage-enable-mcp.sh" ]
 }
 
 @test "installed bin/ccage handoff --help works (no source-tree access)" {

@@ -7,6 +7,7 @@
 #   <rcd>/claude-ccusage.sh       — ccusage-all aggregator (independent)
 #   <prefix>/share/ccage/ccage-handoff.sh — handoff brief generator library
 #   <prefix>/share/ccage/ccage-doctor.sh  — doctor (backfill + worklist) library
+#   <prefix>/share/ccage/ccage-enable-mcp.sh — enable-mcp/disable-mcp library
 #   <prefix>/bin/ccage            — CLI dispatcher (uses the libraries)
 #   ~/.claude/hooks/resume_autoload.sh      — SessionStart auto-read hook
 #   ~/.claude/hooks/resume_budget_check.sh  — PostToolUse RESUME budget guard
@@ -105,9 +106,10 @@ install_file "$REPO_ROOT/share/claude-isolation.sh" "$rcd/claude-isolation.sh"
 [ "$install_ccusage" = 1 ] && install_file "$REPO_ROOT/share/claude-ccusage.sh" "$rcd/claude-ccusage.sh"
 
 if [ "$install_cli" = 1 ]; then
-    install_file "$REPO_ROOT/share/ccage-handoff.sh" "$prefix/share/ccage/ccage-handoff.sh"
-    install_file "$REPO_ROOT/share/ccage-doctor.sh"  "$prefix/share/ccage/ccage-doctor.sh"
-    install_file "$REPO_ROOT/bin/ccage"              "$prefix/bin/ccage"  0755
+    install_file "$REPO_ROOT/share/ccage-handoff.sh"    "$prefix/share/ccage/ccage-handoff.sh"
+    install_file "$REPO_ROOT/share/ccage-doctor.sh"     "$prefix/share/ccage/ccage-doctor.sh"
+    install_file "$REPO_ROOT/share/ccage-enable-mcp.sh" "$prefix/share/ccage/ccage-enable-mcp.sh"
+    install_file "$REPO_ROOT/bin/ccage"                 "$prefix/bin/ccage"  0755
 
     # PATH check — warn if $prefix/bin isn't on PATH (don't fail; just hint).
     # shellcheck disable=SC2016  # the printf below contains literal '$PATH' for the user

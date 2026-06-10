@@ -6,6 +6,11 @@ All notable changes to ccage. Format follows [Keep a Changelog](https://keepacha
 
 _Nothing yet._
 
+## [0.3.0] — 2026-06-10
+
+### Added — `ccage enable-mcp` / `disable-mcp`
+- **Per-project MCP opt-in** (`share/ccage-enable-mcp.sh` + `bin/ccage` dispatch). `ccage enable-mcp <name> -- <command> [args...]` registers a stdio MCP server into a project-scoped `.mcp.json` (default `$PWD`, override `--dir`) so the next Claude session launched there picks it up; `ccage disable-mcp <name>` removes it (and deletes a now-empty file). **Isolation-safe by construction:** writes ONLY `<dir>/.mcp.json` — never a cage's `.claude.json` (so it can't lose the live-session write race) nor the `~/.claude` master (so it can't blend the server into other projects), honoring the "never share `mcpServers` across cages" rule (`docs/FEATURES.md` — UI-only seeding discipline). Idempotent (re-enabling an identical entry is a no-op; a changed command updates in place); the merge is conservative — it preserves other servers, unrelated top-level keys, and any extra keys on the re-enabled entry (e.g. `env`); `--dry-run` previews. Scope is stdio servers (`command` + `args`); remote (`"type": "http"`/`"sse"`) servers are added by editing `.mcp.json` directly. Settles the recurring "why isn't my MCP-backed agent/tool picked up in this cage?" investigation: agents/skills stay globally shared (symlinked from `~/.claude`), MCP is the opt-in-per-project part. Pure shell + `python3` (atomic JSON merge). Tests: `tests/test_enable_mcp.bats` (15), incl. an isolation assertion that `$HOME/.claude.json` is byte-identical after a run.
+
 ## [0.2.0] — 2026-06-05
 
 ### Added — `/keepwarm` (Phase 8)

@@ -53,6 +53,10 @@ if [ -f "$prefix/share/ccage/ccage-doctor.sh" ]; then
     run rm -f "$prefix/share/ccage/ccage-doctor.sh"
     printf 'removed %s/share/ccage/ccage-doctor.sh\n' "$prefix"
 fi
+if [ -f "$prefix/share/ccage/ccage-enable-mcp.sh" ]; then
+    run rm -f "$prefix/share/ccage/ccage-enable-mcp.sh"
+    printf 'removed %s/share/ccage/ccage-enable-mcp.sh\n' "$prefix"
+fi
 # rmdir empty share/ccage dir if we left it behind, but don't force.
 if [ -d "$prefix/share/ccage" ]; then
     if [ "$dry_run" = 1 ]; then
