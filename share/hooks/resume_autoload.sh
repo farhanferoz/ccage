@@ -27,6 +27,12 @@ budget="${CCAGE_RESUME_BUDGET_LINES:-250}"
 orphan_max="${CCAGE_MEMORY_ORPHAN_MAX:-3}"
 base="${CLAUDE_PROJECT_DIR:-$PWD}"
 
+# SessionStart delivers its trigger source (startup|resume|clear|compact) as JSON
+# on stdin. Read it once — guarded by `timeout` so a missing or blocked stdin can
+# never hang session start — so the post-compaction nudge below can gate on it.
+hook_input="$(timeout 2 cat 2>/dev/null)"
+src="$(printf '%s' "$hook_input" | jq -r '.source // empty' 2>/dev/null)"
+
 # ---- slot-aware RESUME filename (component G) ----
 # Mirror the wrapper's CCAGE_SLOT validation: an unsafe slot is ignored and we
 # fall back to the plain file, exactly as _ccage_config_dir_for does.
@@ -41,6 +47,14 @@ resume="$base/RESUME${slot}.md"
 # ---- 1. inject RESUME into context ----
 [ -f "$resume" ] && cat "$resume"
 
+# ---- 1b. post-compaction nudge ----
+# After auto-compaction (or a manual /compact) the conversation is summarized and
+# the RESUME above is only as fresh as the last /checkpoint. A hook can't run the
+# /checkpoint skill itself, so prompt the model to refresh RESUME before continuing.
+if [ "$src" = "compact" ]; then
+    printf '\nNOTE: context was just auto-compacted — run /checkpoint now to fold any work since your last checkpoint into RESUME.md, then continue.\n'
+fi
+
 # ---- 2. health notes (one line each, only when something is wrong) ----
 # RESUME budget: too many lines OR more than 3 "## Session" blocks.
 if [ -f "$resume" ]; then
@@ -54,7 +68,10 @@ if [ -f "$resume" ]; then
 fi
 
 # Memory hygiene for THIS cage's memory dir (never another cage's).
-memdir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/${base//\//-}/memory"
+# Claude Code encodes the project dir by replacing BOTH "/" and "_" with "-",
+# so the char class needs "_" too (e.g. claude_rate_limit) — else this points at
+# a nonexistent dir and the tidy NOTE silently never fires.
+memdir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/${base//[\/_]/-}/memory"
 index="$memdir/MEMORY.md"
 if [ -f "$index" ]; then
     needs_tidy=0

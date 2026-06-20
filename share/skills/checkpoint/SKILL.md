@@ -7,8 +7,10 @@ description: >-
   → (state reloaded), with no copy and no paste. Use before /clear, before a
   context boundary or compaction, when the user says "checkpoint", "save
   progress", "snapshot state", "update RESUME", or "hand off"; to bootstrap
-  RESUME.md + CHANGELOG.md in a repo that has none; or with --tidy to also
-  reorganize this cage's memory directory.
+  RESUME.md + CHANGELOG.md in a repo that has none; with --tidy to also
+  reorganize this cage's memory directory; or with --merge-slots to collapse
+  parallel per-slot RESUME.<slot>.md files back into the plain trunk so a later
+  slotless session sees the union.
 ---
 
 # /checkpoint
@@ -61,6 +63,11 @@ same-directory case.
 - **`--tidy`** — do the checkpoint, then also tidy this cage's memory dir (§4).
   Run `--tidy` when the user asks, or when the SessionStart health check printed
   `NOTE: memory needs tidying`.
+- **`--merge-slots`** — fan-in: collapse every parallel `RESUME.<slot>.md` back
+  into the plain `RESUME.md` trunk (§5), so a future slotless session reads the
+  union. Run when the parallel slotted sessions are done. This mode does **not**
+  also checkpoint the current session — checkpoint first if you have unsaved
+  state, then merge.
 
 ---
 
@@ -167,7 +174,10 @@ merged, budget-trimmed file rather than a one-shot chat message.
 After the checkpoint, tidy **this cage's** memory directory:
 
 ```bash
-memdir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/${PWD//\//-}/memory"
+# Claude Code encodes the project dir by replacing BOTH "/" and "_" with "-",
+# so the char class must include "_" — otherwise any repo with an underscore in
+# its path (claude_rate_limit, …) resolves to a nonexistent dir and tidy no-ops.
+memdir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/${PWD//[\/_]/-}/memory"
 ```
 
 Then, using judgment:
@@ -182,6 +192,58 @@ Then, using judgment:
 
 Only touch the **current cage's** memory dir — never another cage's. Do not
 invent facts; reorganize and prune what is there.
+
+---
+
+## 5. `--merge-slots` — fan-in (collapse parallel slots into the trunk)
+
+When several slotted sessions (`CCAGE_SLOT=gen`, …) run in parallel, their state
+is fanned out across `RESUME.<slot>.md` / `CHANGELOG.<slot>.md`. A future
+**slotless** session reads only the plain `RESUME.md`, so it would miss them.
+`--merge-slots` collapses every slot file back into the plain trunk, once, so a
+slotless start sees the union.
+
+This mode **always targets the plain files** (`RESUME.md`, `CHANGELOG.md`),
+regardless of the running session's own slot. Run it only when the parallel
+sessions are **idle** — a slot file checkpointed *after* the merge is stranded
+again. It does not checkpoint the caller; do that first if you have unsaved state.
+
+1. **Discover the inputs** (the plain trunk is the merge target, the slot files
+   are overlays):
+   ```bash
+   shopt -s nullglob
+   slot_resumes=(RESUME.*.md); slot_logs=(CHANGELOG.*.md)
+   printf 'merging %d slot RESUME(s): %s\n' "${#slot_resumes[@]}" "${slot_resumes[*]:-none}"
+   ```
+   If there are no slot files, report `nothing to merge` and stop (idempotent).
+2. **Read the plain `RESUME.md` and every `RESUME.<slot>.md`.** The plain file is
+   the base; each slot file is an overlay.
+3. **Merge into the plain `RESUME.md` — a judgment merge, never a `cat`:**
+   - **Threads / Decisions / Open questions:** the **union** across all files,
+     with overlaps **deduped** (the same workstream often appears in two slots);
+     when two versions disagree, keep the most-recent wording.
+   - **`### Now`:** combine into one — a line per still-active workstream, newest
+     first; drop any item another file marks done.
+   - **`### Live jobs`:** the union of still-running ids; drop finished ones.
+   - **`## Session` blocks:** keep the **3 newest across all files**; tag each
+     kept block with its origin slot so provenance survives
+     (e.g. `## Session 2026-06-13 (gen)`). Everything older rolls to CHANGELOG.
+4. **Fold the slot CHANGELOGs in.** Append each `CHANGELOG.<slot>.md`'s entries
+   into the plain `CHANGELOG.md` (newest-first, dated, dedup identical lines).
+5. **Write the merged plain files first, then delete the slot files** — order
+   matters so a failed write never loses data:
+   ```bash
+   # only after RESUME.md + CHANGELOG.md are written and verified non-empty:
+   for f in "${slot_resumes[@]}" "${slot_logs[@]}"; do rm -- "$f"; done
+   ```
+   If any write failed, leave **every** slot file in place and stop.
+6. **Enforce the budget** on the merged trunk exactly as in §3 step 4 (≤3
+   `## Session` blocks, ~250 lines; overflow → CHANGELOG).
+7. **Tell the user:**
+   `Merged <N> slot(s) into RESUME.md (+ CHANGELOG). Slot files removed — safe to start slotless.`
+
+Idempotent: a second run finds no slot files and no-ops. Re-running after a slot
+session checkpoints again simply folds that one in too.
 
 ---
 
