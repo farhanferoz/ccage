@@ -160,7 +160,12 @@ still true.
    (or `$resume` exceeds ~250 lines), move the **oldest** session block(s) and
    any superseded detail into `$changelog` as a dated entry (newest-first, plain
    prose). RESUME stays lean; history accumulates in CHANGELOG.
-5. **Write `$resume` and append to `$changelog`.**
+5. **Apply the changes surgically — prefer `Edit`, not a full rewrite.** Make the
+   step-2 line updates and insert the step-3 `## Session` block with targeted
+   `Edit`s; append to `$changelog` with a single `Edit`. Only fall back to a full
+   `Write` when bootstrapping (§2) or when a budget-overflow trim (step 4)
+   restructures most of the file. Regenerating a ~150-line RESUME on every
+   checkpoint is the main avoidable cost — and the slow part.
 6. **End by telling the user:** `RESUME updated, CHANGELOG appended — safe to /clear.`
 
 Use the same six-part structure as a `session-handoff` brief for the per-session
