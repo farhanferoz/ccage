@@ -68,10 +68,11 @@ if [ -f "$resume" ]; then
 fi
 
 # Memory hygiene for THIS cage's memory dir (never another cage's).
-# Claude Code encodes the project dir by replacing BOTH "/" and "_" with "-",
-# so the char class needs "_" too (e.g. claude_rate_limit) — else this points at
-# a nonexistent dir and the tidy NOTE silently never fires.
-memdir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/${base//[\/_]/-}/memory"
+# Claude Code encodes the project dir by replacing BOTH "/" and "_" with "-".
+# Two single-char substitutions, NOT a single bracket character class — macOS
+# bash 3.2 mishandles such a class, so the tidy NOTE would silently never fire there.
+slug="${base//\//-}"; slug="${slug//_/-}"
+memdir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$slug/memory"
 index="$memdir/MEMORY.md"
 if [ -f "$index" ]; then
     needs_tidy=0

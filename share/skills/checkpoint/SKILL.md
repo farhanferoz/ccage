@@ -179,10 +179,11 @@ merged, budget-trimmed file rather than a one-shot chat message.
 After the checkpoint, tidy **this cage's** memory directory:
 
 ```bash
-# Claude Code encodes the project dir by replacing BOTH "/" and "_" with "-",
-# so the char class must include "_" — otherwise any repo with an underscore in
-# its path (claude_rate_limit, …) resolves to a nonexistent dir and tidy no-ops.
-memdir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/${PWD//[\/_]/-}/memory"
+# Claude Code encodes the project dir by replacing BOTH "/" and "_" with "-".
+# Two single-char substitutions, NOT a single bracket character class — macOS
+# bash 3.2 mishandles such a class, so tidy would silently no-op there.
+slug="${PWD//\//-}"; slug="${slug//_/-}"
+memdir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$slug/memory"
 ```
 
 Then, using judgment:

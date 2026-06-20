@@ -19,8 +19,10 @@ setup() {
 # Run the hook with cwd = the temp repo (mirrors how Claude Code runs hooks).
 run_hook() { ( cd "$REPO" && "$HOOK" ); }
 
-# Path to this cage's memory dir for the repo, matching the hook's slug logic.
-memdir() { printf '%s/projects/%s/memory' "$CAGE" "${REPO//\//-}"; }
+# Path to this cage's memory dir for the repo, matching the hook's slug logic:
+# replace BOTH "/" and "_" with "-" via two single-char subs (no bracket class,
+# which macOS bash 3.2 mishandles).
+memdir() { local s="${REPO//\//-}"; s="${s//_/-}"; printf '%s/projects/%s/memory' "$CAGE" "$s"; }
 
 @test "no RESUME: empty stdout, exit 0" {
     run run_hook
