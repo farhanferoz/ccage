@@ -4,7 +4,15 @@ All notable changes to ccage. Format follows [Keep a Changelog](https://keepacha
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed — `/checkpoint` efficiency overhaul (`share/skills/checkpoint/SKILL.md`)
+- **Pinned to `medium` effort via skill frontmatter**, regardless of the session's `/effort`. A checkpoint is distillation, not hard reasoning, so it no longer burns the large thinking budgets of `high`/`xhigh`/`max` — the main cost and latency driver when checkpointing from a high-effort session. Efficiency now comes from doing _less work_, not thinking less.
+- **Lean mid-work path** (`/checkpoint`): reuse the `RESUME` already in context instead of re-reading it; skip the slot-resolution shell when `CCAGE_SLOT` is unset; refresh the current day's `## Session` block _in place_ rather than prepending a new one each time; roll to `CHANGELOG` only when over budget instead of on every checkpoint. Targets ~2–3 tool calls instead of ~6 — each avoided round-trip saves a full-context re-read at the moment context is largest.
+- **`--tidy` is now the close-of-day ritual** (lean checkpoint + memory hygiene); there is no separate `--close`. The memory tidy bails early when the dir is already clean.
+- **New `### Next` field** in the `RESUME` template — a single concrete first action, the highest-value line for a clean resume.
+- **Promote-before-overwrite guard**: because `RESUME` is git-excluded, anything still load-bearing moves to a durable section or `CHANGELOG` before a session block is condensed.
+
+### Added — rebuild-on-resume task/job snapshot
+- **`### Live jobs & tasks`** `RESUME` section snapshots the in-session task list (`TaskList`) and live background jobs/Monitors with per-job rearm commands, so `/clear` no longer loses what was in flight — they can be recreated/re-armed on resume. Folded into the merge and budget logic.
 
 ## [0.4.0] — 2026-06-10
 
