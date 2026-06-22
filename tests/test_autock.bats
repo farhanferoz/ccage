@@ -16,8 +16,12 @@ AUTO="$BATS_TEST_DIRNAME/../bin/ccage-auto"
 
 setup() {
     command -v python3 >/dev/null 2>&1 || skip "python3 not installed"
-    REPO="$BATS_TEST_TMPDIR/repo"
-    mkdir -p "$REPO"
+    mkdir -p "$BATS_TEST_TMPDIR/repo"
+    # Resolve to the PHYSICAL path: ccage-auto derives the transcript slug from
+    # os.getcwd() (canonicalised, like real Claude Code), so on macOS — where
+    # $TMPDIR is /var -> /private/var — a logical $REPO would slug differently
+    # and the watcher would look in the wrong session dir. Match it here.
+    REPO="$(cd "$BATS_TEST_TMPDIR/repo" && pwd -P)"
     export CCAGE_ROOT="$BATS_TEST_TMPDIR"     # cage dir -> $CCAGE_ROOT/.claude-repo
     unset CCAGE_SLOT CCAGE_AUTOCK CCAGE_AUTOCK_WINDOW
     CAGE="$CCAGE_ROOT/.claude-repo"
