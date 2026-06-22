@@ -9,6 +9,7 @@
 #   <prefix>/share/ccage/ccage-doctor.sh  — doctor (backfill + worklist) library
 #   <prefix>/share/ccage/ccage-enable-mcp.sh — enable-mcp/disable-mcp library
 #   <prefix>/bin/ccage            — CLI dispatcher (uses the libraries)
+#   <prefix>/bin/ccage-auto       — autonomous context manager (python3 pty wrapper)
 #   ~/.claude/hooks/resume_autoload.sh      — SessionStart auto-read hook
 #   ~/.claude/hooks/resume_budget_check.sh  — PostToolUse RESUME budget guard
 #   <share-from>/skills/checkpoint/         — /checkpoint skill (reaches cages
@@ -110,6 +111,14 @@ if [ "$install_cli" = 1 ]; then
     install_file "$REPO_ROOT/share/ccage-doctor.sh"     "$prefix/share/ccage/ccage-doctor.sh"
     install_file "$REPO_ROOT/share/ccage-enable-mcp.sh" "$prefix/share/ccage/ccage-enable-mcp.sh"
     install_file "$REPO_ROOT/bin/ccage"                 "$prefix/bin/ccage"  0755
+    install_file "$REPO_ROOT/bin/ccage-auto"            "$prefix/bin/ccage-auto" 0755
+
+    # ccage-auto (autonomous context manager) is a python3 script. The rest of
+    # ccage works without python3, so warn rather than fail.
+    if ! command -v python3 >/dev/null 2>&1; then
+        # shellcheck disable=SC2016  # literal `ccage-auto` in the user-facing note
+        printf 'note: python3 not found — `ccage-auto` needs it; the rest of ccage is unaffected.\n'
+    fi
 
     # PATH check — warn if $prefix/bin isn't on PATH (don't fail; just hint).
     # shellcheck disable=SC2016  # the printf below contains literal '$PATH' for the user

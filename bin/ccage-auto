@@ -1,0 +1,756 @@
+#!/usr/bin/env python3
+# ccage-auto — autonomous context manager for a single long-lived Claude session.
+#
+# Launches a Claude Code session through ccage's normal `claude` shell wrapper,
+# but interposes a pseudo-terminal so an in-process watcher can (a) measure the
+# session's real context occupancy by reading its transcript JSONL and (b) drive
+# the checkpoint -> clear -> resume loop with no human present.
+#
+# The split of labour:
+#   - MEASURE  the watcher reads exact per-turn token usage from the transcript
+#              (input + cache_read + cache_creation of the latest assistant turn);
+#              no LLM, no estimation, no API calls.
+#   - DECIDE   a tiny state machine compares occupancy to a soft and a hard
+#              threshold.
+#   - DRIVE    at the soft threshold it types a plain-text nudge so the model
+#              itself runs the checkpoint skill at a clean breakpoint; once the
+#              checkpoint is confirmed on disk it types `/clear` (the one thing
+#              the model cannot do for itself) and then a short resume nudge.
+#
+# Injection is just writing bytes to the pty master fd — identical to a human
+# typing — so it costs nothing and needs no tmux. The only model work triggered
+# is the checkpoint + resume the user wanted anyway, which is far cheaper than
+# letting the window grow to auto-compact.
+#
+# Enabled by default. Disable per-launch with `--no-autock` or CCAGE_AUTOCK=0;
+# when disabled this is a transparent pass-through to the normal `claude`.
+#
+# Usage:
+#   ccage-auto [auto-flags] [-- ] [claude args...]
+#   ccage-auto --status            # print resolved paths + current occupancy, exit
+#
+# Auto-flags (consumed from the front; everything else is passed to claude):
+#   --autock / --no-autock         force the watcher on/off (default: on)
+#   --soft N                       soft threshold, percent       (default: 35)
+#   --hard N                       hard threshold, percent       (default: 55)
+#   --window N                     force context window, tokens  (default: per-model)
+#   --window-map 'sub=N,sub=N'     per-model windows by id substring
+#   --poll N                       poll interval, seconds        (default: 12)
+#   --status                       diagnostics only, do not launch
+#
+# Env equivalents (flags win): CCAGE_AUTOCK, CCAGE_AUTOCK_SOFT, CCAGE_AUTOCK_HARD,
+#   CCAGE_AUTOCK_WINDOW, CCAGE_AUTOCK_WINDOWS, CCAGE_AUTOCK_POLL,
+#   CCAGE_AUTOCK_SENTINEL, CCAGE_AUTOCK_HARD_INTERRUPT (1/0),
+#   CCAGE_AUTOCK_NO_BYPASS_ACCEPT (1 = don't auto-accept the DSP bypass screen),
+#   CCAGE_AUTOCK_EXEC (override the launched command; default `claude "$@"`),
+#   CCAGE_AUTOCK_INIT_PROMPT (type this + Enter at startup to auto-begin the task),
+#   CCAGE_AUTOCK_INIT_DELAY (seconds to wait before the init prompt; default 6),
+#   CCAGE_AUTOCK_NUDGE (override the soft-nudge text; {pct}/{sentinel} substituted),
+#   CCAGE_AUTOCK_NUDGE_TIMEOUT (s before re-nudge if unconfirmed; default 240),
+#   CCAGE_AUTOCK_COOLDOWN (s to ignore thresholds after a reset; default 30).
+#   CCAGE_SLOT is honoured for RESUME naming.
+#
+# Context windows differ by model and the transcript does NOT record which window
+# a session has (a 1M and a 200K session log the same model id). The window is
+# resolved per measurement (so a mid-session /model switch is picked up), most
+# specific first: --window/CCAGE_AUTOCK_WINDOW force > per-model map > a [1m]
+# marker in the model id > built-in small families (haiku) > a 1,000,000 default.
+# The one case the data can't disambiguate — a 200K vs 1M variant of the SAME
+# family — is yours to pin via --window-map / CCAGE_AUTOCK_WINDOWS (or --window).
+
+import errno
+import fcntl
+import glob
+import json
+import os
+import pty
+import re
+import select
+import shlex
+import signal
+import struct
+import subprocess
+import sys
+import termios
+import time
+import tty
+
+# ----------------------------------------------------------------------------
+# Configuration
+# ----------------------------------------------------------------------------
+
+SENTINEL_DEFAULT = "CHECKPOINTED"
+
+# The transcript does NOT record the context window: a 1M session logs its model
+# as plain "claude-opus-4-8", identical to a 200K session. So we cannot infer the
+# window from the model id. Default to 1,000,000 (the long-context variant these
+# autonomous sessions run on) and let --window / CCAGE_AUTOCK_WINDOW override it
+# down to 200000 for a standard-context session. Defaulting HIGH is the safe
+# failure: at worst the watcher defers to the hard threshold / auto-compact,
+# whereas defaulting LOW would make it fire spuriously early.
+WINDOW_1M = 1_000_000
+WINDOW_STD = 200_000
+ONE_M_MARKERS = ("[1m]", "-1m", "_1m")
+BUILTIN_SMALL = ("haiku",)    # families that are unambiguously 200K
+DEFAULT_WINDOW = WINDOW_1M    # fallback when the model is unknown / ambiguous
+
+# Timing constants (seconds). Conservative; the fragile part is slash-command
+# entry, so we settle generously before pressing Enter.
+KEY_DELAY = 0.25        # pause between typing a line and submitting it
+CLEAR_SETTLE = 3.0      # wait after /clear for the SessionStart hook + reload
+COOLDOWN = 30.0         # ignore thresholds for this long after a reset
+NUDGE_TIMEOUT = 240.0   # if no checkpoint confirmation, re-nudge / escalate
+MAX_RENUDGE = 1         # soft re-nudges before escalating to the hard path
+
+
+def _truthy(v, default):
+    if v is None:
+        return default
+    return str(v).strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def _num(v, default):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+class Config:
+    def __init__(self, args):
+        self.enabled = _truthy(os.environ.get("CCAGE_AUTOCK"), True)
+        self.soft = _num(os.environ.get("CCAGE_AUTOCK_SOFT"), 35.0)
+        self.hard = _num(os.environ.get("CCAGE_AUTOCK_HARD"), 55.0)
+        self.window = int(_num(os.environ.get("CCAGE_AUTOCK_WINDOW"), 0)) or None
+        self.windows = parse_window_map(os.environ.get("CCAGE_AUTOCK_WINDOWS"))
+        self.poll = _num(os.environ.get("CCAGE_AUTOCK_POLL"), 12.0)
+        self.sentinel = os.environ.get("CCAGE_AUTOCK_SENTINEL") or SENTINEL_DEFAULT
+        self.hard_interrupt = _truthy(os.environ.get("CCAGE_AUTOCK_HARD_INTERRUPT"), True)
+        self.nudge_timeout = _num(os.environ.get("CCAGE_AUTOCK_NUDGE_TIMEOUT"), NUDGE_TIMEOUT)
+        self.cooldown = _num(os.environ.get("CCAGE_AUTOCK_COOLDOWN"), COOLDOWN)
+        # Autonomous kickoff: type this prompt + Enter once at startup so an
+        # unattended session actually begins its task (a prompt passed as a CLI
+        # arg only pre-fills the TUI input box; nobody is there to press Enter).
+        self.init_prompt = os.environ.get("CCAGE_AUTOCK_INIT_PROMPT")
+        self.init_delay = _num(os.environ.get("CCAGE_AUTOCK_INIT_DELAY"), 6.0)
+        # Override the soft-nudge text; {pct} and {sentinel} are substituted.
+        self.nudge = os.environ.get("CCAGE_AUTOCK_NUDGE")
+        self.status_only = False
+        self.claude_args = self._parse(args)
+
+    def _parse(self, args):
+        i = 0
+
+        def take():
+            """The value token after the current flag, or None if the flag was
+            last on the line — so a dangling `--soft` falls back to its default
+            instead of raising IndexError."""
+            return args[i + 1] if i + 1 < len(args) else None
+
+        while i < len(args):
+            a = args[i]
+            if a == "--":
+                return args[i + 1:]
+            elif a == "--autock":
+                self.enabled = True
+            elif a == "--no-autock":
+                self.enabled = False
+            elif a == "--status":
+                self.status_only = True
+            elif a == "--soft":
+                self.soft = _num(take(), self.soft); i += 1
+            elif a == "--hard":
+                self.hard = _num(take(), self.hard); i += 1
+            elif a == "--window":
+                self.window = int(_num(take(), self.window or 0)) or None; i += 1
+            elif a == "--window-map":
+                self.windows.update(parse_window_map(take())); i += 1
+            elif a == "--poll":
+                self.poll = _num(take(), self.poll); i += 1
+            else:
+                # First token we don't recognise: the rest is claude's.
+                return args[i:]
+            i += 1
+        return []
+
+    def window_for(self, model):
+        """Resolve the context window for a model id, most specific first:
+        global override -> per-model map -> [1m] marker in the id -> built-in
+        small family (haiku) -> default. Called per measurement, so a mid-session
+        /model switch re-resolves the window automatically."""
+        if self.window:
+            return self.window
+        if model:
+            for key, win in self.windows.items():
+                if key in model:
+                    return win
+            if any(m in model for m in ONE_M_MARKERS):
+                return WINDOW_1M
+            if any(s in model for s in BUILTIN_SMALL):
+                return WINDOW_STD
+        return DEFAULT_WINDOW
+
+    def validate(self):
+        """Clamp nonsensical thresholds; return human-readable warnings."""
+        warns = []
+        if not (0 < self.soft < 100):
+            warns.append("soft=%.0f out of range (0,100); using 35" % self.soft)
+            self.soft = 35.0
+        if not (0 < self.hard <= 100):
+            warns.append("hard=%.0f out of range (0,100]; using 55" % self.hard)
+            self.hard = 55.0
+        if self.soft >= self.hard:
+            new_hard = min(100.0, self.soft + 10)   # cap at 100, never <= soft
+            warns.append("soft (%.0f%%) >= hard (%.0f%%); raising hard to %.0f%%"
+                         % (self.soft, self.hard, new_hard))
+            self.hard = new_hard
+        return warns
+
+
+# ----------------------------------------------------------------------------
+# Locating the cage transcript
+# ----------------------------------------------------------------------------
+
+def cwd_slug(path):
+    """Claude's project-dir slug: the absolute cwd with every '/' turned into '-'."""
+    return path.replace("/", "-")
+
+
+def slot_suffix():
+    """Mirror claude-isolation.sh's CCAGE_SLOT validation for RESUME naming."""
+    slot = os.environ.get("CCAGE_SLOT", "")
+    if slot and re.fullmatch(r"[A-Za-z0-9_-]+", slot):
+        return "." + slot
+    return ""
+
+
+def resolve_config_dir(cwd):
+    """Return the cage's CLAUDE_CONFIG_DIR for this cwd.
+
+    Faithfulness matters (a companion override file can change the choice), so we
+    ask ccage's own shell function first via the user's interactive shell, then
+    fall back to sourcing the library directly, then to a pure-Python replica of
+    the default naming (sans the rare collision hash)."""
+    shell = os.environ.get("SHELL", "/bin/bash")
+
+    # 1. Ask the real function through an interactive shell (sees .bashrc + overrides).
+    try:
+        out = subprocess.run(
+            [shell, "-ic", '_ccage_config_dir_for "$PWD" 2>/dev/null'],
+            cwd=cwd, capture_output=True, text=True, timeout=15,
+        ).stdout.strip()
+        if out:
+            return out.splitlines()[-1].strip()
+    except Exception:
+        pass
+
+    # 2. Source the shipped library directly (no interactive init).
+    lib = library_path()
+    if lib:
+        try:
+            out = subprocess.run(
+                [shell, "-c", f'. {shlex.quote(lib)}; _ccage_config_dir_for "$PWD"'],
+                cwd=cwd, capture_output=True, text=True, timeout=15,
+            ).stdout.strip()
+            if out:
+                return out.splitlines()[-1].strip()
+        except Exception:
+            pass
+
+    # 3. Pure-Python replica of the default scheme.
+    root = os.environ.get("CCAGE_ROOT", os.path.expanduser("~"))
+    prefix = os.environ.get("CCAGE_PREFIX", ".claude-")
+    base = os.path.basename(cwd.rstrip("/")) or "root"
+    cand = os.path.join(root, prefix + base)
+    slot = os.environ.get("CCAGE_SLOT", "")
+    if slot and re.fullmatch(r"[A-Za-z0-9_-]+", slot):
+        cand += "--" + slot
+    return cand
+
+
+def library_path():
+    """share/claude-isolation.sh, resolved relative to this script or $CCAGE_LIB."""
+    candidates = []
+    if os.environ.get("CCAGE_LIB"):
+        candidates.append(os.environ["CCAGE_LIB"])
+    here = os.path.dirname(os.path.realpath(__file__))
+    candidates += [os.path.join(here, "..", "share"),
+                   os.path.join(here, "..", "share", "ccage")]
+    for c in candidates:
+        p = os.path.join(c, "claude-isolation.sh")
+        if os.path.isfile(p):
+            return os.path.realpath(p)
+    return None
+
+
+def session_dir(config_dir, cwd):
+    return os.path.join(config_dir, "projects", cwd_slug(cwd))
+
+
+def active_jsonl(sdir):
+    """Newest transcript in the session dir (handles /clear rotating the file).
+    Stats each candidate defensively: a file can be rotated/deleted between the
+    glob and the stat, and an unguarded getmtime there would crash the watcher
+    thread."""
+    best, best_mtime = None, -1.0
+    for f in glob.glob(os.path.join(sdir, "*.jsonl")):
+        try:
+            m = os.path.getmtime(f)
+        except OSError:
+            continue
+        if m > best_mtime:
+            best, best_mtime = f, m
+    return best
+
+
+# ----------------------------------------------------------------------------
+# Reading context occupancy from the transcript
+# ----------------------------------------------------------------------------
+
+def _tail(path, maxbytes=512 * 1024):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            start = max(0, size - maxbytes)
+            f.seek(start)
+            data = f.read()
+    except OSError:
+        return []
+    if start > 0:
+        nl = data.find(b"\n")
+        data = data[nl + 1:] if nl >= 0 else b""
+    return data.split(b"\n")
+
+
+def latest_usage(path):
+    """(tokens, model) for the most recent assistant turn, or (None, None).
+
+    tokens = input + cache_read + cache_creation = the size of the prompt the
+    model was just sent = current context occupancy."""
+    for line in reversed(_tail(path)):
+        line = line.strip()
+        if not line or b'"assistant"' not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if obj.get("type") != "assistant":
+            continue
+        msg = obj.get("message") or {}
+        usage = msg.get("usage") or {}
+        if "input_tokens" not in usage:
+            continue
+        tokens = (
+            (usage.get("input_tokens") or 0)
+            + (usage.get("cache_read_input_tokens") or 0)
+            + (usage.get("cache_creation_input_tokens") or 0)
+        )
+        return tokens, msg.get("model")
+    return None, None
+
+
+def parse_window_map(spec):
+    """Parse a 'substr=tokens,substr=tokens' per-model window map into a dict.
+
+    Keys are matched as substrings of the transcript model id (e.g.
+    'haiku=200000,opus=1000000'). Malformed entries are ignored."""
+    out = {}
+    if not spec:
+        return out
+    for entry in spec.split(","):
+        entry = entry.strip()
+        if "=" not in entry:
+            continue
+        key, _, val = entry.partition("=")
+        key = key.strip()
+        try:
+            n = int(val.strip())
+        except ValueError:
+            continue
+        if key and n > 0:
+            out[key] = n
+    return out
+
+
+def resume_mtime(cwd):
+    """Newest mtime among RESUME.md / RESUME.<slot>.md, or 0."""
+    best = 0.0
+    for name in ("RESUME.md", "RESUME%s.md" % slot_suffix()):
+        p = os.path.join(cwd, name)
+        if os.path.isfile(p):
+            best = max(best, os.path.getmtime(p))
+    return best
+
+
+# ----------------------------------------------------------------------------
+# The watcher (runs in a thread; injects by writing to the pty master fd)
+# ----------------------------------------------------------------------------
+
+class Watcher:
+    # states
+    NORMAL = "normal"
+    NUDGED = "nudged"
+    COOLDOWN = "cooldown"
+
+    def __init__(self, cfg, master_fd, write_lock, cwd, sdir, logf):
+        self.cfg = cfg
+        self.fd = master_fd
+        self.lock = write_lock
+        self.cwd = cwd
+        self.sdir = sdir
+        self.log = logf
+        self.state = self.NORMAL
+        self.stop = False
+        self.nudge_at = 0.0
+        self.nudge_offset = 0     # transcript byte offset at nudge time
+        self.nudge_path = None    # transcript file current at nudge time
+        self.renudges = 0
+        self.hard_fired = False   # hard-threshold escalation done for this cycle
+        self.cooldown_until = 0.0
+
+    def _log(self, msg):
+        try:
+            self.log.write("%s  %s\n" % (time.strftime("%H:%M:%S"), msg))
+            self.log.flush()
+        except Exception:
+            pass
+
+    def _write(self, data):
+        """Write to the pty master, tolerating the child having exited.
+
+        If the session has gone away mid-injection the fd is closed/broken; treat
+        that as a stop signal rather than letting the watcher thread die on an
+        unhandled OSError."""
+        try:
+            os.write(self.fd, data)
+            return True
+        except OSError:
+            self.stop = True
+            return False
+
+    def _type(self, text, submit=True, settle=KEY_DELAY):
+        with self.lock:
+            if not self._write(text.encode()):
+                return
+            if submit:
+                time.sleep(settle)
+                self._write(b"\r")
+
+    def _interrupt(self):
+        # Escape interrupts a running turn (forces the model to yield) and also
+        # dismisses any open autocomplete menu when the prompt is idle.
+        with self.lock:
+            self._write(b"\x1b")
+        time.sleep(0.5)
+
+    def _soft_nudge(self, pct):
+        if self.cfg.nudge:
+            msg = self.cfg.nudge.replace("{pct}", "%.0f" % pct).replace("{sentinel}", self.cfg.sentinel)
+        else:
+            msg = (
+                "[auto-checkpoint] Context is at %.0f%% of the window. At your next "
+                "clean breakpoint (do NOT interrupt an in-progress edit), invoke the "
+                "checkpoint skill to update RESUME.md, then print the single token %s "
+                "on its own line and stop — do not start new work. This session will "
+                "be cleared and resumed from RESUME.md automatically." % (pct, self.cfg.sentinel)
+            )
+        self._type(msg)
+
+    def _arm_nudge(self, path, pct):
+        """Stamp the nudge time + the transcript file/offset, then type the soft
+        nudge. We pin the *file* current at nudge time (not just the offset): the
+        model echoes the sentinel into it before we /clear rotates to a new file,
+        so scanning that pinned file keeps confirmation correct across rotation."""
+        self.nudge_at = time.time()
+        self.nudge_path = path
+        self.nudge_offset = os.path.getsize(path)
+        self._soft_nudge(pct)
+
+    def _do_clear(self):
+        self._interrupt()                # dismiss any menu / ensure clean line
+        self._type("/clear", settle=KEY_DELAY)
+        time.sleep(CLEAR_SETTLE)         # let SessionStart:clear reload RESUME
+        self._type("Resume the task from RESUME.md — continue from the ### Next "
+                   "section. Do not re-do completed work.")
+
+    def _new_text_since_nudge(self):
+        """Assistant text appended to the pinned nudge-time transcript after the
+        nudge, for sentinel detection."""
+        if not self.nudge_path:
+            return ""
+        try:
+            with open(self.nudge_path, "rb") as f:
+                f.seek(self.nudge_offset)
+                data = f.read()
+        except OSError:
+            return ""
+        out = []
+        for line in data.split(b"\n"):
+            if b'"assistant"' not in line:
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if obj.get("type") != "assistant":
+                continue
+            for blk in (obj.get("message") or {}).get("content") or []:
+                if isinstance(blk, dict) and blk.get("type") == "text":
+                    out.append(blk.get("text", ""))
+        return "\n".join(out)
+
+    def _confirmed(self):
+        seen = self.cfg.sentinel in self._new_text_since_nudge()
+        resume_fresh = resume_mtime(self.cwd) > self.nudge_at
+        # Sentinel is primary; RESUME freshness corroborates and also rescues the
+        # case where the model checkpointed without echoing the token verbatim.
+        if seen and resume_fresh:
+            return True
+        if seen and (time.time() - self.nudge_at) > 20:
+            return True
+        if resume_fresh and (time.time() - self.nudge_at) > 25:
+            return True
+        return False
+
+    def run(self):
+        cfg = self.cfg
+        self._log("watcher start: soft=%.0f%% hard=%.0f%% poll=%.0fs"
+                  % (cfg.soft, cfg.hard, cfg.poll))
+        # Autonomous kickoff: submit the initial task once the TUI is ready (after
+        # any bypass-permissions accept). Without this an unattended session idles
+        # at an empty prompt and never produces work to manage.
+        if cfg.init_prompt and not self.stop:
+            time.sleep(cfg.init_delay)
+            if not self.stop:
+                self._type(cfg.init_prompt)
+                self._log("sent init prompt after %.0fs" % cfg.init_delay)
+        while not self.stop:
+            time.sleep(cfg.poll)
+            path = active_jsonl(self.sdir)
+            if not path:
+                continue
+            tokens, model = latest_usage(path)
+            if tokens is None:
+                continue
+            window = cfg.window_for(model)
+            pct = 100.0 * tokens / window
+
+            if self.state == self.COOLDOWN:
+                if time.time() >= self.cooldown_until and pct < cfg.soft:
+                    self._log("reset complete (%.1f%%); back to NORMAL" % pct)
+                    self.state = self.NORMAL
+                continue
+
+            if self.state == self.NORMAL:
+                if pct >= cfg.soft:
+                    self._log("soft threshold hit at %.1f%% (%d tok) — nudging" % (pct, tokens))
+                    self.renudges = 0
+                    self.hard_fired = False
+                    self._arm_nudge(path, pct)
+                    self.state = self.NUDGED
+                continue
+
+            if self.state == self.NUDGED:
+                if self._confirmed():
+                    self._log("checkpoint confirmed at %.1f%% — clearing" % pct)
+                    self._do_clear()
+                    self.cooldown_until = time.time() + cfg.cooldown
+                    self.state = self.COOLDOWN
+                elif pct >= cfg.hard and not self.hard_fired:
+                    # Fire the forceful escalation ONCE per nudge cycle. Re-firing
+                    # every poll would re-interrupt the model mid-checkpoint and
+                    # keep resetting nudge_at, so the timed fallbacks in
+                    # _confirmed() could never accumulate. After this, fall through
+                    # to the nudge_timeout cadence below.
+                    self._log("HARD threshold at %.1f%% — forcing checkpoint" % pct)
+                    if cfg.hard_interrupt:
+                        self._interrupt()
+                    self.hard_fired = True
+                    self._arm_nudge(path, pct)
+                elif (time.time() - self.nudge_at) > cfg.nudge_timeout:
+                    if self.renudges < MAX_RENUDGE:
+                        self.renudges += 1
+                        self._log("no checkpoint after %.0fs — re-nudging" % cfg.nudge_timeout)
+                        self._arm_nudge(path, pct)
+                    else:
+                        self._log("re-nudge exhausted — interrupting + nudging")
+                        if cfg.hard_interrupt:
+                            self._interrupt()
+                        self._arm_nudge(path, pct)
+                        self.renudges = 0
+
+
+# ----------------------------------------------------------------------------
+# pty proxy
+# ----------------------------------------------------------------------------
+
+def set_winsize(fd):
+    try:
+        sz = fcntl.ioctl(0, termios.TIOCGWINSZ, b"\x00" * 8)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, sz)
+    except OSError:
+        pass
+
+
+def run_proxy(cfg, cwd, sdir, logpath):
+    shell = os.environ.get("SHELL", "/bin/bash")
+    # CCAGE_AUTOCK_EXEC overrides the command launched inside the pty (default the
+    # cage's `claude` shell function). For custom launchers and for testing.
+    launch = os.environ.get("CCAGE_AUTOCK_EXEC") or 'claude "$@"'
+    child_argv = [shell, "-ic", launch, shell] + cfg.claude_args
+
+    pid, master_fd = pty.fork()
+    if pid == 0:  # child: becomes the cage's claude session
+        os.execvp(shell, child_argv)
+        os._exit(127)
+
+    set_winsize(master_fd)
+
+    # raw mode on our stdin so keystrokes pass straight through to the TUI
+    try:
+        old_attr = termios.tcgetattr(0)
+        tty.setraw(0)
+        raw = True
+    except termios.error:
+        old_attr = None
+        raw = False
+
+    write_lock = __import__("threading").Lock()
+    logf = open(logpath, "a", buffering=1)
+    watcher = Watcher(cfg, master_fd, write_lock, cwd, sdir, logf)
+    if cfg.enabled:
+        import threading
+        t = threading.Thread(target=watcher.run, daemon=True)
+        t.start()
+
+    signal.signal(signal.SIGWINCH, lambda *_: set_winsize(master_fd))
+
+    # A --dangerously-skip-permissions launch in a not-yet-accepted cage opens on
+    # a "Bypass Permissions mode" screen defaulting to "No, exit" — an unattended
+    # session would hang there. Since the user opted into DSP, auto-accept it
+    # (Down -> "Yes, I accept" -> Enter). Opt out with CCAGE_AUTOCK_NO_BYPASS_ACCEPT.
+    ANSI = re.compile(rb'\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][AB0]|\x1b\][^\x07]*\x07|[\x00-\x08\x0e-\x1f]')
+    out_buf = b""
+    bypass_done = bool(os.environ.get("CCAGE_AUTOCK_NO_BYPASS_ACCEPT"))
+    started = time.time()
+
+    stdin_ok = True
+    try:
+        while True:
+            watch = [master_fd] + ([0] if stdin_ok else [])
+            try:
+                rfds, _, _ = select.select(watch, [], [])
+            except select.error as e:
+                if e.args[0] == errno.EINTR:
+                    continue
+                raise
+            if master_fd in rfds:
+                try:
+                    data = os.read(master_fd, 65536)
+                except OSError:
+                    break
+                if not data:
+                    break
+                os.write(1, data)
+                if not bypass_done and time.time() - started < 60:
+                    out_buf = ANSI.sub(b"", out_buf + data)[-4096:]
+                    # Match the screen's distinctive title AND its accept-option
+                    # label, not the bare words "Bypass"/"accept" — those occur in
+                    # ordinary repo content (changelogs, licences) and a loose
+                    # match could fire a spurious Down+Enter into the live TUI.
+                    if b"Bypass Permissions" in out_buf and b"Yes, I accept" in out_buf:
+                        with write_lock:
+                            os.write(master_fd, b"\x1b[B")   # down -> "Yes, I accept"
+                            time.sleep(0.3)
+                            os.write(master_fd, b"\r")        # confirm
+                        bypass_done = True
+                        logf.write("%s  auto-accepted bypass-permissions prompt\n"
+                                   % time.strftime("%H:%M:%S"))
+                        logf.flush()
+            if stdin_ok and 0 in rfds:
+                try:
+                    data = os.read(0, 65536)
+                except OSError:
+                    data = b""
+                if not data:
+                    # stdin hit EOF (non-tty / closed): stop polling it so we don't
+                    # busy-spin; the child runs on under watcher control.
+                    stdin_ok = False
+                else:
+                    with write_lock:
+                        os.write(master_fd, data)
+    finally:
+        watcher.stop = True
+        if raw and old_attr is not None:
+            termios.tcsetattr(0, termios.TCSADRAIN, old_attr)
+        try:
+            logf.close()
+        except Exception:
+            pass
+
+    _, status = os.waitpid(pid, 0)
+    return os.waitstatus_to_exitcode(status)
+
+
+# ----------------------------------------------------------------------------
+# main
+# ----------------------------------------------------------------------------
+
+def print_status(cfg, cwd, config_dir, sdir):
+    path = active_jsonl(sdir)
+    print("ccage-auto status")
+    print("  cwd          :", cwd)
+    print("  config dir   :", config_dir)
+    print("  session dir  :", sdir, "(exists)" if os.path.isdir(sdir) else "(missing)")
+    print("  enabled      :", cfg.enabled)
+    print("  soft / hard  : %.0f%% / %.0f%%" % (cfg.soft, cfg.hard))
+    if not path:
+        print("  transcript   : none found")
+        return
+    tokens, model = latest_usage(path)
+    window = cfg.window_for(model)
+    print("  transcript   :", os.path.basename(path))
+    print("  model        :", model)
+    print("  window       :", window)
+    if tokens is None:
+        print("  occupancy    : no assistant turn with usage yet")
+    else:
+        print("  occupancy    : %d tok = %.1f%% of window" % (tokens, 100.0 * tokens / window))
+
+
+def main():
+    cfg = Config(sys.argv[1:])
+    for w in cfg.validate():
+        sys.stderr.write("[ccage-auto] %s\n" % w)
+    cwd = os.getcwd()
+    config_dir = resolve_config_dir(cwd)
+    sdir = session_dir(config_dir, cwd)
+
+    if cfg.status_only:
+        print_status(cfg, cwd, config_dir, sdir)
+        return 0
+
+    if not cfg.enabled:
+        # Transparent pass-through: behave exactly like launching `claude`.
+        sys.stderr.write("[ccage-auto] disabled — launching normally\n")
+        shell = os.environ.get("SHELL", "/bin/bash")
+        launch = os.environ.get("CCAGE_AUTOCK_EXEC") or 'claude "$@"'
+        os.execvp(shell, [shell, "-ic", launch, shell] + cfg.claude_args)
+        return 127
+
+    logpath = os.path.join(config_dir, "ccage-autock.log") \
+        if os.path.isdir(config_dir) else os.path.join(cwd, ".ccage-autock.log")
+    sys.stderr.write(
+        "[ccage-auto] auto-checkpoint on — soft %.0f%% / hard %.0f%%, log: %s\n"
+        % (cfg.soft, cfg.hard, logpath)
+    )
+    return run_proxy(cfg, cwd, sdir, logpath)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

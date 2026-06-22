@@ -45,6 +45,10 @@ if [ -f "$prefix/bin/ccage" ]; then
     run rm -f "$prefix/bin/ccage"
     printf 'removed %s/bin/ccage\n' "$prefix"
 fi
+if [ -f "$prefix/bin/ccage-auto" ]; then
+    run rm -f "$prefix/bin/ccage-auto"
+    printf 'removed %s/bin/ccage-auto\n' "$prefix"
+fi
 if [ -f "$prefix/share/ccage/ccage-handoff.sh" ]; then
     run rm -f "$prefix/share/ccage/ccage-handoff.sh"
     printf 'removed %s/share/ccage/ccage-handoff.sh\n' "$prefix"

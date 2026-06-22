@@ -234,6 +234,43 @@ Long sessions end at `/clear` — and the next one starts cold. ccage ships an o
 
 > **Caveat:** the auto-read hook injects `RESUME.md` from whatever repo you're in — including one you just cloned. A malicious repo could ship a crafted `RESUME.md` as a prompt-injection vector. Documented in `docs/FEATURES.md`; disable per-cage with `CCAGE_NO_AUTOLOAD=1` if you work in untrusted checkouts.
 
+## Autonomous context management (`ccage-auto`)
+
+`/checkpoint` → `/clear` → reload still needs a human to type `/clear`. For an unattended session that just keeps growing until auto-compact (near 100% of the window — costly, and a long context makes the model duller), `ccage-auto` automates the whole loop:
+
+```sh
+ccage-auto            # launch like `claude`, with auto-checkpoint on
+ccage-auto --status   # print the resolved transcript + current occupancy, then exit
+```
+
+It launches your normal cage session through a pseudo-terminal and runs a tiny in-process watcher that:
+
+- **measures** real context occupancy from the session's transcript JSONL — `input + cache_read + cache_creation` tokens of the latest turn. No LLM, no estimation, no API calls; CPU cost is rounding-error.
+- at a **soft threshold** (default 35%) types a one-line nudge so the model itself runs `/checkpoint` at a clean breakpoint and prints a sentinel;
+- once the checkpoint is confirmed on disk, types the one thing the model can't do for itself — `/clear` — then a short resume nudge. Your `SessionStart` auto-read hook reloads `RESUME.md`, so work continues from where it left off;
+- at a **hard threshold** (default 55%) forces the checkpoint as a backstop if the model blew past the soft nudge in one long turn.
+
+Injection is just writing keystrokes to the pty — no tmux, no API cost. The only model work triggered is the checkpoint + resume you wanted anyway, far cheaper than letting the window balloon. Slot-aware (`CCAGE_SLOT`) and a no-op for slotless cages alike.
+
+| Knob | Flag | Env | Default |
+|------|------|-----|---------|
+| On/off | `--autock` / `--no-autock` | `CCAGE_AUTOCK=0` | on |
+| Soft threshold (%) | `--soft N` | `CCAGE_AUTOCK_SOFT` | 35 |
+| Hard threshold (%) | `--hard N` | `CCAGE_AUTOCK_HARD` | 55 |
+| Context window — force (tokens) | `--window N` | `CCAGE_AUTOCK_WINDOW` | per-model |
+| Context window — per-model map | `--window-map 'opus=1000000,haiku=200000'` | `CCAGE_AUTOCK_WINDOWS` | built-in |
+| Poll interval (s) | `--poll N` | `CCAGE_AUTOCK_POLL` | 12 |
+
+Thresholds are validated: an out-of-range value falls back to its default, and `soft ≥ hard` raises `hard` so the backstop always sits above the nudge.
+
+**Per-model context windows.** Windows differ by model, and the transcript doesn't record which one a session has — a 1M and a 200K session log the *same* model id. The window is re-resolved on every measurement (so a mid-session `/model` switch is handled), most specific first: a forced `--window` → the per-model map → a `[1m]` marker in the id → built-in small families (haiku → 200K) → a 1,000,000 default. The one thing the data genuinely can't tell apart — a 200K vs 1M *variant of the same family* — is yours to pin with `--window-map` (or `--window`). Set the default high (1M) so the safe failure is to defer rather than checkpoint too early.
+
+**Unattended launches.** For a truly hands-off session you'll pass `--dangerously-skip-permissions` (otherwise a permission prompt blocks the session and the watcher can't clear it). On a cage that hasn't accepted bypass mode yet, Claude opens on a "Bypass Permissions mode" screen that defaults to *No, exit* — `ccage-auto` auto-accepts it at startup (you already opted in via the flag); opt out with `CCAGE_AUTOCK_NO_BYPASS_ACCEPT=1`. Don't use `-p`/`--print`: headless mode runs one turn and exits, defeating the watcher.
+
+> **Caveat:** unattended auto-resume types "resume from `RESUME.md`" with no human in the loop, so a crafted `RESUME.md` in a checkout you don't trust is acted on immediately — the same prompt-injection surface as the auto-read hook above, minus the chance to eyeball it. Don't run `ccage-auto` unattended in untrusted repos; `CCAGE_NO_AUTOLOAD=1` disables the reload.
+
+Needs `python3`. Watcher activity is logged to `<cage>/ccage-autock.log`.
+
 ## Uninstall
 
 ```sh
