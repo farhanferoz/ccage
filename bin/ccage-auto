@@ -46,7 +46,7 @@
 #   CCAGE_AUTOCK_INIT_PROMPT (type this + Enter at startup to auto-begin the task),
 #   CCAGE_AUTOCK_INIT_DELAY (seconds to wait before the init prompt; default 6),
 #   CCAGE_AUTOCK_NUDGE (override the soft-nudge text; {pct}/{sentinel} substituted),
-#   CCAGE_AUTOCK_NUDGE_TIMEOUT (s before re-nudge if unconfirmed; default 240),
+#   CCAGE_AUTOCK_NUDGE_TIMEOUT (s before re-nudge if unconfirmed; default 600),
 #   CCAGE_AUTOCK_COOLDOWN (s to ignore thresholds after a reset; default 30).
 #   CCAGE_SLOT is honoured for RESUME naming.
 #
@@ -99,7 +99,7 @@ DEFAULT_WINDOW = WINDOW_1M    # fallback when the model is unknown / ambiguous
 KEY_DELAY = 0.25        # pause between typing a line and submitting it
 CLEAR_SETTLE = 3.0      # wait after /clear for the SessionStart hook + reload
 COOLDOWN = 30.0         # ignore thresholds for this long after a reset
-NUDGE_TIMEOUT = 240.0   # if no checkpoint confirmation, re-nudge / escalate
+NUDGE_TIMEOUT = 600.0   # if no checkpoint confirmation, re-nudge / escalate
 MAX_RENUDGE = 1         # soft re-nudges before escalating to the hard path
 
 
@@ -409,6 +409,10 @@ class Watcher:
         self.renudges = 0
         self.hard_fired = False   # hard-threshold escalation done for this cycle
         self.cooldown_until = 0.0
+        self.last_path = None     # transcript path of the last occupancy reading
+        self.last_sz = -1         # size of that transcript at the last reading
+        self.last_tokens = None   # assistant tokens at the last reading
+        self.last_pct = None      # last measured occupancy %, reused between turns
 
     def _log(self, msg):
         try:
@@ -504,13 +508,10 @@ class Watcher:
     def _confirmed(self):
         seen = self.cfg.sentinel in self._new_text_since_nudge()
         resume_fresh = resume_mtime(self.cwd) > self.nudge_at
-        # Sentinel is primary; RESUME freshness corroborates and also rescues the
-        # case where the model checkpointed without echoing the token verbatim.
+        # Sentinel is primary; RESUME freshness corroborates.
         if seen and resume_fresh:
             return True
         if seen and (time.time() - self.nudge_at) > 20:
-            return True
-        if resume_fresh and (time.time() - self.nudge_at) > 25:
             return True
         return False
 
@@ -531,11 +532,34 @@ class Watcher:
             path = active_jsonl(self.sdir)
             if not path:
                 continue
-            tokens, model = latest_usage(path)
-            if tokens is None:
+
+            try:
+                sz = os.path.getsize(path)
+            except OSError:
                 continue
-            window = cfg.window_for(model)
-            pct = 100.0 * tokens / window
+
+            # Re-measure occupancy only when the active transcript changed or grew,
+            # and only treat a changed token count as a fresh reading — growth from
+            # user typing or a logged /clear keeps the last pct. Skipping the
+            # *re-parse* must never skip the state machine below: a stalled or
+            # idle-over-threshold session still has to be nudged, re-nudged, and
+            # hard-interrupted on the timed cadence even while nothing new is logged.
+            if path != self.last_path:
+                self.last_path = path
+                self.last_sz = -1
+                self.last_tokens = None
+                self.last_pct = None
+            if sz != self.last_sz:
+                self.last_sz = sz
+                tokens, model = latest_usage(path)
+                if tokens is not None and tokens != self.last_tokens:
+                    self.last_tokens = tokens
+                    self.last_pct = 100.0 * tokens / cfg.window_for(model)
+
+            if self.last_pct is None or self.last_tokens is None:
+                continue
+            tokens = self.last_tokens
+            pct = self.last_pct
 
             if self.state == self.COOLDOWN:
                 if time.time() >= self.cooldown_until and pct < cfg.soft:
