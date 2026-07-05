@@ -88,6 +88,41 @@ in_repo() { ( cd "$REPO" && "$@" ); }
     grep -qxF 'RESUME.bg.md' "$REPO/.git/info/exclude"
 }
 
+@test "mark-done writes the completion marker and excludes it from git" {
+    ( cd "$REPO" && git init -q )
+    run in_repo bash "$HELPER" mark-done
+    [ "$status" -eq 0 ]
+    [ -f "$REPO/.ccage-session-done" ]
+    grep -qxF '.ccage-session-done' "$REPO/.git/info/exclude"
+    # excluded → invisible to git status
+    [ -z "$( cd "$REPO" && git status --porcelain )" ]
+}
+
+@test "mark-done is idempotent: re-run does not duplicate the exclude line" {
+    ( cd "$REPO" && git init -q )
+    in_repo bash "$HELPER" mark-done
+    run in_repo bash "$HELPER" mark-done
+    [ "$status" -eq 0 ]
+    [ "$(grep -cxF '.ccage-session-done' "$REPO/.git/info/exclude")" -eq 1 ]
+}
+
+@test "clear-done removes the marker and is a no-op when already absent" {
+    in_repo bash "$HELPER" mark-done
+    [ -f "$REPO/.ccage-session-done" ]
+    run in_repo bash "$HELPER" clear-done
+    [ "$status" -eq 0 ]
+    [ ! -e "$REPO/.ccage-session-done" ]
+    run in_repo bash "$HELPER" clear-done          # idempotent
+    [ "$status" -eq 0 ]
+}
+
+@test "mark-done outside a git repo: writes the marker, no crash, no exclude" {
+    run in_repo bash "$HELPER" mark-done
+    [ "$status" -eq 0 ]
+    [ -f "$REPO/.ccage-session-done" ]
+    [ ! -e "$REPO/.git" ]
+}
+
 @test "unknown subcommand: usage error, exit 2" {
     run in_repo bash "$HELPER" frobnicate
     [ "$status" -eq 2 ]

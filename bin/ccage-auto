@@ -384,6 +384,21 @@ def resume_mtime(cwd):
     return best
 
 
+# The completion marker written by `/checkpoint --final` (see the checkpoint
+# skill). Deliberately a single fixed name, not slot-scoped: a coarse
+# "the session's work is done, helpers may stand down" signal for this directory.
+SESSION_DONE_MARKER = ".ccage-session-done"
+
+
+def session_done_mtime(cwd):
+    """mtime of the .ccage-session-done marker in cwd, or 0 if absent."""
+    p = os.path.join(cwd, SESSION_DONE_MARKER)
+    try:
+        return os.path.getmtime(p)
+    except OSError:
+        return 0.0
+
+
 # ----------------------------------------------------------------------------
 # The watcher (runs in a thread; injects by writing to the pty master fd)
 # ----------------------------------------------------------------------------
@@ -403,6 +418,11 @@ class Watcher:
         self.log = logf
         self.state = self.NORMAL
         self.stop = False
+        # A `.ccage-session-done` marker newer than this counts as "this run's
+        # work is finished." Anchoring on start time means a stale marker from a
+        # previous run (which the SessionStart hook also clears at startup) can
+        # never trip an immediate stand-down before any work has happened.
+        self.start_time = time.time()
         self.nudge_at = 0.0
         self.nudge_offset = 0     # transcript byte offset at nudge time
         self.nudge_path = None    # transcript file current at nudge time
@@ -529,6 +549,17 @@ class Watcher:
                 self._log("sent init prompt after %.0fs" % cfg.init_delay)
         while not self.stop:
             time.sleep(cfg.poll)
+            # Stand down the moment the session is marked done (/checkpoint
+            # --final). ccage-auto is a persistent process that owns the /clear
+            # cycles, so — unlike /keepwarm — it reads the marker with no
+            # /clear-survival caveat: this is the load-bearing consumer. Standing
+            # down stops the nudge/clear state machine but leaves the claude
+            # session itself running for the user.
+            if session_done_mtime(self.cwd) > self.start_time:
+                self._log("session marked done (%s) — standing down; "
+                          "no more nudges/clears" % SESSION_DONE_MARKER)
+                self.stop = True
+                break
             path = active_jsonl(self.sdir)
             if not path:
                 continue

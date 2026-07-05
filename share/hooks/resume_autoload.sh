@@ -44,6 +44,16 @@ case "${CCAGE_SLOT:-}" in
 esac
 resume="$base/RESUME${slot}.md"
 
+# ---- 0. clear a stale completion marker on a genuinely new session ----
+# `.ccage-session-done` (written by `/checkpoint --final`) tells /keepwarm and
+# ccage-auto the work is finished. It must survive `/clear` (source=clear) so an
+# autonomous run's final checkpoint still stands the helpers down — but a brand
+# new session (source=startup) is NOT done, so a marker left over from a previous
+# session would falsely quit its helpers. Clear it only on startup.
+if [ "$src" = "startup" ]; then
+    rm -f "$base/.ccage-session-done" 2>/dev/null
+fi
+
 # ---- 1. inject RESUME into context ----
 [ -f "$resume" ] && cat "$resume"
 

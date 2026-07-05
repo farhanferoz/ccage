@@ -9,7 +9,9 @@ description: >-
   before /clear, before a context boundary or compaction, when the user says
   "checkpoint", "save
   progress", "snapshot state", "update RESUME", or "hand off"; to bootstrap
-  RESUME.md + CHANGELOG.md in a repo that has none; with --tidy to also
+  RESUME.md + CHANGELOG.md in a repo that has none; with --final when the
+  session's work is genuinely finished (writes a .ccage-session-done marker so
+  /keepwarm self-stops and ccage-auto stands down); with --tidy to also
   reorganize this cage's memory directory; or with --merge-slots to collapse
   parallel per-slot RESUME.<slot>.md files back into the plain trunk so a later
   slotless session sees the union.
@@ -80,7 +82,15 @@ same-directory case.
 - **checkpoint** (default, mid-work) — files exist → merge current state into
   `$resume` the **lean** way (§3): reuse the in-context copy, update in place,
   refresh today's session block, and roll to `$changelog` only if over budget.
-  Touches only the continuity files, not memory.
+  Touches only the continuity files, not memory. Also clears any
+  `.ccage-session-done` marker (§6) — a plain checkpoint means "still working."
+- **`--final`** (work is genuinely done) — do the lean checkpoint, **then** write
+  the `.ccage-session-done` marker (§6). This is the only mode that writes it; use
+  it when the session's actual task is complete and you're winding down for real,
+  not for a routine mid-work save. It's what lets background helpers stop:
+  `/keepwarm` self-stops on its next wake and `ccage-auto` stands down instead of
+  running its checkpoint→clear loop all night. Combine with `--tidy` when closing
+  the day for good (`--final --tidy`): both run, in that order.
 - **`--tidy`** (close of day) — do the lean checkpoint, **then** tidy this cage's
   memory dir (§4). This is the session-close ritual; there is no separate
   `--close`. Run it when the user wraps up, asks to tidy, or the SessionStart
@@ -216,8 +226,20 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    (§2) or when a budget-overflow trim genuinely restructures most of the file.
    Regenerating a ~150-line RESUME every checkpoint is the main avoidable cost — and
    the slow part.
-7. **End by telling the user:** `RESUME updated — safe to /clear.` (append
-   `, CHANGELOG rolled` only if step 5 actually moved a block).
+7. **Update the done-marker (one Bash call).** After RESUME is written, reconcile
+   the `.ccage-session-done` marker (§6). The rule is decided by **one thing only —
+   whether `--final` is present**, never by the other flags:
+   - **`--final` in the invocation** (alone or with `--tidy`) → run
+     `bash "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/checkpoint/checkpoint-init.sh" mark-done`.
+     `--final` always wins: `--final --tidy` marks done **and** tidies.
+   - **no `--final`** (plain, `--tidy` alone, `--merge-slots`) → run the same
+     helper with `clear-done`.
+
+   This is what makes `/keepwarm` and `ccage-auto` stand down on `--final` and keep
+   going otherwise. Skip gracefully if the helper is missing.
+8. **End by telling the user:** `RESUME updated — safe to /clear.` (append
+   `, CHANGELOG rolled` only if step 5 actually moved a block; append
+   `, marked done` on `--final`).
 
 Use the same six-part structure as a `session-handoff` brief for the per-session
 narrative if helpful — but `/checkpoint` differs in that it writes a persistent,
@@ -310,6 +332,41 @@ again. It does not checkpoint the caller; do that first if you have unsaved stat
 
 Idempotent: a second run finds no slot files and no-ops. Re-running after a slot
 session checkpoints again simply folds that one in too.
+
+---
+
+## 6. `--final` — the `.ccage-session-done` completion marker
+
+`/clear` wipes the conversation, so an in-memory "we're done" flag can't survive
+to tell background helpers to stop. `.ccage-session-done` is that flag made
+durable: a small file at the project root, written **only** by `/checkpoint
+--final`, that two helpers poll:
+
+- **`/keepwarm`** checks it on every scheduled wake and self-stops when it's
+  present — so an away-loop that's still pinging quits once the work is finished.
+- **`ccage-auto`** (the autonomous context manager) checks it each poll and stands
+  down — stops its checkpoint→clear→resume loop instead of running all night after
+  the task is actually complete.
+
+**Why a plain checkpoint must clear it (§3 step 7).** `ccage-auto` drives ordinary
+`/checkpoint` calls as *maintenance* (save RESUME, then `/clear`, then keep
+working) — those are **not** "done." If a stale marker lingered, the very next
+maintenance checkpoint would look terminal and everything would stop early. So the
+rule is strict: **`--final` writes the marker; every other checkpoint clears it;
+the SessionStart hook clears it on a genuinely new session.** The marker is present
+if and only if the last checkpoint was a `--final`.
+
+You never write or delete this file by hand — §3 step 7 calls
+`checkpoint-init.sh mark-done` / `clear-done`, which also keeps it out of git. It
+is deliberately **not** slot-scoped: it's a coarse per-directory "helpers may stand
+down" signal, and one fixed name keeps every consumer trivially simple.
+
+**When to reach for `--final`:** the session's actual task is done and you're
+winding down — the human is wrapping up for the day, or an autonomous `ccage-auto`
+run has finished its objective. Not for routine mid-work saves (that's plain
+`/checkpoint`), and not merely because you're about to `/clear` to free context
+(that's also plain — you're continuing). Pair with `--tidy` (`--final --tidy`) at a
+true end-of-day.
 
 ---
 
