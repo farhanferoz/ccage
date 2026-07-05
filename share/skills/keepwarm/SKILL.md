@@ -111,21 +111,30 @@ rely on §5.2 — and never create a second chain.)
 
 A wake **is** the cache refresh — the request that delivered it already re-read
 the prefix and reset the TTL. Your only jobs are bookkeeping and the next hop.
-Strict rules for the wake turn: **no tools** (except the rescheduling call), no
-file changes, at most one short output line.
+Strict rules for the wake turn: **no tools** (except the rescheduling call and
+the single done-marker check in step 1), no file changes, at most one short
+output line.
 
-1. **User said stop?** If the conversation shows "stop" / "I'm back" / an
+1. **Session marked done?** Run one cheap check —
+   `test -e .ccage-session-done && echo done` in the project dir. If it prints
+   `done`, a `/checkpoint --final` has declared the work finished (a signal that
+   survives `/clear`), so stop: reply `keep-warm stopped — session marked done.`
+   and do **not** reschedule. (A genuinely new session clears this marker at
+   startup, so it can never be stale from a previous day.) This is the one
+   filesystem check the wake turn is allowed; skip it gracefully if Bash is
+   sandboxed away from the project dir.
+2. **User said stop?** If the conversation shows "stop" / "I'm back" / an
    equivalent since arming → reply `keep-warm stopped.` and do not reschedule.
-2. **User active since the previous wake?** (Reached only when §4b re-anchoring
+3. **User active since the previous wake?** (Reached only when §4b re-anchoring
    didn't happen.) Their turns already refreshed the cache, so this wake does
    **not** count against the cap — a true reset: reply
    `keep-warm: you were active — counter reset; next ping at <HH:MM>.` and
    reschedule with `--ping 1 <max> <interval>` (the full `max` unattended pings
    are available again, exactly as announced).
-3. **Normal ping (`n < max`):** reply
+4. **Normal ping (`n < max`):** reply
    `keep-warm ping <n>/<max> — cache refreshed; next at <HH:MM>.` and
    reschedule with `--ping <n+1> <max> <interval>`.
-4. **Cap reached (`n ≥ max`):** reply
+5. **Cap reached (`n ≥ max`):** reply
    `keep-warm done (<max>/<max>) — cache expires ~1h after your last activity.`
    Do not reschedule. (`≥`, not `=`, so a malformed count can never fall
    through to an undefined state.)

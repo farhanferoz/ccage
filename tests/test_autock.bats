@@ -230,6 +230,16 @@ while time.time() < deadline:
             confirmed = True
         if b"Resume the task" in buf:  # watcher cleared and typed the resume nudge
             break
+    elif mode == "done":
+        # Play the model running `/checkpoint --final`: drop the completion
+        # marker after the first injected byte (the soft nudge), so it is newer
+        # than the watcher's start time. Then give the watcher a couple of polls
+        # to notice and stand down, and exit.
+        if not confirmed and len(buf) > 0:
+            with open(os.path.join(os.getcwd(), ".ccage-session-done"), "w") as f:
+                f.write("done\n")
+            confirmed = True
+            deadline = time.time() + 3
 sys.exit(0)
 PY
 }
@@ -278,6 +288,37 @@ drive() {
     [ "$status" -eq 42 ]
     [[ "$output" == *"disabled — launching normally"* ]]
     [ ! -f "$CAGE/ccage-autock.log" ]             # watcher never ran
+}
+
+@test "session_done_mtime: 0 when the marker is absent, >0 when it exists" {
+    run python3 - "$AUTO" "$REPO" <<'PY'
+import importlib.util, importlib.machinery, os, sys
+# ccage-auto has no .py suffix, so load it via an explicit source loader.
+loader = importlib.machinery.SourceFileLoader("ccageauto", sys.argv[1])
+spec = importlib.util.spec_from_loader("ccageauto", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+d = sys.argv[2]
+assert m.session_done_mtime(d) == 0.0, "absent must be 0"
+p = os.path.join(d, ".ccage-session-done"); open(p, "w").write("x")
+assert m.session_done_mtime(d) > 0, "present must be >0"
+os.remove(p); assert m.session_done_mtime(d) == 0.0, "removed must be 0"
+print("UNIT_OK")
+PY
+    [ "$status" -eq 0 ]
+    [[ "$output" == *UNIT_OK* ]]
+}
+
+@test "a --final completion marker stands the watcher down before any /clear" {
+    # The model marks the session done mid-run (writes .ccage-session-done). The
+    # watcher must stop its state machine on the next poll — nudge already fired,
+    # but no /clear or resume nudge should follow.
+    drive done "--soft 10 --hard 90 --poll 1"
+    [ "$status" -eq 0 ]
+    cap_has "b'auto-checkpoint'"                    # soft nudge fired first
+    [ -f "$REPO/.ccage-session-done" ]              # marker was written
+    grep -q "standing down" "$CAGE/ccage-autock.log"
+    ! cap_has "b'/clear'"                           # stood down before clearing
+    ! cap_has "b'Resume the task from RESUME.md'"   # ...and before resuming
 }
 
 @test "CCAGE_AUTOCK_INIT_PROMPT kicks off the task unattended" {

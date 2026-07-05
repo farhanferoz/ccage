@@ -310,6 +310,7 @@ build/
 .ruff_cache/
 .cursor/
 .windsurf/
+.obsidian/
 SIGNORE
 }
 

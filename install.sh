@@ -156,6 +156,7 @@ if [ "$install_session_docs" = 1 ]; then
 ## Session continuity (ccage)
 - `RESUME.md` / `CHANGELOG.md` in a repo are personal continuity files, excluded via `.git/info/exclude`. On resume, read `RESUME.md` first.
 - Run `/checkpoint` before `/clear` to save state into `RESUME.md` (older detail rolls into `CHANGELOG.md`). With `CCAGE_SESSION_DOCS=1`, ccage auto-reads `RESUME.md` back after `/clear`. Use `/checkpoint --tidy` for memory hygiene.
+- When the session's work is genuinely finished (not a mid-work save), run `/checkpoint --final` — it writes a `.ccage-session-done` marker so a running `/keepwarm` self-stops and an autonomous `ccage-auto` run stands down. Add `--tidy` (`/checkpoint --final --tidy`) to also tidy memory at end of day. A plain `/checkpoint` clears the marker again ("still working").
 <!-- ccage:session-docs:end -->
 ANCHOR
         printf 'appended session-docs anchor to %s\n' "$claude_md"

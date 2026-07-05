@@ -7,12 +7,27 @@
 # Usage:
 #   checkpoint-init.sh paths       # print  resume=<f>  and  changelog=<f>
 #   checkpoint-init.sh bootstrap   # create RESUME/CHANGELOG if absent + exclude
+#   checkpoint-init.sh mark-done   # write the .ccage-session-done marker (--final)
+#   checkpoint-init.sh clear-done  # remove it (any non-final checkpoint)
+#
+# The .ccage-session-done marker is the "this session's work is really finished"
+# signal that outlives /clear (which wipes context, so an in-memory flag can't
+# carry it). Background helpers read it: /keepwarm self-stops and ccage-auto
+# stands down once it appears. Only a terminal `/checkpoint --final` writes it;
+# every ordinary checkpoint clears it (you're saving to keep going), and the
+# SessionStart hook clears it on a genuinely new session so a stale marker from
+# yesterday can't make today's helpers quit early.
 #
 # Never overwrites an existing file. Safe to re-run (idempotent). Operates on
 # the current working directory.
 set -u
 
 cmd="${1:-paths}"
+
+# The done-marker is intentionally NOT slot-scoped: it is a coarse per-directory
+# "helpers may stand down" signal, and keeping one fixed name keeps every
+# consumer (this script, the SessionStart hook, ccage-auto) trivially simple.
+marker=".ccage-session-done"
 
 # ---- slot-aware filenames (component G), mirroring the wrapper's validation ---
 slot=""
@@ -94,8 +109,28 @@ EOF
         fi
         ;;
 
+    mark-done)
+        # Terminal done-signal for /checkpoint --final. Write the marker with a
+        # UTC timestamp (informational; consumers only test existence/mtime) and
+        # keep it out of git — it's transient local state, like RESUME.
+        printf 'session marked done: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)" > "$marker"
+        if git rev-parse --git-dir >/dev/null 2>&1; then
+            ex="$(git rev-parse --git-dir)/info/exclude"
+            mkdir -p "$(dirname "$ex")"
+            grep -qxF "$marker" "$ex" 2>/dev/null || printf '%s\n' "$marker" >> "$ex"
+        fi
+        printf 'marked done: %s\n' "$marker"
+        ;;
+
+    clear-done)
+        # Any non-final checkpoint (plain or --tidy) means "still working" — drop
+        # the marker so helpers don't stand down. Idempotent; no-op if absent.
+        rm -f -- "$marker"
+        printf 'cleared: %s\n' "$marker"
+        ;;
+
     *)
-        printf 'usage: checkpoint-init.sh [paths|bootstrap]\n' >&2
+        printf 'usage: checkpoint-init.sh [paths|bootstrap|mark-done|clear-done]\n' >&2
         exit 2
         ;;
 esac
