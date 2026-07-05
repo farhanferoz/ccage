@@ -2,7 +2,7 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.6.0] — 2026-07-05
 
 ### Added — `/checkpoint --final` completion marker
 - **A durable "this session's work is done" signal that outlives `/clear`.** `/checkpoint --final` runs the normal lean checkpoint, then writes a `.ccage-session-done` marker (git-excluded) via `checkpoint-init.sh mark-done`. Background helpers read it: `/keepwarm` self-stops on its next scheduled wake, and `ccage-auto` stands down (stops its checkpoint→clear loop, leaving the session running) on its next poll — so an autonomous run can terminate itself once the task is actually complete, not just when context fills. Every non-final checkpoint (`/checkpoint`, `--tidy`, `--merge-slots`) clears the marker ("still working"), and the SessionStart hook clears it on a genuinely new session (`source=startup`) so a stale marker can never make today's helpers quit early — the marker is present iff the last checkpoint was `--final`. Surfaced in the always-on CLAUDE.md session-docs anchor + the `ccage-auto` README section so sessions know when to reach for it. Tests: `tests/test_checkpoint.bats` (mark-done/clear-done write + git-exclude, idempotence, non-git) and `tests/test_autock.bats` (`session_done_mtime`; end-to-end pty test that a mid-run `--final` stands the watcher down before any `/clear`).
