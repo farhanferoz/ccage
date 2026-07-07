@@ -19,10 +19,18 @@ setup() {
 # Run the hook with cwd = the temp repo (mirrors how Claude Code runs hooks).
 run_hook() { ( cd "$REPO" && "$HOOK" ); }
 
-# Path to this cage's memory dir for the repo, matching the hook's slug logic:
-# replace BOTH "/" and "_" with "-" via two single-char subs (no bracket class,
-# which macOS bash 3.2 mishandles).
-memdir() { local s="${REPO//\//-}"; s="${s//_/-}"; printf '%s/projects/%s/memory' "$CAGE" "$s"; }
+# Run the hook with the SessionStart JSON on stdin, as Claude Code delivers it.
+run_hook_src() { ( cd "$REPO" && printf '{"source":"%s"}' "$1" | "$HOOK" ); }
+
+# Path to this cage's memory dir for the repo. Deliberately an INDEPENDENT
+# implementation of the slug rule (python re.sub, not the hook's tr) so the
+# tests pin the rule itself — every non-alphanumeric char becomes "-" —
+# rather than mirroring whatever the hook happens to do.
+memdir() {
+    local s
+    s=$(python3 -c 'import re,sys; print(re.sub(r"[^A-Za-z0-9]", "-", sys.argv[1]))' "$REPO")
+    printf '%s/projects/%s/memory' "$CAGE" "$s"
+}
 
 @test "no RESUME: empty stdout, exit 0" {
     run run_hook
@@ -109,4 +117,64 @@ memdir() { local s="${REPO//\//-}"; s="${s//_/-}"; printf '%s/projects/%s/memory
     run run_hook
     [ "$status" -eq 0 ]
     [[ "$output" != *"--tidy"* ]]
+}
+
+# ===== slug regression — pinned to Claude Code's real projects/ layout =====
+# Claude Code converts EVERY non-alphanumeric cwd char to "-" ("_" and "."
+# included, verified against real cages). A "/"-only slug silently misses the
+# memory dir for any path containing "_" or ".".
+
+@test "slug: repo path with _ and . still resolves the memory dir (tidy NOTE fires)" {
+    REPO="$BATS_TEST_TMPDIR/my_repo.v2"
+    mkdir -p "$REPO"
+    local md; md="$(memdir)"; mkdir -p "$md"
+    printf -- '- [Gone](missing_note.md) — hook\n' > "$md/MEMORY.md"
+    run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--tidy"* ]]
+}
+
+# ===== completion-marker lifecycle by SessionStart source =====
+
+@test "marker: cleared on source=startup" {
+    : > "$REPO/.ccage-session-done"
+    run run_hook_src startup
+    [ "$status" -eq 0 ]
+    [ ! -e "$REPO/.ccage-session-done" ]
+}
+
+@test "marker: cleared on source=resume (claude -r means working again)" {
+    : > "$REPO/.ccage-session-done"
+    run run_hook_src resume
+    [ "$status" -eq 0 ]
+    [ ! -e "$REPO/.ccage-session-done" ]
+}
+
+@test "marker: survives source=clear and source=compact" {
+    : > "$REPO/.ccage-session-done"
+    run run_hook_src clear
+    [ "$status" -eq 0 ]
+    [ -e "$REPO/.ccage-session-done" ]
+    run run_hook_src compact
+    [ "$status" -eq 0 ]
+    [ -e "$REPO/.ccage-session-done" ]
+}
+
+# ===== bounded injection =====
+
+@test "huge RESUME: injection truncated at 2x budget with a NOTE" {
+    seq 1 600 > "$REPO/RESUME.md"
+    CCAGE_RESUME_BUDGET_LINES=250 run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"truncated at 500 lines"* ]]
+    [[ "$output" == *$'\n500\n'* ]]     # last injected line
+    [[ "$output" != *$'\n501\n'* ]]     # nothing beyond the cut
+}
+
+@test "RESUME within 2x budget: injected whole, no truncation NOTE" {
+    seq 1 300 > "$REPO/RESUME.md"
+    CCAGE_RESUME_BUDGET_LINES=250 run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'\n300'* ]]
+    [[ "$output" != *"truncated"* ]]
 }

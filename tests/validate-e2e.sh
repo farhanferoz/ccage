@@ -324,9 +324,13 @@ check "doctor seeded cage two" grep -q 'resume_budget_check.sh' "$DROOT/.claude-
 # ===== 14. /keepwarm probe (deterministic, Phase 8) =====
 echo "[14] keepwarm probe reads peak + tier from the newest session JSONL"
 KWCFG="$TMP/kw-cfg"; KWPROJ="$TMP/kw-proj"
-mkdir -p "$KWCFG/projects/${KWPROJ//\//-}" "$KWPROJ"
+# Claude Code's real slug rule: every non-alphanumeric char becomes "-" (not
+# just "/") — see share/claude-isolation.sh. This fixture path has none, so
+# the old /-only substitution stayed consistent, but use the real rule anyway.
+KWSLUG=$(printf '%s' "$KWPROJ" | LC_ALL=C tr -c 'A-Za-z0-9' '-')
+mkdir -p "$KWCFG/projects/$KWSLUG" "$KWPROJ"
 printf '{"message":{"usage":{"cache_read_input_tokens":42000,"cache_creation":{"ephemeral_1h_input_tokens":9000,"ephemeral_5m_input_tokens":0}}}}\n' \
-    > "$KWCFG/projects/${KWPROJ//\//-}/s.jsonl"
+    > "$KWCFG/projects/$KWSLUG/s.jsonl"
 CLAUDE_CONFIG_DIR="$KWCFG" bash "$REPO/share/skills/keepwarm/keepwarm-calc.sh" probe "$KWPROJ" > "$TMP/kw-probe.txt"
 check "probe reports prefix size" grep -q 'peak_cache_read=42000' "$TMP/kw-probe.txt"
 check "probe reports cache tier"  grep -q 'tier=1h'               "$TMP/kw-probe.txt"

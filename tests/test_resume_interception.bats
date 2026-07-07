@@ -95,3 +95,47 @@ setup() {
     run _ccage_intercept_resume -c;                            [ "$status" -eq 0 ]  # non-tty bats stdin
     run _ccage_intercept_resume --print "hello";              [ "$status" -eq 0 ]  # non-resume args
 }
+
+# ===== _ccage_resume_locate_jsonl — slug regression =====
+# Claude Code converts EVERY non-alphanumeric cwd char to "-", not just "/"
+# (verified against real cages). A project dir containing "_" or "." used to
+# compute the wrong session_dir and silently miss every session there.
+
+# Independent oracle: python re.sub, not the wrapper's own tr, so the test
+# pins the rule itself rather than mirroring whatever the wrapper happens to do.
+oracle_slug() { python3 -c 'import re,sys; print(re.sub(r"[^A-Za-z0-9]", "-", sys.argv[1]))' "$1"; }
+
+locate_in_proj() {
+    local proj="$1" cfg="$2"; shift 2
+    ( cd "$proj" && CLAUDE_CONFIG_DIR="$cfg" _ccage_resume_locate_jsonl "$@" )
+}
+
+@test "locate_jsonl: cwd containing _ and . resolves via the real slug rule" {
+    local proj="$BATS_TEST_TMPDIR/my_repo.v2"
+    mkdir -p "$proj"
+    local cfg="$BATS_TEST_TMPDIR/cfg"
+    local slug; slug="$(oracle_slug "$proj")"
+    local sd="$cfg/projects/$slug"
+    mkdir -p "$sd"
+    : > "$sd/abcd1234-session.jsonl"
+    run locate_in_proj "$proj" "$cfg" abcd1234
+    [ "$status" -eq 0 ]
+    [ "$output" = "$sd/abcd1234-session.jsonl" ]
+}
+
+# zsh twin — pins the "${matches[@]}" fix (zsh arrays are 1-indexed, so
+# "${matches[0]}" silently prints nothing there).
+@test "locate_jsonl under zsh: single match prints the jsonl path" {
+    command -v zsh >/dev/null 2>&1 || skip "zsh not installed"
+    local proj="$BATS_TEST_TMPDIR/zsh_repo.v3"
+    mkdir -p "$proj"
+    local cfg="$BATS_TEST_TMPDIR/zcfg"
+    local slug; slug="$(oracle_slug "$proj")"
+    local sd="$cfg/projects/$slug"
+    mkdir -p "$sd"
+    : > "$sd/zid5678-session.jsonl"
+    local wrapper="$BATS_TEST_DIRNAME/../share/claude-isolation.sh"
+    run zsh -c "source '$wrapper'; cd '$proj'; CLAUDE_CONFIG_DIR='$cfg' _ccage_resume_locate_jsonl zid5678"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"zid5678-session.jsonl" ]]
+}
