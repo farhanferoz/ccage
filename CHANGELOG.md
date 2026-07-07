@@ -2,6 +2,21 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] — 2026-07-07
+
+### Added — `ccage doctor --unseed`
+- **A clean removal of ccage's session-docs hook entries from every cage** (`share/ccage-doctor.sh` + `bin/ccage` dispatch). `ccage doctor --unseed` sweeps every `.owning_path`-carrying cage and strips only ccage's two hook entries (`resume_autoload.sh` SessionStart, `resume_budget_check.sh` PostToolUse) from each cage's `settings.json`, leaving every other hook, key, and user edit untouched — the inverse of the backfill sweep. `--dry-run` previews. Wired into `uninstall.sh` so a full uninstall no longer leaves dead hook entries pointing at removed scripts. Pure shell + `python3`.
+
+### Fixed — project-slug rule matches Claude Code everywhere
+- **Claude Code derives a project's on-disk slug by converting _every_ non-alphanumeric character to `-`, not just `/`.** Handoff, resume-prompt locating, and `ccage-auto` were computing the slug by replacing only path separators, so any project path containing `_` or `.` resolved to the wrong `~/.claude/projects/<slug>` directory and silently failed to find its transcript/RESUME. The rule is now `printf '%s' "$p" | LC_ALL=C tr -c 'A-Za-z0-9' '-'` everywhere (`share/ccage-handoff.sh`, `share/claude-isolation.sh`, `share/hooks/resume_autoload.sh`, `bin/ccage-auto` uses the Python equivalent `re.sub(r"[^A-Za-z0-9]", "-", p)`). `tr -c` is used deliberately over a `${var//[^…]/}` bracket class, which macOS bash 3.2 mishandles. Tests pin the rule against an independent Python oracle.
+
+### Fixed — hooks and resume path robustness
+- **zsh resume-prompt locate bug** — the transcript-locating loop dereferenced `${matches[0]}` (empty in zsh's 1-based arrays), so resume-prompt injection silently produced nothing under zsh; fixed to the portable index.
+- **`resume_autoload.sh` no longer hard-depends on `timeout` or `jq`** — stock macOS ships neither. The stdin read falls back to a plain `cat` when `timeout` is absent, and the hook payload's `source` is extracted with `sed` instead of `jq`, so a silently-empty parse can no longer disable the marker-clear and compaction nudge.
+- **Completion marker cleared on `resume` too** — the SessionStart hook now clears `.ccage-session-done` on both `source=startup` and `source=resume`. A `claude -r` means the session is working again, closing the stale-marker-after-resume hole where a resumed session would keep a stale done-marker and stand keepwarm/ccage-auto down early.
+- **RESUME injection bounded at 2× the budget** — a runaway `RESUME.md` now degrades (truncates with a NOTE) instead of flooding every session start; the budget NOTE still fires long before the cut is reached.
+- **Atomic `.owning_path` claim** — the ownership file is written under `set -C` (noclobber) so two near-simultaneous launches can't race on the claim.
+
 ## [0.6.0] — 2026-07-05
 
 ### Added — `/checkpoint --final` completion marker
