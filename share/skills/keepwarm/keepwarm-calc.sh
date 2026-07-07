@@ -22,9 +22,10 @@ proj="${2:-$PWD}"
 proj="${proj%/}"   # a trailing slash would put a stray '-' in the slug
 
 config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-# Claude Code derives project slugs from CWD by replacing `/` with `-`
-# (KEEP IN SYNC — see prologue).
-slug="${proj//\//-}"
+# Claude Code derives project slugs from CWD by replacing EVERY non-alphanumeric
+# character with `-` ("/", "_", "." all convert — KEEP IN SYNC, see prologue).
+# tr, not a bracket class: macOS bash 3.2 mishandles ${var//[^…]/}.
+slug=$(printf '%s' "$proj" | LC_ALL=C tr -c 'A-Za-z0-9' '-')
 session_dir="$config_dir/projects/$slug"
 
 transcript="" ls_err=""

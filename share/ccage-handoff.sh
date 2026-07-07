@@ -44,11 +44,14 @@ _ccage_handoff_price_cache_read() {
 }
 
 # ---- pwd-to-slug ------------------------------------------------------------
-# Claude Code derives project slugs from CWD by replacing `/` with `-`.
-# Verified empirically across ~/.claude/projects/ directories.
+# Claude Code derives project slugs from CWD by replacing EVERY non-alphanumeric
+# character with `-` (not just `/`: "_" and "." convert too). Verified
+# empirically across real projects/ directories — a `_`-containing project kept
+# both the old `/`-only slug and the current fully-converted one on disk.
+# tr keeps this bash-3.2 safe (macOS mishandles a ${var//[^…]/} bracket class).
 _ccage_handoff_pwd_to_slug() {
     local p="${1:-$PWD}"
-    printf '%s\n' "${p//\//-}"
+    printf '%s\n' "$p" | LC_ALL=C tr -c 'A-Za-z0-9\n' '-'
 }
 
 # ---- locate session JSONL ---------------------------------------------------
