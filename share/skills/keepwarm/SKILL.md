@@ -119,15 +119,21 @@ output line.
    `test -e .ccage-session-done && echo done` in the project dir. If it prints
    `done`, a `/checkpoint --final` has declared the work finished (a signal that
    survives `/clear`), so stop: reply `keep-warm stopped — session marked done.`
-   and do **not** reschedule. (A genuinely new session clears this marker at
-   startup, so it can never be stale from a previous day.) This is the one
-   filesystem check the wake turn is allowed; skip it gracefully if Bash is
-   sandboxed away from the project dir.
+   and do **not** reschedule. (The SessionStart hook clears this marker on both
+   a fresh startup and a `claude -r` resume, so it can never be stale from a
+   previous day.) This is the one filesystem check the wake turn is allowed;
+   skip it gracefully if Bash is sandboxed away from the project dir.
 2. **User said stop?** If the conversation shows "stop" / "I'm back" / an
    equivalent since arming → reply `keep-warm stopped.` and do not reschedule.
 3. **User active since the previous wake?** (Reached only when §4b re-anchoring
    didn't happen.) Their turns already refreshed the cache, so this wake does
-   **not** count against the cap — a true reset: reply
+   **not** count against the cap — a true reset. **Exception:** an automated
+   resume nudge from ccage-auto (a turn that only restates RESUME/continuation
+   after a `/clear` — e.g. text like "context was cleared, resume from
+   RESUME.md") is NOT user activity; do not reset the counter for it, or an
+   overnight ccage-auto run would reset the cap every clear cycle and the
+   announced auto-stop time would never be honored. For a genuine user turn,
+   reply
    `keep-warm: you were active — counter reset; next ping at <HH:MM>.` and
    reschedule with `--ping 1 <max> <interval>` (the full `max` unattended pings
    are available again, exactly as announced).
@@ -147,6 +153,11 @@ output line.
   **opens a fresh 5-hour rate-limit window** — the user may return to a window
   that is already hours old. Mention this when arming for a long absence.
 - The schedule does not survive a session restart — if asked, say so.
+- `/clear` behavior is harness-dependent: the pending wake may or may not fire
+  after a `/clear` (e.g. one issued by ccage-auto). If it does fire, the
+  `--ping` args are self-contained so the loop continues correctly; if pings
+  stop arriving after a `/clear`, the loop is dead and must be re-armed —
+  never claim the cache is being kept warm without a wake actually landing.
 - A warm cache does **not** help `claude -r` / `--resume` (structural cache
   miss regardless of warmth). If the user plans to exit, point at `/checkpoint`
   or `ccage handoff` instead of arming this.
