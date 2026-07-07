@@ -151,8 +151,16 @@ _ccage_share_dirs() {
 _ccage_bootstrap_dir() {
     local dir="$1" pwd_arg="$2"
 
-    [ -d "$dir" ] || mkdir -p "$dir"
-    [ -f "$dir/.owning_path" ] || printf '%s\n' "$pwd_arg" > "$dir/.owning_path"
+    if ! mkdir -p "$dir" 2>/dev/null; then
+        printf 'ccage: cannot create config dir %s\n' "$dir" >&2
+        return 1
+    fi
+    # Atomic first-claim: noclobber write so two parallel fresh launches with
+    # the same basename can't both claim the dir (the -f test alone races).
+    # Loser falls through; the caller's owner check handles the mismatch.
+    if [ ! -f "$dir/.owning_path" ]; then
+        (set -C; printf '%s\n' "$pwd_arg" > "$dir/.owning_path") 2>/dev/null || true
+    fi
 
     [ -n "${CCAGE_NO_ONBOARDING_PATCH:-}" ] && return 0
     _ccage_patch_onboarding "$dir/.claude.json"
@@ -481,7 +489,12 @@ _ccage_resume_age_human() {
 # Echoes path; returns 1 on miss (no error — interceptor will pass through).
 _ccage_resume_locate_jsonl() {
     local id_prefix="${1:-}"
-    local slug="${PWD//\//-}"
+    # Claude Code's project slug: every non-alphanumeric character in the cwd
+    # becomes "-" (verified against real projects/ dirs: "_" and "." convert
+    # too, not just "/"). tr keeps this bash-3.2/zsh safe — a ${var//[^…]/}
+    # bracket class is mishandled by macOS bash 3.2.
+    local slug
+    slug=$(printf '%s' "$PWD" | LC_ALL=C tr -c 'A-Za-z0-9' '-')
     local session_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$slug"
     [ -d "$session_dir" ] || return 1
 
@@ -497,7 +510,9 @@ _ccage_resume_locate_jsonl() {
         done
         case ${#matches[@]} in
             0) return 1 ;;
-            1) printf '%s\n' "${matches[0]}"; return 0 ;;
+            # "${matches[@]}" not [0]: zsh arrays are 1-indexed, so [0] is
+            # empty there and the prompt would silently compute a $0 session.
+            1) printf '%s\n' "${matches[@]}"; return 0 ;;
             *)
                 # Ambiguous — warn and pass through; let claude do its own picking.
                 printf 'ccage: resume id "%s" matches %d sessions; passing through (claude will pick or prompt).\n' \

@@ -212,8 +212,12 @@ class Config:
 # ----------------------------------------------------------------------------
 
 def cwd_slug(path):
-    """Claude's project-dir slug: the absolute cwd with every '/' turned into '-'."""
-    return path.replace("/", "-")
+    """Claude's project-dir slug: every non-alphanumeric cwd char becomes '-'.
+
+    Not just '/' — '_' and '.' convert too (verified against real projects/
+    dirs). Getting this wrong means watching an empty dir and never firing.
+    """
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
 
 
 def slot_suffix():

@@ -28,10 +28,17 @@ orphan_max="${CCAGE_MEMORY_ORPHAN_MAX:-3}"
 base="${CLAUDE_PROJECT_DIR:-$PWD}"
 
 # SessionStart delivers its trigger source (startup|resume|clear|compact) as JSON
-# on stdin. Read it once — guarded by `timeout` so a missing or blocked stdin can
-# never hang session start — so the post-compaction nudge below can gate on it.
-hook_input="$(timeout 2 cat 2>/dev/null)"
-src="$(printf '%s' "$hook_input" | jq -r '.source // empty' 2>/dev/null)"
+# on stdin. Read it once — guarded by `timeout` when available so a blocked stdin
+# can never hang session start (Claude Code closes stdin after the JSON, so the
+# plain `cat` fallback returns on stock systems without `timeout`, e.g. macOS).
+# Source is extracted with sed, not jq — stock macOS ships neither timeout nor
+# jq, and a silently-empty $src would disable the marker clear and compact nudge.
+if command -v timeout >/dev/null 2>&1; then
+    hook_input="$(timeout 2 cat 2>/dev/null)"
+else
+    hook_input="$(cat 2>/dev/null)"
+fi
+src="$(printf '%s' "$hook_input" | sed -n 's/.*"source"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
 
 # ---- slot-aware RESUME filename (component G) ----
 # Mirror the wrapper's CCAGE_SLOT validation: an unsafe slot is ignored and we
@@ -47,15 +54,24 @@ resume="$base/RESUME${slot}.md"
 # ---- 0. clear a stale completion marker on a genuinely new session ----
 # `.ccage-session-done` (written by `/checkpoint --final`) tells /keepwarm and
 # ccage-auto the work is finished. It must survive `/clear` (source=clear) so an
-# autonomous run's final checkpoint still stands the helpers down — but a brand
-# new session (source=startup) is NOT done, so a marker left over from a previous
-# session would falsely quit its helpers. Clear it only on startup.
-if [ "$src" = "startup" ]; then
+# autonomous run's final checkpoint still stands the helpers down — but starting
+# fresh (source=startup) or resuming a session (source=resume, `claude -r`) means
+# the user is working again, so a marker left over from a previous day would
+# falsely quit its helpers. Clear it on both.
+if [ "$src" = "startup" ] || [ "$src" = "resume" ]; then
     rm -f "$base/.ccage-session-done" 2>/dev/null
 fi
 
 # ---- 1. inject RESUME into context ----
-[ -f "$resume" ] && cat "$resume"
+# Bounded: a runaway RESUME (the exact failure the budget NOTE below nags about)
+# must degrade instead of flooding every session start. 2× budget is generous —
+# the budget NOTE fires long before the cut is ever reached.
+if [ -f "$resume" ]; then
+    head -n $((budget * 2)) "$resume"
+    if [ "$(wc -l < "$resume" 2>/dev/null | tr -d '[:space:]')" -gt "$((budget * 2))" ] 2>/dev/null; then
+        printf '\nNOTE: RESUME truncated at %d lines for injection — run /checkpoint to trim it.\n' "$((budget * 2))"
+    fi
+fi
 
 # ---- 1b. post-compaction nudge ----
 # After auto-compaction (or a manual /compact) the conversation is summarized and
@@ -78,10 +94,11 @@ if [ -f "$resume" ]; then
 fi
 
 # Memory hygiene for THIS cage's memory dir (never another cage's).
-# Claude Code encodes the project dir by replacing BOTH "/" and "_" with "-".
-# Two single-char substitutions, NOT a single bracket character class — macOS
-# bash 3.2 mishandles such a class, so the tidy NOTE would silently never fire there.
-slug="${base//\//-}"; slug="${slug//_/-}"
+# Claude Code's project slug: EVERY non-alphanumeric character becomes "-"
+# (verified against real projects/ dirs: "/", "_" and "." all convert). tr, not
+# a ${var//[^…]/} bracket class — macOS bash 3.2 mishandles such a class, so
+# the tidy NOTE would silently never fire there.
+slug=$(printf '%s' "$base" | LC_ALL=C tr -c 'A-Za-z0-9' '-')
 memdir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$slug/memory"
 index="$memdir/MEMORY.md"
 if [ -f "$index" ]; then
