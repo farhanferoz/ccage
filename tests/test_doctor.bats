@@ -184,3 +184,60 @@ has_cmd() {
     CCAGE_HOOKS_DIR="/somewhere/else/hooks" "$CCAGE" doctor >/dev/null
     [ "$(jq '[.hooks.SessionStart[]?.hooks[]?.command] | length' "$cage/settings.json")" -eq 1 ]
 }
+
+# ---- --unseed: the inverse of the backfill (used by uninstall.sh) --------
+
+@test "doctor --unseed removes exactly ccage's two hook entries, preserves other keys" {
+    local cage; cage=$(mkcage proj15 "$BATS_TEST_TMPDIR/repo15")
+    "$CCAGE" doctor >/dev/null   # seed first
+    # A pre-existing statusLine key and a foreign SessionStart hook must survive.
+    python3 - "$cage/settings.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+with open(p) as f:
+    data = json.load(f)
+data["statusLine"] = {"type": "command", "command": "my-statusline"}
+data["hooks"].setdefault("SessionStart", []).append(
+    {"matcher": "startup", "hooks": [{"type": "command", "command": "echo foreign"}]}
+)
+with open(p, "w") as f:
+    json.dump(data, f, indent=2)
+PY
+    run "$CCAGE" doctor --unseed
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"unseeded hooks"* ]]
+    ! has_cmd "$cage/settings.json" SessionStart "$AUTOLOAD_CMD"
+    ! has_cmd "$cage/settings.json" PostToolUse  "$BUDGET_CMD"
+    has_cmd "$cage/settings.json" SessionStart "echo foreign"
+    [ "$(jq -r '.statusLine.command' "$cage/settings.json")" = "my-statusline" ]
+}
+
+@test "doctor --unseed --dry-run changes nothing on disk" {
+    local cage; cage=$(mkcage proj16 "$BATS_TEST_TMPDIR/repo16")
+    "$CCAGE" doctor >/dev/null   # seed first
+    local before; before=$(cat "$cage/settings.json")
+    run "$CCAGE" doctor --unseed --dry-run
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"would have the session-docs hooks block removed"* ]]
+    has_cmd "$cage/settings.json" SessionStart "$AUTOLOAD_CMD"
+    [ "$(cat "$cage/settings.json")" = "$before" ]
+}
+
+@test "doctor --unseed leaves an unparseable settings.json untouched and reports it unchanged" {
+    local cage; cage=$(mkcage proj17 "$BATS_TEST_TMPDIR/repo17")
+    printf '{not valid json' > "$cage/settings.json"
+    local before; before=$(cat "$cage/settings.json")
+    run "$CCAGE" doctor --unseed
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"0 cage(s) had the session-docs hooks block removed."* ]]
+    [ "$(cat "$cage/settings.json")" = "$before" ]
+}
+
+@test "doctor --unseed on a cage with no hooks block reports 0 changed" {
+    local cage; cage=$(mkcage proj18 "$BATS_TEST_TMPDIR/repo18")
+    printf '{"statusLine":{"type":"command","command":"x"}}\n' > "$cage/settings.json"
+    run "$CCAGE" doctor --unseed
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"0 cage(s) had the session-docs hooks block removed."* ]]
+    [ "$(jq -r '.statusLine.command' "$cage/settings.json")" = "x" ]
+}

@@ -212,3 +212,36 @@ setup() {
     ! grep -q 'ccage:session-docs:start' "$FAKE_HOME/dotfiles/CLAUDE.md"  # anchor stripped from target
     grep -qx '# real claude md' "$FAKE_HOME/dotfiles/CLAUDE.md"
 }
+
+# ---- unseed a per-cage settings.json on uninstall (F6) --------------------
+# uninstall.sh must remove ccage's two hook entries from every cage's
+# settings.json BEFORE deleting the hook scripts, or every session start in
+# every cage would exec a now-missing script forever after.
+@test "uninstall: removes the hook entries from a seeded cage's settings.json" {
+    command -v jq >/dev/null 2>&1 || skip "jq required"
+    command -v python3 >/dev/null 2>&1 || skip "python3 required"
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+
+    local cage="$FAKE_HOME/.claude-fakecage"
+    mkdir -p "$cage"
+    printf '%s\n' "$FAKE_HOME/somerepo" > "$cage/.owning_path"
+    local hooks_dir="$FAKE_HOME/.claude/hooks"
+    printf '%s\n' \
+        '{"statusLine":{"type":"command","command":"my-statusline"},' \
+        ' "hooks":{"SessionStart":[' \
+        "   {\"matcher\":\"startup\",\"hooks\":[{\"type\":\"command\",\"command\":\"bash $hooks_dir/resume_autoload.sh\"}]}," \
+        '   {"matcher":"startup","hooks":[{"type":"command","command":"echo foreign"}]}' \
+        ' ],"PostToolUse":[' \
+        "   {\"matcher\":\"Write|Edit\",\"hooks\":[{\"type\":\"command\",\"command\":\"bash $hooks_dir/resume_budget_check.sh\"}]}" \
+        ' ]}}' > "$cage/settings.json"
+
+    HOME="$FAKE_HOME" CCAGE_ROOT="$FAKE_HOME" CCAGE_PREFIX=.claude- \
+        "$REPO_ROOT/uninstall.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+
+    ! jq -e '[.hooks.SessionStart[]?.hooks[]?.command] | any(test("resume_autoload.sh"))' \
+        "$cage/settings.json" >/dev/null
+    ! jq -e '.hooks.PostToolUse' "$cage/settings.json" >/dev/null 2>&1
+    jq -e '[.hooks.SessionStart[]?.hooks[]?.command] | any(. == "echo foreign")' \
+        "$cage/settings.json" >/dev/null
+    [ "$(jq -r '.statusLine.command' "$cage/settings.json")" = "my-statusline" ]
+}
