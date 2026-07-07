@@ -675,13 +675,22 @@ claude() {
 
     local dir
     dir="$(_ccage_config_dir_for "$PWD")"
-    export CLAUDE_CONFIG_DIR="$dir"
+    # `local -x`, not `export`: dynamically scoped so the helpers below and the
+    # final `command claude` still see it in their environment, but it is unset
+    # when this function returns — so it never leaks into the interactive shell
+    # and cannot bleed into an unrelated tool run after a later `cd`. (Every
+    # `claude` invocation re-resolves it, so the wrapper never relies on it
+    # persisting.) Works identically under bash 3.2 and zsh (both dynamically
+    # scope `local` and honor the `-x` export flag).
+    local -x CLAUDE_CONFIG_DIR="$dir"
     _ccage_bootstrap_dir "$CLAUDE_CONFIG_DIR" "$PWD"
     _ccage_seed_session_docs_hooks "$CLAUDE_CONFIG_DIR"
     _ccage_write_signore "$PWD"
 
-    [ -z "${CCAGE_KEEP_ATTRIBUTION:-}" ] && export CLAUDE_CODE_ATTRIBUTION_HEADER=0
-    [ -z "${CCAGE_KEEP_AUTOUPDATER:-}" ] && export DISABLE_AUTOUPDATER=1
+    # local -x for the same reason as CLAUDE_CONFIG_DIR above: configure the caged
+    # claude process without leaking these into the interactive shell.
+    [ -z "${CCAGE_KEEP_ATTRIBUTION:-}" ] && local -x CLAUDE_CODE_ATTRIBUTION_HEADER=0
+    [ -z "${CCAGE_KEEP_AUTOUPDATER:-}" ] && local -x DISABLE_AUTOUPDATER=1
 
     # Resume cost prompt — passes through silently for non-resume args, gates,
     # and below-threshold cases. Returns non-zero only when user cancels or
