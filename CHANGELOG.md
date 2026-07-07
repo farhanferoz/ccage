@@ -2,6 +2,14 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.7.1] — 2026-07-07
+
+### Fixed — env vars no longer leak out of the `claude()` wrapper
+- **`CLAUDE_CONFIG_DIR` (and the `CLAUDE_CODE_ATTRIBUTION_HEADER` / `DISABLE_AUTOUPDATER` defaults) are now scoped to the invocation** (`share/claude-isolation.sh`). They were `export`ed into the interactive shell, so after `claude` returned they persisted — a stale `CLAUDE_CONFIG_DIR` from one project would bleed into an unrelated tool run after a later `cd`. They now use `local -x`: still dynamically visible to the wrapper's helper functions and exported to the caged `claude` process, but unset when the wrapper returns, and a pre-existing `CLAUDE_CONFIG_DIR` is restored rather than overwritten. Every invocation re-resolves the dir, so nothing relied on it persisting. Identical behavior under bash 3.2 and zsh. Tests: `tests/test_env_defaults.bats` rewritten to assert the child process receives the vars while the calling shell does not retain them.
+
+### Changed — `/checkpoint` skill description trimmed
+- Cut the `checkpoint` skill's frontmatter description from ~170 to ~110 words and removed the `"hand off"` trigger phrase, which collided with the `session-handoff` skill (distinct tools: checkpoint writes `RESUME.md`, session-handoff produces a chat-only brief).
+
 ## [0.7.0] — 2026-07-07
 
 ### Added — `ccage doctor --unseed`
