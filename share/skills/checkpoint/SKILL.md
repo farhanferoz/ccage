@@ -1,20 +1,16 @@
 ---
 name: checkpoint
 description: >-
-  Write a session checkpoint into RESUME.md (and roll older detail into
-  CHANGELOG.md) so state survives /clear — ccage's SessionStart hook auto-reads
-  RESUME.md back into the next context, so the loop becomes /checkpoint → /clear
-  → (state reloaded), with no copy and no paste. Also snapshots the in-session
-  task list and live jobs/monitors so they can be rebuilt/re-armed on resume. Use
-  before /clear, before a context boundary or compaction, when the user says
-  "checkpoint", "save
-  progress", "snapshot state", "update RESUME", or "hand off"; to bootstrap
-  RESUME.md + CHANGELOG.md in a repo that has none; with --final when the
-  session's work is genuinely finished (writes a .ccage-session-done marker so
-  /keepwarm self-stops and ccage-auto stands down); with --tidy to also
-  reorganize this cage's memory directory; or with --merge-slots to collapse
-  parallel per-slot RESUME.<slot>.md files back into the plain trunk so a later
-  slotless session sees the union.
+  Save session state into RESUME.md (rolling older detail into CHANGELOG.md) so
+  it survives /clear — ccage's SessionStart hook auto-reads RESUME.md back on the
+  next start, with no copy/paste. Also snapshots the task list and live
+  jobs/monitors so they can be re-armed on resume. Use before /clear or a
+  compaction, or when the user says "checkpoint", "save progress", "snapshot
+  state", or "update RESUME"; bootstraps RESUME.md + CHANGELOG.md in a repo that
+  has none. Flags: --final marks the session genuinely done (writes the
+  .ccage-session-done marker so /keepwarm and ccage-auto stand down); --tidy also
+  tidies this cage's memory dir; --merge-slots collapses parallel
+  RESUME.<slot>.md files into the plain trunk.
 effort: medium
 ---
 
