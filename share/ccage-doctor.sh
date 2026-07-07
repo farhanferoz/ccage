@@ -95,6 +95,77 @@ print("changed" if changed else "unchanged")
 PY
 }
 
+# ---------------------------------------------------------------------------
+# Hooks-block removal — the inverse of _ccage_doctor_seed, for uninstall.
+# Removes only OUR two hook entries (matched on script basename, mirroring the
+# seed dedup), preserves every other key and hook, prunes emptied lists, and
+# never clobbers a present-but-unparseable settings.json.
+# ---------------------------------------------------------------------------
+_ccage_doctor_unseed() {
+    local settings="$1" apply="$2"
+    python3 - "$settings" "$apply" <<'PY' 2>/dev/null
+import json, os, sys, tempfile
+settings_path, apply = sys.argv[1], sys.argv[2] == "1"
+targets = {"resume_autoload.sh", "resume_budget_check.sh"}
+if not os.path.exists(settings_path):
+    print("unchanged"); sys.exit(0)
+try:
+    mode = os.stat(settings_path).st_mode & 0o777
+except OSError:
+    mode = None
+try:
+    with open(settings_path) as f:
+        data = json.load(f)
+except (ValueError, OSError):
+    print("unchanged"); sys.exit(0)
+if not isinstance(data, dict) or not isinstance(data.get("hooks"), dict):
+    print("unchanged"); sys.exit(0)
+hooks = data["hooks"]
+def script_base(cmd):
+    return os.path.basename(cmd.split()[-1]) if cmd else ""
+changed = False
+for event in ("SessionStart", "PostToolUse"):
+    entries = hooks.get(event)
+    if not isinstance(entries, list):
+        continue
+    kept = []
+    for e in entries:
+        if isinstance(e, dict):
+            inner = e.get("hooks") or []
+            pruned = [h for h in inner
+                      if not (isinstance(h, dict)
+                              and script_base(h.get("command") or "") in targets)]
+            if len(pruned) != len(inner):
+                if not pruned:
+                    continue          # whole entry was ours — drop it
+                e = dict(e); e["hooks"] = pruned
+        kept.append(e)
+    if kept != entries:
+        changed = True
+        if kept:
+            hooks[event] = kept
+        else:
+            del hooks[event]
+if changed and not hooks:
+    del data["hooks"]
+if changed and apply:
+    d = os.path.dirname(settings_path) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".settings.", suffix=".ccage.tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, settings_path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+print("changed" if changed else "unchanged")
+PY
+}
+
 # Bloated RESUME?  lines > budget OR more than 3 "## Session" blocks.
 # KEEP IN SYNC with the health check in share/hooks/resume_autoload.sh.
 _ccage_doctor_resume_bloated() {
@@ -132,7 +203,7 @@ _ccage_doctor_memory_messy() {
 
 _ccage_doctor_help() {
     cat <<EOF
-Usage: ccage doctor [--dry-run]
+Usage: ccage doctor [--dry-run] [--unseed]
 
 Sweep every cage under \${CCAGE_ROOT:-\$HOME}/\${CCAGE_PREFIX:-.claude-}* and:
   1. backfill the session-docs hooks block into its settings.json (safe,
@@ -142,6 +213,9 @@ Sweep every cage under \${CCAGE_ROOT:-\$HOME}/\${CCAGE_PREFIX:-.claude-}* and:
 
 Options:
   --dry-run   Preview seeding + the worklist without writing anything.
+  --unseed    Inverse of the backfill: remove ccage's two hook entries from
+              every cage's settings.json (used by uninstall.sh so no cage is
+              left pointing at deleted hook scripts). Preserves all other keys.
   -h, --help  This message.
 
 Backfill targets only directories that carry a .owning_path marker (real cages).
@@ -150,10 +224,11 @@ EOF
 
 # ---- main ------------------------------------------------------------------
 _ccage_doctor_main() {
-    local dry_run=0
+    local dry_run=0 unseed=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --dry-run) dry_run=1; shift ;;
+            --unseed)  unseed=1;  shift ;;
             -h|--help) _ccage_doctor_help; return 0 ;;
             *) printf 'ccage doctor: unknown flag: %s\n' "$1" >&2; return 2 ;;
         esac
@@ -186,7 +261,19 @@ _ccage_doctor_main() {
         [ -f "$d/.owning_path" ] || continue   # only real cages
         scanned=$((scanned + 1))
 
-        # 1. backfill hooks block
+        # 1. backfill (or, with --unseed, remove) the hooks block
+        if [ "$unseed" = 1 ]; then
+            result=$(_ccage_doctor_unseed "$d/settings.json" "$apply")
+            if [ "$result" = changed ]; then
+                seeded=$((seeded + 1))
+                if [ "$dry_run" = 1 ]; then
+                    printf '+ would unseed hooks ← %s/settings.json\n' "$d"
+                else
+                    printf 'unseeded hooks ← %s/settings.json\n' "$d"
+                fi
+            fi
+            continue   # unseed mode: no worklist scan
+        fi
         result=$(_ccage_doctor_seed "$d/settings.json" "$hooks_dir" "$apply" "$want_autoload" "$want_budget")
         if [ "$result" = changed ]; then
             seeded=$((seeded + 1))
@@ -218,7 +305,7 @@ _ccage_doctor_main() {
             [ -d "$pm" ] || continue
             _ccage_doctor_memory_messy "$pm" || continue
             proj_slug="${pm%/memory}"; proj_slug="${proj_slug##*/projects/}"
-            if [ -n "$owner" ] && [ "$proj_slug" = "${owner//\//-}" ]; then
+            if [ -n "$owner" ] && [ "$proj_slug" = "$(printf '%s' "$owner" | LC_ALL=C tr -c 'A-Za-z0-9' '-')" ]; then
                 label="$owner"
             else
                 label="$pm"
@@ -228,6 +315,14 @@ _ccage_doctor_main() {
     done
 
     printf '\nccage doctor — scanned %d cage(s) under %s/%s*\n' "$scanned" "$root" "$prefix"
+    if [ "$unseed" = 1 ]; then
+        if [ "$dry_run" = 1 ]; then
+            printf '%d cage(s) would have the session-docs hooks block removed.\n' "$seeded"
+        else
+            printf '%d cage(s) had the session-docs hooks block removed.\n' "$seeded"
+        fi
+        return 0
+    fi
     if [ "$dry_run" = 1 ]; then
         printf '%d cage(s) would be seeded with the session-docs hooks block.\n' "$seeded"
     else
