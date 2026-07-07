@@ -2,8 +2,10 @@
 # Remove ccage. Leaves per-project config dirs, credentials, and any
 # user-written claude-overrides.sh alone — those are user data. Also removes the
 # Phase 7 session-docs assets (hooks, /checkpoint skill, CLAUDE.md anchor) and
-# the Phase 8 /keepwarm skill, but never touches a repo's RESUME.md /
-# CHANGELOG.md, nor per-cage seeded settings.
+# the Phase 8 /keepwarm skill, and unseeds ccage's two hook entries from every
+# cage's settings.json (all other keys survive) so no cage is left executing a
+# deleted hook script on session start. Never touches a repo's RESUME.md /
+# CHANGELOG.md.
 #
 # Usage:
 #   ./uninstall.sh                   # uninstall for the current shell
@@ -68,6 +70,24 @@ if [ -d "$prefix/share/ccage" ]; then
     elif rmdir "$prefix/share/ccage" 2>/dev/null; then
         printf 'removed empty %s/share/ccage\n' "$prefix"
     fi
+fi
+
+# Unseed the session-docs hook entries from every cage's settings.json BEFORE
+# deleting the hook scripts below — otherwise every session start in every cage
+# would execute a missing script (exit 127) forever after. Removes only ccage's
+# two entries (matched on script basename); all other settings keys survive.
+if command -v python3 >/dev/null 2>&1; then
+    # shellcheck source=share/ccage-doctor.sh
+    . "$(here)/share/ccage-doctor.sh"
+    if [ "$dry_run" = 1 ]; then
+        _ccage_doctor_main --unseed --dry-run
+    else
+        _ccage_doctor_main --unseed
+    fi
+else
+    printf 'warning: python3 not found — per-cage hook entries NOT removed.\n'
+    printf '         run "ccage doctor --unseed" before deleting the CLI, or remove the\n'
+    printf '         resume_autoload/resume_budget_check entries from each cage settings.json.\n'
 fi
 
 # Session-docs assets (Phase 7): hooks, /checkpoint skill, CLAUDE.md anchor.

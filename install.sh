@@ -42,8 +42,9 @@
 #   zsh:  ~/.zshrc.d/,  sourced from ~/.zshrc
 #   CLI:  <prefix>/bin/ccage, <prefix>/share/ccage/ (default prefix: ~/.local)
 #
-# Dependencies (the installer checks these and errors with a hint if missing):
-#   bash 4+ or zsh 5+, plus jq (for `ccage handoff`).
+# Dependencies: bash 3.2+ or zsh 5+ (the wrapper is written bash-3.2-safe for
+# stock macOS; not checked at install time), plus jq for `ccage handoff` and
+# the session-docs budget hook (checked — errors with a hint if missing).
 
 set -euo pipefail
 
