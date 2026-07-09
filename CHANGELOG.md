@@ -2,6 +2,18 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] — 2026-07-09
+
+### Added — `/checkpoint-threshold`: retune `ccage-auto` live, mid-session
+- **The soft/hard auto-checkpoint thresholds and a pause switch can now be changed while a session is running — no restart, no lost context.** A new `/checkpoint-threshold` skill (`share/skills/checkpoint-threshold/SKILL.md`) writes a small git-excluded control file (`.ccage-autock.conf`) in the project dir; the `ccage-auto` watcher re-reads it every poll (mtime-gated) and applies `soft`/`hard`/`paused` over the launch baseline, reverting cleanly when a key is dropped or the file removed. Usage: `/checkpoint-threshold 50` (soft), `/checkpoint-threshold 50 65` (both), `pause` / `resume`, `status`, `reset`. The skill shells out to the CLI so all validation lives in one place: `ccage-auto --set soft=50 [hard=65]`, `--pause`, `--resume`, `--reset` (each mutates the control file for `cwd` and exits without launching). `--status` now shows the launch thresholds, any control-file overrides, and the effective values.
+- **The override is per-run and per-directory.** It **survives `ccage-auto`'s own `/clear` cycles** (so a raised threshold sticks across checkpoint→clear→resume) but is cleared by the `SessionStart` hook on a genuinely new session (`startup`/`resume`), exactly like the `.ccage-session-done` marker — so it never silently carries into the next run. Validation reuses the launch-path clamp (`clamp_thresholds`): out-of-range values fall back to defaults and `soft ≥ hard` raises `hard`.
+
+### Changed — auto-checkpoint nudges are advisory, and the hard backstop has its own wording
+- **The soft nudge no longer orders the model to checkpoint immediately** (`bin/ccage-auto`). It now asks the model to use its judgment and **hold off if checkpointing now would lose in-flight work** — a running subagent, a mid-edit — since the model, not the watcher, knows whether the moment is safe. The **hard threshold** keeps its own, firmer message (distinct from the soft text, overridable via `CCAGE_AUTOCK_HARD_NUDGE`): auto-compact is near and would lose more than a checkpoint, so wrap up at the next safe point (wait for a running subagent, then checkpoint) — it remains the real deadline and still Escape-interrupts as a backstop. Net effect: fewer checkpoints at bad moments, with the same guarantee that the window can't silently fill.
+
+### Tests + wiring
+- `tests/test_autock.bats` grows from 22 to 30 cases: `--set`/`--pause`/`--resume`/`--reset` control-file writes, clamp-on-`--set`, git-exclusion, `--status` override display, a module-level unit test of `read_control_file`/`write_control_file`/`_refresh_control` (apply-over-baseline + revert-on-removal), and an end-to-end pty test that a `paused=1` control file suppresses nudges. Installed by `install.sh` (Phase 9, skip with `--no-checkpoint-threshold`) and removed by `uninstall.sh`, mirroring `/keepwarm`.
+
 ## [0.7.1] — 2026-07-07
 
 ### Fixed — env vars no longer leak out of the `claude()` wrapper

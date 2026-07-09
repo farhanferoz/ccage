@@ -160,6 +160,28 @@ memdir() {
     [ -e "$REPO/.ccage-session-done" ]
 }
 
+@test "autock control file: cleared on startup/resume, survives clear/compact" {
+    # The /checkpoint-threshold override is transient per-run: it must NOT carry
+    # into a genuinely new session, but MUST survive ccage-auto's own /clear.
+    : > "$REPO/.ccage-autock.conf"
+    run run_hook_src startup
+    [ "$status" -eq 0 ]
+    [ ! -e "$REPO/.ccage-autock.conf" ]
+
+    : > "$REPO/.ccage-autock.conf"
+    run run_hook_src resume
+    [ "$status" -eq 0 ]
+    [ ! -e "$REPO/.ccage-autock.conf" ]
+
+    : > "$REPO/.ccage-autock.conf"
+    run run_hook_src clear
+    [ "$status" -eq 0 ]
+    [ -e "$REPO/.ccage-autock.conf" ]
+    run run_hook_src compact
+    [ "$status" -eq 0 ]
+    [ -e "$REPO/.ccage-autock.conf" ]
+}
+
 # ===== bounded injection =====
 
 @test "huge RESUME: injection truncated at 2x budget with a NOTE" {

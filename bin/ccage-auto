@@ -29,6 +29,12 @@
 #   ccage-auto [auto-flags] [-- ] [claude args...]
 #   ccage-auto --status            # print resolved paths + current occupancy, exit
 #
+# Control-plane subcommands (mutate the live control file for cwd, then exit — the
+# /checkpoint-threshold skill uses these to retune a *running* watcher):
+#   ccage-auto --set soft=50 [hard=65]   # change thresholds mid-session
+#   ccage-auto --pause / --resume        # suspend / re-enable auto-checkpointing
+#   ccage-auto --reset                   # drop overrides, revert to launch values
+#
 # Auto-flags (consumed from the front; everything else is passed to claude):
 #   --autock / --no-autock         force the watcher on/off (default: on)
 #   --soft N                       soft threshold, percent       (default: 35)
@@ -46,6 +52,7 @@
 #   CCAGE_AUTOCK_INIT_PROMPT (type this + Enter at startup to auto-begin the task),
 #   CCAGE_AUTOCK_INIT_DELAY (seconds to wait before the init prompt; default 6),
 #   CCAGE_AUTOCK_NUDGE (override the soft-nudge text; {pct}/{sentinel} substituted),
+#   CCAGE_AUTOCK_HARD_NUDGE (override the hard-backstop nudge text; same substitutions),
 #   CCAGE_AUTOCK_NUDGE_TIMEOUT (s before re-nudge if unconfirmed; default 600),
 #   CCAGE_AUTOCK_COOLDOWN (s to ignore thresholds after a reset; default 30).
 #   CCAGE_SLOT is honoured for RESUME naming.
@@ -135,6 +142,8 @@ class Config:
         self.init_delay = _num(os.environ.get("CCAGE_AUTOCK_INIT_DELAY"), 6.0)
         # Override the soft-nudge text; {pct} and {sentinel} are substituted.
         self.nudge = os.environ.get("CCAGE_AUTOCK_NUDGE")
+        # Override the hard-backstop nudge text (same substitutions).
+        self.hard_nudge = os.environ.get("CCAGE_AUTOCK_HARD_NUDGE")
         self.status_only = False
         self.claude_args = self._parse(args)
 
@@ -192,19 +201,28 @@ class Config:
 
     def validate(self):
         """Clamp nonsensical thresholds; return human-readable warnings."""
-        warns = []
-        if not (0 < self.soft < 100):
-            warns.append("soft=%.0f out of range (0,100); using 35" % self.soft)
-            self.soft = 35.0
-        if not (0 < self.hard <= 100):
-            warns.append("hard=%.0f out of range (0,100]; using 55" % self.hard)
-            self.hard = 55.0
-        if self.soft >= self.hard:
-            new_hard = min(100.0, self.soft + 10)   # cap at 100, never <= soft
-            warns.append("soft (%.0f%%) >= hard (%.0f%%); raising hard to %.0f%%"
-                         % (self.soft, self.hard, new_hard))
-            self.hard = new_hard
+        self.soft, self.hard, warns = clamp_thresholds(self.soft, self.hard)
         return warns
+
+
+def clamp_thresholds(soft, hard):
+    """Clamp a (soft, hard) threshold pair to sane values; return
+    (soft, hard, warnings). Shared by Config.validate (launch flags/env), the
+    `--set` control command, and the watcher's live control-file re-read so the
+    exact same rules — ranges plus soft < hard — apply everywhere."""
+    warns = []
+    if not (0 < soft < 100):
+        warns.append("soft=%.0f out of range (0,100); using 35" % soft)
+        soft = 35.0
+    if not (0 < hard <= 100):
+        warns.append("hard=%.0f out of range (0,100]; using 55" % hard)
+        hard = 55.0
+    if soft >= hard:
+        new_hard = min(100.0, soft + 10)   # cap at 100, never <= soft
+        warns.append("soft (%.0f%%) >= hard (%.0f%%); raising hard to %.0f%%"
+                     % (soft, hard, new_hard))
+        hard = new_hard
+    return soft, hard, warns
 
 
 # ----------------------------------------------------------------------------
@@ -403,6 +421,107 @@ def session_done_mtime(cwd):
         return 0.0
 
 
+# The live control file, written by the /checkpoint-threshold skill (or by
+# `ccage-auto --set/--pause/--resume/--reset`). A running watcher re-reads it
+# every poll, so the soft/hard thresholds and a pause switch can be changed
+# mid-session with no restart. Deliberately in cwd (where the session's own Bash
+# runs and where the watcher already looks for the done-marker) and NOT
+# slot-scoped: it's a coarse per-directory override for this one run. The
+# SessionStart hook clears it on a genuinely new session (startup/resume) so a
+# stale override never carries over — but it survives ccage-auto's own /clear
+# (source=clear), which is the whole point.
+AUTOCK_CONF = ".ccage-autock.conf"
+
+
+def control_path(cwd):
+    return os.path.join(cwd, AUTOCK_CONF)
+
+
+def read_control_file(cwd):
+    """Parse the control file into {'soft': float, 'hard': float, 'paused': bool}.
+
+    Only keys actually present are returned; blank/`#`/malformed lines and
+    unparseable values are ignored, so a half-written file (the watcher may read
+    it mid-write) degrades to 'no override' rather than crashing the thread."""
+    out = {}
+    try:
+        with open(control_path(cwd)) as f:
+            raw = f.read()
+    except OSError:
+        return out
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip().lower()
+        val = val.strip()
+        if key in ("soft", "hard"):
+            try:
+                out[key] = float(val)
+            except ValueError:
+                pass
+        elif key == "paused":
+            out[key] = val.lower() not in ("0", "false", "no", "off", "")
+    return out
+
+
+def _git_exclude(cwd, name):
+    """Best-effort: add `name` to this repo's .git/info/exclude (like the
+    done-marker and RESUME), so the control file never shows up as untracked.
+    A no-op outside a git repo or if anything fails."""
+    try:
+        gd = subprocess.run(["git", "rev-parse", "--git-dir"], cwd=cwd,
+                            capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        return
+    if not gd:
+        return
+    if not os.path.isabs(gd):
+        gd = os.path.join(cwd, gd)
+    ex = os.path.join(gd, "info", "exclude")
+    try:
+        os.makedirs(os.path.dirname(ex), exist_ok=True)
+        existing = ""
+        if os.path.isfile(ex):
+            with open(ex) as f:
+                existing = f.read()
+        if name not in existing.split():
+            with open(ex, "a") as f:
+                f.write(name + "\n")
+    except OSError:
+        pass
+
+
+def write_control_file(cwd, updates):
+    """Merge `updates` into the control file and rewrite it. A key whose value is
+    None is removed. Returns the resulting dict. Idempotently git-excludes the
+    file. Note: this does NOT clamp — callers (`--set`) validate first so the
+    user sees any warning; the watcher re-clamps on read as a backstop."""
+    cur = read_control_file(cwd)
+    for k, v in updates.items():
+        if v is None:
+            cur.pop(k, None)
+        else:
+            cur[k] = v
+    lines = [
+        "# ccage-auto live control file — written by /checkpoint-threshold.",
+        "# A running watcher re-reads this each poll; it is cleared at the next",
+        "# session start. For a permanent change use --soft/--hard or",
+        "# CCAGE_AUTOCK_SOFT/CCAGE_AUTOCK_HARD at launch.",
+    ]
+    if "soft" in cur:
+        lines.append("soft=%g" % float(cur["soft"]))
+    if "hard" in cur:
+        lines.append("hard=%g" % float(cur["hard"]))
+    if "paused" in cur:
+        lines.append("paused=%d" % (1 if cur["paused"] else 0))
+    with open(control_path(cwd), "w") as f:
+        f.write("\n".join(lines) + "\n")
+    _git_exclude(cwd, AUTOCK_CONF)
+    return cur
+
+
 # ----------------------------------------------------------------------------
 # The watcher (runs in a thread; injects by writing to the pty master fd)
 # ----------------------------------------------------------------------------
@@ -422,6 +541,13 @@ class Watcher:
         self.log = logf
         self.state = self.NORMAL
         self.stop = False
+        # Launch-time thresholds, kept so the live control file can be *removed*
+        # (or a key dropped) and we revert to exactly what the run started with —
+        # not to the built-in defaults.
+        self.base_soft = cfg.soft
+        self.base_hard = cfg.hard
+        self.paused = False        # set by a `paused=1` control file
+        self.conf_mtime = -1.0     # last-seen mtime of the control file
         # A `.ccage-session-done` marker newer than this counts as "this run's
         # work is finished." Anchoring on start time means a stale marker from a
         # previous run (which the SessionStart hook also clears at startup) can
@@ -477,24 +603,79 @@ class Watcher:
         if self.cfg.nudge:
             msg = self.cfg.nudge.replace("{pct}", "%.0f" % pct).replace("{sentinel}", self.cfg.sentinel)
         else:
+            # Advisory, not an order: the model weighs the cost. It may hold off if
+            # checkpointing now would lose in-flight work (a running subagent, a
+            # mid-edit) — the hard threshold below is the real deadline.
             msg = (
-                "[auto-checkpoint] Context is at %.0f%% of the window. At your next "
-                "clean breakpoint (do NOT interrupt an in-progress edit), invoke the "
-                "checkpoint skill to update RESUME.md, then print the single token %s "
-                "on its own line and stop — do not start new work. This session will "
-                "be cleared and resumed from RESUME.md automatically." % (pct, self.cfg.sentinel)
+                "[auto-checkpoint] Context is at %.0f%% of the window — a good moment "
+                "to checkpoint soon, but use your judgment; prioritise not losing "
+                "work. If a subagent is still running, or you are mid-task where "
+                "clearing now would drop in-flight results, finish that first. When "
+                "you reach a clean breakpoint (never interrupt an in-progress edit or "
+                "a running subagent), invoke the checkpoint skill to update "
+                "RESUME.md, then print the single token %s on its own line and stop; "
+                "this session is then cleared and resumed from RESUME.md "
+                "automatically. If now is a bad moment, hold off — you will be "
+                "reminded, and a hard backstop fires before the window fills." % (pct, self.cfg.sentinel)
             )
         self._type(msg)
 
-    def _arm_nudge(self, path, pct):
+    def _hard_nudge(self, pct):
+        if self.cfg.hard_nudge:
+            msg = self.cfg.hard_nudge.replace("{pct}", "%.0f" % pct).replace("{sentinel}", self.cfg.sentinel)
+        else:
+            # The backstop: past here, auto-compact is near and would lose more
+            # than a checkpoint. Still respect a running subagent (wait for it),
+            # but do not defer beyond that.
+            msg = (
+                "[auto-checkpoint] Context is at %.0f%% — the hard backstop. "
+                "Auto-compact is close and would lose more than a checkpoint does, "
+                "so wrap up at the very next safe point: if a subagent is running, "
+                "wait for it to return, then immediately invoke the checkpoint skill "
+                "to update RESUME.md, print %s on its own line, and stop. Do not "
+                "start new work." % (pct, self.cfg.sentinel)
+            )
+        self._type(msg)
+
+    def _arm_nudge(self, path, pct, hard=False):
         """Stamp the nudge time + the transcript file/offset, then type the soft
-        nudge. We pin the *file* current at nudge time (not just the offset): the
-        model echoes the sentinel into it before we /clear rotates to a new file,
-        so scanning that pinned file keeps confirmation correct across rotation."""
+        (advisory) or hard (backstop) nudge. We pin the *file* current at nudge
+        time (not just the offset): the model echoes the sentinel into it before
+        we /clear rotates to a new file, so scanning that pinned file keeps
+        confirmation correct across rotation."""
         self.nudge_at = time.time()
         self.nudge_path = path
         self.nudge_offset = os.path.getsize(path)
-        self._soft_nudge(pct)
+        if hard:
+            self._hard_nudge(pct)
+        else:
+            self._soft_nudge(pct)
+
+    def _refresh_control(self):
+        """Re-read the live control file (mtime-gated) and apply soft/hard/paused
+        over the launch baseline. An absent file or a dropped key reverts to the
+        launch value. Clamped with the same rules as the launch flags."""
+        try:
+            mt = os.path.getmtime(control_path(self.cwd))
+        except OSError:
+            mt = 0.0
+        if mt == self.conf_mtime:
+            return
+        self.conf_mtime = mt
+        ov = read_control_file(self.cwd) if mt else {}
+        soft, hard, _ = clamp_thresholds(ov.get("soft", self.base_soft),
+                                         ov.get("hard", self.base_hard))
+        paused = bool(ov.get("paused", False))
+        if (soft != self.cfg.soft or hard != self.cfg.hard or paused != self.paused):
+            self._log("control update: soft=%.0f%% hard=%.0f%% paused=%s"
+                      % (soft, hard, paused))
+        self.cfg.soft = soft
+        self.cfg.hard = hard
+        if paused != self.paused:
+            self.paused = paused
+            if not paused:
+                # Un-pausing: re-arm from a clean slate so occupancy re-triggers.
+                self.state = self.NORMAL
 
     def _do_clear(self):
         self._interrupt()                # dismiss any menu / ensure clean line
@@ -564,6 +745,13 @@ class Watcher:
                           "no more nudges/clears" % SESSION_DONE_MARKER)
                 self.stop = True
                 break
+            # Live thresholds / pause (mid-session /checkpoint-threshold). Read
+            # every poll but re-parsed only when the file's mtime changes.
+            self._refresh_control()
+            if self.paused:
+                # Suspended: no nudges/clears. We keep polling so a `resume`
+                # (and the done-marker) are still seen promptly.
+                continue
             path = active_jsonl(self.sdir)
             if not path:
                 continue
@@ -627,7 +815,7 @@ class Watcher:
                     if cfg.hard_interrupt:
                         self._interrupt()
                     self.hard_fired = True
-                    self._arm_nudge(path, pct)
+                    self._arm_nudge(path, pct, hard=True)
                 elif (time.time() - self.nudge_at) > cfg.nudge_timeout:
                     if self.renudges < MAX_RENUDGE:
                         self.renudges += 1
@@ -637,7 +825,7 @@ class Watcher:
                         self._log("re-nudge exhausted — interrupting + nudging")
                         if cfg.hard_interrupt:
                             self._interrupt()
-                        self._arm_nudge(path, pct)
+                        self._arm_nudge(path, pct, hard=True)
                         self.renudges = 0
 
 
@@ -757,6 +945,83 @@ def run_proxy(cfg, cwd, sdir, logpath):
 # main
 # ----------------------------------------------------------------------------
 
+def control_command(argv):
+    """Handle the control-plane subcommands (--set/--pause/--resume/--reset) that
+    the /checkpoint-threshold skill uses to talk to a running watcher: write the
+    live control file for cwd and exit. Separate from launch so it never spawns a
+    session. Returns a process exit code."""
+    cwd = os.getcwd()
+    action = argv[0]
+
+    if action == "--reset":
+        try:
+            os.remove(control_path(cwd))
+            print("ccage-auto: control file cleared — reverting to launch thresholds")
+        except OSError:
+            print("ccage-auto: no control file to reset (already at launch thresholds)")
+        return 0
+
+    if action == "--pause":
+        write_control_file(cwd, {"paused": True})
+        print("ccage-auto: auto-checkpoint PAUSED (say resume to re-enable)")
+        return 0
+
+    if action == "--resume":
+        write_control_file(cwd, {"paused": False})
+        print("ccage-auto: auto-checkpoint resumed")
+        return 0
+
+    # --set: one or more key=value tokens (space- or comma-separated).
+    updates = {}
+    for tok in argv[1:]:
+        for pair in tok.split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            if "=" not in pair:
+                sys.stderr.write("[ccage-auto] ignored '%s' (want key=value)\n" % pair)
+                continue
+            k, _, v = pair.partition("=")
+            k = k.strip().lower()
+            v = v.strip()
+            if k not in ("soft", "hard", "paused"):
+                sys.stderr.write("[ccage-auto] ignored unknown key '%s'\n" % k)
+                continue
+            if k == "paused":
+                updates[k] = v.lower() not in ("0", "false", "no", "off", "")
+                continue
+            try:
+                updates[k] = float(v)
+            except ValueError:
+                sys.stderr.write("[ccage-auto] ignored %s=%s (not a number)\n" % (k, v))
+    if not updates:
+        sys.stderr.write("[ccage-auto] --set: nothing to set (usage: --set soft=50 [hard=65])\n")
+        return 2
+    # Validate against the *merged* view so a lone `soft` is checked against the
+    # existing/launch `hard` too, and the user sees any clamp message now.
+    merged = dict(read_control_file(cwd))
+    merged.update(updates)
+    if "soft" in merged and "hard" in merged:
+        s, h, warns = clamp_thresholds(merged["soft"], merged["hard"])
+        for w in warns:
+            sys.stderr.write("[ccage-auto] %s\n" % w)
+        if "soft" in updates:
+            updates["soft"] = s
+        if "hard" in updates:
+            updates["hard"] = h
+    result = write_control_file(cwd, updates)
+    parts = []
+    if "soft" in result:
+        parts.append("soft=%g%%" % result["soft"])
+    if "hard" in result:
+        parts.append("hard=%g%%" % result["hard"])
+    if result.get("paused"):
+        parts.append("PAUSED")
+    print("ccage-auto: control file updated — %s" % (", ".join(parts) or "(empty)"))
+    print("            takes effect within one poll if a watcher is running here.")
+    return 0
+
+
 def print_status(cfg, cwd, config_dir, sdir):
     path = active_jsonl(sdir)
     print("ccage-auto status")
@@ -764,7 +1029,24 @@ def print_status(cfg, cwd, config_dir, sdir):
     print("  config dir   :", config_dir)
     print("  session dir  :", sdir, "(exists)" if os.path.isdir(sdir) else "(missing)")
     print("  enabled      :", cfg.enabled)
-    print("  soft / hard  : %.0f%% / %.0f%%" % (cfg.soft, cfg.hard))
+    print("  soft / hard  : %.0f%% / %.0f%% (launch)" % (cfg.soft, cfg.hard))
+    ov = read_control_file(cwd)
+    if ov:
+        eff_soft, eff_hard, _ = clamp_thresholds(ov.get("soft", cfg.soft),
+                                                 ov.get("hard", cfg.hard))
+        parts = []
+        if "soft" in ov:
+            parts.append("soft=%g%%" % ov["soft"])
+        if "hard" in ov:
+            parts.append("hard=%g%%" % ov["hard"])
+        if "paused" in ov:
+            parts.append("paused=%s" % ov["paused"])
+        print("  control file :", control_path(cwd))
+        print("  overrides    :", ", ".join(parts))
+        print("  effective    : %.0f%% / %.0f%%%s"
+              % (eff_soft, eff_hard, "  (PAUSED)" if ov.get("paused") else ""))
+    else:
+        print("  control file : none (using launch thresholds)")
     if not path:
         print("  transcript   : none found")
         return
@@ -780,7 +1062,13 @@ def print_status(cfg, cwd, config_dir, sdir):
 
 
 def main():
-    cfg = Config(sys.argv[1:])
+    argv = sys.argv[1:]
+    # Control-plane subcommands (used by /checkpoint-threshold): mutate the live
+    # control file for cwd and exit without launching a session.
+    if argv and argv[0] in ("--set", "--pause", "--resume", "--reset"):
+        return control_command(argv)
+
+    cfg = Config(argv)
     for w in cfg.validate():
         sys.stderr.write("[ccage-auto] %s\n" % w)
     cwd = os.getcwd()

@@ -21,6 +21,10 @@
 #   <share-from>/skills/keepwarm/           — /keepwarm skill (Phase 8; skip
 #                                             with --no-keepwarm; per-session,
 #                                             user-invoked, inert otherwise)
+#   <share-from>/skills/checkpoint-threshold/ — /checkpoint-threshold skill
+#                                             (Phase 9; skip with
+#                                             --no-checkpoint-threshold; retunes
+#                                             ccage-auto live, inert otherwise)
 #
 # An example overrides file lives in the repo at share/claude-overrides.sh.example.
 # Copy it to <rcd>/claude-overrides.sh if you want user-specific behavior
@@ -34,6 +38,7 @@
 #   ./install.sh --no-cli              # skip bin/ccage + handoff/doctor library
 #   ./install.sh --no-session-docs     # skip hooks + /checkpoint skill + anchor
 #   ./install.sh --no-keepwarm         # skip the /keepwarm skill
+#   ./install.sh --no-checkpoint-threshold # skip the /checkpoint-threshold skill
 #   ./install.sh --prefix DIR          # CLI/lib prefix (default: ~/.local)
 #   ./install.sh --dry-run             # print what would be done, do nothing
 #
@@ -59,6 +64,7 @@ install_ccusage=1
 install_cli=1
 install_session_docs=1
 install_keepwarm=1
+install_checkpoint_threshold=1
 prefix="$HOME/.local"
 
 while [ $# -gt 0 ]; do
@@ -69,6 +75,7 @@ while [ $# -gt 0 ]; do
         --no-cli)           install_cli=0; shift ;;
         --no-session-docs)  install_session_docs=0; shift ;;
         --no-keepwarm)      install_keepwarm=0; shift ;;
+        --no-checkpoint-threshold) install_checkpoint_threshold=0; shift ;;
         --prefix)           prefix="$2"; shift 2 ;;
         -h|--help)          awk '/^#/{print; next} {exit}' "$0" | sed '1d'; exit 0 ;;
         *) printf 'unknown flag: %s\n' "$1" >&2; exit 2 ;;
@@ -172,6 +179,15 @@ if [ "$install_keepwarm" = 1 ]; then
     share_from="${CCAGE_SHARE_FROM:-$HOME/.claude}"
     install_file "$REPO_ROOT/share/skills/keepwarm/SKILL.md"         "$share_from/skills/keepwarm/SKILL.md"
     install_file "$REPO_ROOT/share/skills/keepwarm/keepwarm-calc.sh" "$share_from/skills/keepwarm/keepwarm-calc.sh" 0755
+fi
+
+# ---- Phase 9: /checkpoint-threshold skill ------------------------------------
+# Live retune of ccage-auto's soft/hard thresholds + pause, mid-session. A
+# SKILL.md-only skill (it shells out to the `ccage-auto` CLI for all logic);
+# reaches cages via the existing skills symlink. Inert until invoked.
+if [ "$install_checkpoint_threshold" = 1 ]; then
+    share_from="${CCAGE_SHARE_FROM:-$HOME/.claude}"
+    install_file "$REPO_ROOT/share/skills/checkpoint-threshold/SKILL.md" "$share_from/skills/checkpoint-threshold/SKILL.md"
 fi
 
 if [ -f "$rc" ] && grep -qF 'Added by ccage installer' "$rc" 2>/dev/null; then

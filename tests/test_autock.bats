@@ -201,7 +201,7 @@ append_turn(tokens0)
 cap = open(os.environ["FAKE_CAPTURE"], "ab", buffering=0)
 buf = b""
 confirmed = False
-deadline = time.time() + 30
+deadline = time.time() + float(os.environ.get("FAKE_DEADLINE", "30"))
 while time.time() < deadline:
     r, _, _ = select.select([0], [], [], 0.5)
     if 0 in r:
@@ -319,6 +319,110 @@ PY
     grep -q "standing down" "$CAGE/ccage-autock.log"
     ! cap_has "b'/clear'"                           # stood down before clearing
     ! cap_has "b'Resume the task from RESUME.md'"   # ...and before resuming
+}
+
+# --- Live control file (/checkpoint-threshold) --------------------------------
+
+conf() { ( cd "$REPO" && "$AUTO" "$@" ); }
+
+@test "--set soft writes the control file and --status shows it" {
+    write_transcript 100000
+    run conf --set soft=50
+    [ "$status" -eq 0 ]
+    [ -f "$REPO/.ccage-autock.conf" ]
+    grep -q '^soft=50$' "$REPO/.ccage-autock.conf"
+    run status
+    [[ "$output" == *"overrides    : soft=50%"* ]]
+    [[ "$output" == *"effective    : 50% / 55%"* ]]
+}
+
+@test "--set soft+hard writes both thresholds" {
+    run conf --set soft=45 hard=62
+    [ "$status" -eq 0 ]
+    grep -q '^soft=45$' "$REPO/.ccage-autock.conf"
+    grep -q '^hard=62$' "$REPO/.ccage-autock.conf"
+}
+
+@test "--set clamps a soft >= hard pair when both are given" {
+    run bash -c "cd '$REPO' && '$AUTO' --set soft=80 hard=40 2>&1"
+    [[ "$output" == *"soft (80%) >= hard (40%); raising hard to 90%"* ]]
+    grep -q '^soft=80$' "$REPO/.ccage-autock.conf"
+    grep -q '^hard=90$' "$REPO/.ccage-autock.conf"
+}
+
+@test "--pause then --resume toggles the paused flag" {
+    run conf --pause
+    [ "$status" -eq 0 ]
+    grep -q '^paused=1$' "$REPO/.ccage-autock.conf"
+    run conf --resume
+    [ "$status" -eq 0 ]
+    grep -q '^paused=0$' "$REPO/.ccage-autock.conf"
+}
+
+@test "--reset removes the control file" {
+    conf --set soft=50
+    [ -f "$REPO/.ccage-autock.conf" ]
+    run conf --reset
+    [ "$status" -eq 0 ]
+    [ ! -f "$REPO/.ccage-autock.conf" ]
+}
+
+@test "--set is git-excluded (never shows as untracked)" {
+    ( cd "$REPO" && git init -q )
+    conf --set soft=50
+    run bash -c "cd '$REPO' && git check-ignore .ccage-autock.conf"
+    [ "$status" -eq 0 ]
+}
+
+@test "control file: read/write/refresh apply over the launch baseline (unit)" {
+    run python3 - "$AUTO" "$REPO" "$SDIR" <<'PY'
+import importlib.util, importlib.machinery, os, sys, threading
+loader = importlib.machinery.SourceFileLoader("ccageauto", sys.argv[1])
+spec = importlib.util.spec_from_loader("ccageauto", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+cwd, sdir = sys.argv[2], sys.argv[3]
+
+# malformed lines and unknown keys are ignored; good values parse.
+open(m.control_path(cwd), "w").write("soft=50\n# c\ngarbage\nhard=oops\npaused=1\n")
+ov = m.read_control_file(cwd)
+assert ov == {"soft": 50.0, "paused": True}, ov
+os.remove(m.control_path(cwd))   # start the apply section from a clean slate
+
+# a watcher applies the file over its launch baseline, then reverts on removal.
+cfg = m.Config(["--soft", "35", "--hard", "55"]); cfg.validate()
+r, w = os.pipe()
+wat = m.Watcher(cfg, w, threading.Lock(), cwd, sdir, open(os.devnull, "w"))
+m.write_control_file(cwd, {"soft": 50.0, "hard": 66.0})
+wat.conf_mtime = -1; wat._refresh_control()
+assert (wat.cfg.soft, wat.cfg.hard, wat.paused) == (50.0, 66.0, False), \
+    (wat.cfg.soft, wat.cfg.hard, wat.paused)
+m.write_control_file(cwd, {"paused": True})
+wat.conf_mtime = -1; wat._refresh_control()
+assert wat.paused is True and wat.cfg.soft == 50.0
+os.remove(m.control_path(cwd))
+wat.conf_mtime = -1; wat._refresh_control()
+assert (wat.cfg.soft, wat.cfg.hard, wat.paused) == (35.0, 55.0, False), \
+    "removal must revert to launch baseline"
+print("UNIT_OK")
+PY
+    [ "$status" -eq 0 ]
+    [[ "$output" == *UNIT_OK* ]]
+}
+
+@test "a paused control file suppresses nudges over the pty" {
+    printf 'paused=1\n' > "$REPO/.ccage-autock.conf"
+    STUB="$BATS_TEST_TMPDIR/fakeclaude.py"
+    CAP="$BATS_TEST_TMPDIR/capture.bin"
+    make_fake_claude "$STUB"
+    : > "$CAP"
+    run bash -c "cd '$REPO' && \
+        CCAGE_AUTOCK_NO_BYPASS_ACCEPT=1 \
+        CCAGE_AUTOCK_EXEC='python3 \"$STUB\"' \
+        FAKE_SDIR='$SDIR' FAKE_CAPTURE='$CAP' FAKE_MODE=hard FAKE_DEADLINE=4 \
+        '$AUTO' --soft 10 --hard 20 --poll 1 </dev/null"
+    [ "$status" -eq 0 ]
+    ! cap_has "b'auto-checkpoint'"                 # paused -> nothing typed
+    grep -q "paused=True" "$CAGE/ccage-autock.log"
 }
 
 @test "CCAGE_AUTOCK_INIT_PROMPT kicks off the task unattended" {
