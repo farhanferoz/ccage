@@ -350,16 +350,21 @@ def session_dir(config_dir, cwd):
     return os.path.join(config_dir, "projects", cwd_slug(cwd))
 
 
-def active_jsonl(sdir):
+def active_jsonl(sdir, since=None):
     """Newest transcript in the session dir (handles /clear rotating the file).
-    Stats each candidate defensively: a file can be rotated/deleted between the
-    glob and the stat, and an unguarded getmtime there would crash the watcher
-    thread."""
+    With `since`, only files modified at or after that time qualify — the
+    watcher passes its start time so a *previous* session's transcript (newest
+    by mtime until this session writes its own) can never supply a bogus
+    occupancy reading at startup. Stats each candidate defensively: a file can
+    be rotated/deleted between the glob and the stat, and an unguarded
+    getmtime there would crash the watcher thread."""
     best, best_mtime = None, -1.0
     for f in glob.glob(os.path.join(sdir, "*.jsonl")):
         try:
             m = os.path.getmtime(f)
         except OSError:
+            continue
+        if since is not None and m < since:
             continue
         if m > best_mtime:
             best, best_mtime = f, m
@@ -805,7 +810,7 @@ class Watcher:
                 # Suspended: no nudges/clears. We keep polling so a `resume`
                 # (and the done-marker) are still seen promptly.
                 continue
-            path = active_jsonl(self.sdir)
+            path = active_jsonl(self.sdir, self.start_time)
             if not path:
                 continue
 
@@ -853,7 +858,14 @@ class Watcher:
                 continue
 
             if self.state == self.NUDGED:
-                if self._confirmed():
+                if pct < cfg.soft:
+                    # Occupancy fell below soft (manual /clear, a stale arm, a
+                    # threshold raise): the nudge is moot. Never re-nudge or
+                    # escalate below the live threshold — stand down instead.
+                    self._log("occupancy %.1f%% < soft %.0f%% — cancelling "
+                              "nudge cycle; back to NORMAL" % (pct, cfg.soft))
+                    self.state = self.NORMAL
+                elif self._confirmed():
                     self._log("checkpoint confirmed at %.1f%% — clearing" % pct)
                     self._do_clear()
                     self.cooldown_until = time.time() + cfg.cooldown

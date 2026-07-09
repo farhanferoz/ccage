@@ -161,6 +161,39 @@ status() { ( cd "$REPO" && "$AUTO" --status ); }
     [[ "$output" == *"1.0% of window"* ]]
 }
 
+@test "active_jsonl: since filters out a transcript that predates session start (unit)" {
+    run python3 - "$AUTO" "$SDIR" <<'PY'
+import importlib.util, importlib.machinery, os, sys
+loader = importlib.machinery.SourceFileLoader("ccageauto", sys.argv[1])
+spec = importlib.util.spec_from_loader("ccageauto", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+sdir = sys.argv[2]
+
+stale = os.path.join(sdir, "stale.jsonl")
+open(stale, "w").write("old\n")
+os.utime(stale, (100, 100))
+
+# Without `since` the stale file (the only one) is still "newest" and wins —
+# the pre-fix behavior, kept for the --status caller that has no session
+# start time to filter against.
+assert m.active_jsonl(sdir) == stale
+
+# A previous session's leftover transcript must never look like the current
+# session's, even though it is the newest file on disk until this session
+# writes its own.
+assert m.active_jsonl(sdir, since=200) is None, "stale transcript must be excluded"
+
+fresh = os.path.join(sdir, "fresh.jsonl")
+open(fresh, "w").write("new\n")
+os.utime(fresh, (300, 300))
+assert m.active_jsonl(sdir, since=200) == fresh
+assert m.active_jsonl(sdir) == fresh   # still picks the newest by mtime overall
+print("UNIT_OK")
+PY
+    [ "$status" -eq 0 ]
+    [[ "$output" == *UNIT_OK* ]]
+}
+
 # --- End-to-end driving tests ----------------------------------------------
 #
 # These two exercise the watcher's DRIVE path (not just measurement) through the
@@ -243,6 +276,27 @@ while time.time() < deadline:
                 f.write("done\n")
             confirmed = True
             deadline = time.time() + 3
+    elif mode == "manual_clear":
+        # Play a user-driven /clear (not the watcher's own): a fresh,
+        # low-occupancy transcript appears under a new name, never through the
+        # watcher's checkpoint/clear flow. Never emit the sentinel or touch
+        # RESUME.md, so the only way the watcher can react correctly is to
+        # notice pct fell below soft and cancel back to NORMAL on its own.
+        if not confirmed and len(buf) > 20:
+            tokens = 20000   # well under a 10% soft line on the 1M default window
+            half = tokens // 2
+            obj = {"type": "assistant", "message": {
+                "model": "claude-opus-4-8",
+                "usage": {"input_tokens": half, "cache_read_input_tokens": half,
+                          "cache_creation_input_tokens": 0},
+                "content": [{"type": "text", "text": "fresh"}]}}
+            with open(os.path.join(sdir, "sess2.jsonl"), "w") as f:
+                f.write(json.dumps(obj) + "\n")
+            confirmed = True
+        logpath = os.path.join(os.path.dirname(os.path.dirname(sdir)), "ccage-autock.log")
+        if confirmed and os.path.exists(logpath) and "cancelling nudge cycle" in open(logpath).read():
+            time.sleep(0.3)
+            break
 sys.exit(0)
 PY
 }
@@ -270,6 +324,19 @@ drive() {
     cap_has "b'\x1b'"                              # ESC was injected
     cap_has "b'auto-checkpoint'"                   # nudged first
     grep -q "HARD threshold" "$CAGE/ccage-autock.log"
+}
+
+@test "NUDGED state cancels rather than re-nudges when occupancy drops below soft mid-cycle" {
+    # A manual /clear rotates the transcript to a fresh, low-occupancy file
+    # while the watcher is mid-nudge (soft crossed, not yet confirmed). It must
+    # stand down to NORMAL instead of re-nudging or hard-escalating off the
+    # stale high pct.
+    drive manual_clear "--soft 10 --hard 90 --poll 1"
+    [ "$status" -eq 0 ]
+    cap_has "b'auto-checkpoint'"                          # nudged once, at the old high pct
+    grep -q "cancelling nudge cycle; back to NORMAL" "$CAGE/ccage-autock.log"
+    ! cap_has "b'/clear'"                                 # never auto-cleared
+    ! grep -q "HARD threshold" "$CAGE/ccage-autock.log"   # never hard-escalated
 }
 
 @test "self-triggers off own occupancy: checkpoint -> /clear -> resume" {
