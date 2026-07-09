@@ -2,6 +2,15 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.9.1] — 2026-07-09
+
+### Fixed — `ccage-auto` watcher: two occupancy-tracking races
+- **A previous session's leftover transcript could no longer be mistaken for the current one at startup.** `active_jsonl` (`bin/ccage-auto`) picks the newest `*.jsonl` in the session dir by mtime; right after launch, before the new session has written its own transcript, an old file from a prior run was still "newest" and could hand the watcher a bogus opening occupancy reading. `active_jsonl` now takes a `since` cutoff — the watcher passes its own start time — so only a transcript modified at or after that moment ever qualifies. The `--status` call site (no session in progress, nothing to filter against) keeps the old unfiltered behavior via the default `since=None`.
+- **The NUDGED state now stands down cleanly if occupancy drops below soft mid-cycle**, instead of only ever re-nudging, hard-escalating, or waiting on confirmation. This covers a manual `/clear` while a nudge is pending, and the live `/checkpoint-threshold` override raising `soft` above the current reading — both leave the watcher nudged against a threshold the current occupancy no longer meets. It now checks that case first and cancels back to NORMAL, logging why, so a stale nudge can never trigger a re-nudge or hard interrupt off a reading that's no longer accurate.
+
+### Tests
+- `tests/test_autock.bats` grows by 2: a unit test pinning `active_jsonl`'s `since` filter (stale file excluded, fresh file picked, unfiltered call unchanged), and a pty-driven test that simulates a manual `/clear` mid-nudge and asserts the watcher cancels rather than re-nudging or hard-escalating.
+
 ## [0.9.0] — 2026-07-09
 
 ### Changed — `ccage-auto` autonomous come-up is faster
