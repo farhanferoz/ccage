@@ -465,3 +465,18 @@ PY
     [[ "$output" == *"mycustom"* ]]
     [[ "$output" != *"--no-chrome"* ]]
 }
+
+@test "status: ready marker default is ❯ with 20s ceiling" {
+    run bash -c "cd '$REPO' && '$AUTO' --status"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ready marker"* ]]
+    [[ "$output" == *"❯"* ]]
+    [[ "$output" == *"20"* ]]
+}
+
+@test "status: CCAGE_AUTOCK_READY_MARKER and CCAGE_AUTOCK_INIT_DELAY override" {
+    run bash -c "cd '$REPO' && CCAGE_AUTOCK_READY_MARKER='>>' CCAGE_AUTOCK_INIT_DELAY=9 '$AUTO' --status"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *">>"* ]]
+    [[ "$output" == *"9"* ]]
+}
