@@ -2,6 +2,12 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.8.1] — 2026-07-09
+
+### Fixed — `ccage-auto --status` / `/checkpoint-threshold` latency
+- **`--status` dropped from ~2.3s to ~0.7s.** `resolve_config_dir` was always spawning a full interactive shell (`$SHELL -ic`, sourcing the entire `.bashrc` incl. conda init) to locate the cage config dir. It now takes a fast path first: when `CLAUDE_CONFIG_DIR` is already exported (which it always is for a nested call from inside a caged session — the common case for the `/checkpoint-threshold` skill), that value is authoritative and is used directly, skipping the shell spawn. The interactive/library/replica fallbacks are unchanged and still apply when it's unset (e.g. the watcher resolving the dir at its own startup, before it launches claude). `tests/test_autock.bats` now unsets `CLAUDE_CONFIG_DIR` in setup so the `CCAGE_ROOT`-derived assertions still hold when the suite runs inside a real cage.
+- **`/checkpoint-threshold` no longer double-calls.** The skill relied on a second `ccage-auto --status` to confirm every mutation; it now reports from the `--set`/`--pause` echo (already printed, ~0.3s) and only runs `--status` for a bare `status` query.
+
 ## [0.8.0] — 2026-07-09
 
 ### Added — `/checkpoint-threshold`: retune `ccage-auto` live, mid-session

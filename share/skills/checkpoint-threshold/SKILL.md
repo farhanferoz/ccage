@@ -58,19 +58,28 @@ ccage-auto --set soft=50
   values snap back to defaults; `soft ≥ hard` raises `hard`). Relay any clamp
   message it prints — don't hide it.
 
-## 3. Confirm with status
+## 3. Confirm — cheaply
 
-Always finish by running:
+**After a mutation** (`--set` / `--pause` / `--resume` / `--reset`): the command
+already prints the resulting thresholds on stdout — **that echo is your
+confirmation. Do NOT also run `--status`.** Just relay what it printed, e.g.:
+
+> Auto-checkpoint now nudges at **50%** (backstop 55%).
+
+**Only for a bare `status` request** (or if the user asks how full they are) run:
 
 ```bash
 ccage-auto --status
 ```
 
-Report back in one or two lines: the **effective** soft/hard (and `PAUSED` if
-so), plus the current **occupancy** so the user sees their headroom. Example:
+and report the **effective** soft/hard (and `PAUSED` if so) plus the current
+**occupancy**, e.g.:
 
-> Auto-checkpoint now nudges at **50%** (backstop 55%). Currently at 22% — plenty
-> of room.
+> Nudge at **50%**, backstop 55%. Currently at 22% — plenty of room.
+
+(Why: `--set` is ~0.3 s but `--status` reads the transcript and resolves the
+cage dir, so it's slower — skip it when the mutation already told you the
+answer.)
 
 ## Honesty notes (say these when they apply, not every time)
 
