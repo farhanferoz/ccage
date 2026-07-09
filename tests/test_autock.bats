@@ -446,3 +446,37 @@ PY
     cap_has "b'KICKOFF_MARKER'"                    # task prompt was typed in
     ! grep -q "soft threshold hit" "$CAGE/ccage-autock.log" 2>/dev/null
 }
+
+@test "status: launch command includes --no-chrome by default" {
+    run bash -c "cd '$REPO' && '$AUTO' --status"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--no-chrome"* ]]
+}
+
+@test "status: CCAGE_AUTOCK_CHROME=1 keeps chrome (no --no-chrome)" {
+    run bash -c "cd '$REPO' && CCAGE_AUTOCK_CHROME=1 '$AUTO' --status"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"--no-chrome"* ]]
+}
+
+@test "status: CCAGE_AUTOCK_EXEC overrides launch verbatim (no injection)" {
+    run bash -c "cd '$REPO' && CCAGE_AUTOCK_EXEC='mycustom \"\$@\"' '$AUTO' --status"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"mycustom"* ]]
+    [[ "$output" != *"--no-chrome"* ]]
+}
+
+@test "status: ready marker default is ❯ with 20s ceiling" {
+    run bash -c "cd '$REPO' && '$AUTO' --status"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ready marker"* ]]
+    [[ "$output" == *"❯"* ]]
+    [[ "$output" == *"20"* ]]
+}
+
+@test "status: CCAGE_AUTOCK_READY_MARKER and CCAGE_AUTOCK_INIT_DELAY override" {
+    run bash -c "cd '$REPO' && CCAGE_AUTOCK_READY_MARKER='>>' CCAGE_AUTOCK_INIT_DELAY=9 '$AUTO' --status"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *">>"* ]]
+    [[ "$output" == *"9"* ]]
+}

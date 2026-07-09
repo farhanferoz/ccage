@@ -2,6 +2,16 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] — 2026-07-09
+
+### Changed — `ccage-auto` autonomous come-up is faster
+- **Skips the Claude-in-Chrome handshake by default.** The watched launch path (`bin/ccage-auto`) now adds `--no-chrome` unless `CCAGE_AUTOCK_CHROME=1` opts back in — an autonomous session never drives a browser, and the connect attempt cost startup time for nothing. The disabled pass-through (`--no-autock`) is untouched: it still behaves exactly like launching `claude`.
+- **The kickoff no longer blind-sleeps.** `CCAGE_AUTOCK_INIT_PROMPT` used to wait a flat `CCAGE_AUTOCK_INIT_DELAY` (default 6s) before typing the task in — too short on a slow start, wasted time on a fast one. The watcher now scans the pty output for the TUI's ready-marker (`❯`, overridable via `CCAGE_AUTOCK_READY_MARKER`) and fires the moment it's seen (measured 5-7s after launch), falling back to `CCAGE_AUTOCK_INIT_DELAY` — now a ceiling, default raised to 20s — only if the marker never appears. The bypass-permissions auto-accept screen also renders `❯` as its selection caret, so a readiness reading taken from that screen is invalidated and re-earned from the real TUI frame after acceptance.
+
+### Added — RESUME byte budget
+- **A byte budget (`CCAGE_RESUME_BUDGET_BYTES`, default 14000) now sits alongside the existing line (250) and `## Session`-block (3) budgets**, in both the `SessionStart` auto-read hook (`share/hooks/resume_autoload.sh`) and the `PostToolUse` budget guard (`share/hooks/resume_budget_check.sh`) — a dense RESUME (long lines, little whitespace) can bloat well under the line cap and previously went unflagged. The guard's reminder now reports current bytes/blocks against both budgets in one fixed message.
+- **The `/checkpoint` skill documents density-pruning rules** for when the byte budget (not just block count) trips: roll a shipped `### Threads` bullet to CHANGELOG as dated prose, collapse a `### Decisions` bullet already captured in a memory note to its `[[memory-slug]]` pointer, and never prune the only record of something still open. Applied identically to `--merge-slots`' trunk-budget enforcement.
+
 ## [0.8.1] — 2026-07-09
 
 ### Fixed — `ccage-auto --status` / `/checkpoint-threshold` latency

@@ -19,11 +19,13 @@
 # Env (inherited from the claude process; all optional):
 #   CCAGE_SLOT                slot suffix; validated, unsafe value → plain file
 #   CCAGE_RESUME_BUDGET_LINES RESUME line budget before nagging (default 250)
+#   CCAGE_RESUME_BUDGET_BYTES RESUME byte budget before nagging (default 14000)
 #   CCAGE_MEMORY_ORPHAN_MAX   max un-indexed memory files before nagging (def 3)
 #   CLAUDE_PROJECT_DIR        project root (falls back to $PWD)
 #   CLAUDE_CONFIG_DIR         cage dir, for locating this cage's memory/
 
 budget="${CCAGE_RESUME_BUDGET_LINES:-250}"
+budget_bytes="${CCAGE_RESUME_BUDGET_BYTES:-14000}"
 orphan_max="${CCAGE_MEMORY_ORPHAN_MAX:-3}"
 base="${CLAUDE_PROJECT_DIR:-$PWD}"
 
@@ -86,14 +88,17 @@ if [ "$src" = "compact" ]; then
 fi
 
 # ---- 2. health notes (one line each, only when something is wrong) ----
-# RESUME budget: too many lines OR more than 3 "## Session" blocks.
+# RESUME budget: too many lines, more than 3 "## Session" blocks, or too many
+# bytes (a dense file — long lines — can bloat well under the line cap).
 if [ -f "$resume" ]; then
     lines=$(wc -l < "$resume" 2>/dev/null | tr -d '[:space:]')
     blocks=$(grep -c '^## Session' "$resume" 2>/dev/null)
+    bytes=$(wc -c < "$resume" 2>/dev/null | tr -d '[:space:]')
     [ -n "$lines" ] || lines=0
     [ -n "$blocks" ] || blocks=0
-    if { [ "$lines" -gt "$budget" ] || [ "$blocks" -gt 3 ]; } 2>/dev/null; then
-        printf 'NOTE: RESUME is over budget — run /checkpoint to trim.\n'
+    [ -n "$bytes" ] || bytes=0
+    if { [ "$lines" -gt "$budget" ] || [ "$blocks" -gt 3 ] || [ "$bytes" -gt "$budget_bytes" ]; } 2>/dev/null; then
+        printf 'NOTE: RESUME is over budget — run /checkpoint to trim (roll shipped Threads/Decisions to CHANGELOG).\n'
     fi
 fi
 

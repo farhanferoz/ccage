@@ -26,10 +26,13 @@ esac
 # Read via stdin redirection so a file_path beginning with '-' can't be parsed
 # as a grep option (Claude Code supplies absolute paths, but be defensive).
 n="$(grep -c '^## Session' < "$fp" 2>/dev/null)"
+bytes="$(wc -c < "$fp" 2>/dev/null | tr -d '[:space:]')"
 [ -n "$n" ] || n=0
+[ -n "$bytes" ] || bytes=0
+budget_bytes="${CCAGE_RESUME_BUDGET_BYTES:-14000}"
 
-if [ "$n" -gt "$MAX" ] 2>/dev/null; then
-  msg="RESUME has $n session blocks (budget ${MAX}). Archive all but the latest 2-3 into CHANGELOG and trim — keep RESUME lean."
+if { [ "$n" -gt "$MAX" ] || [ "$bytes" -gt "$budget_bytes" ]; } 2>/dev/null; then
+  msg="RESUME is ${bytes} bytes / $n session blocks (budgets: ${budget_bytes} bytes, ${MAX} blocks). Roll shipped ### Threads and memory-duplicated ### Decisions into CHANGELOG — keep RESUME lean."
   jq -cn --arg m "$msg" \
     '{systemMessage:$m, hookSpecificOutput:{hookEventName:"PostToolUse", additionalContext:$m}}'
 fi

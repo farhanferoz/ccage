@@ -49,8 +49,12 @@
 #   CCAGE_AUTOCK_SENTINEL, CCAGE_AUTOCK_HARD_INTERRUPT (1/0),
 #   CCAGE_AUTOCK_NO_BYPASS_ACCEPT (1 = don't auto-accept the DSP bypass screen),
 #   CCAGE_AUTOCK_EXEC (override the launched command; default `claude "$@"`),
+#   CCAGE_AUTOCK_CHROME (1 = keep the Claude-in-Chrome handshake; default off,
+#     i.e. launch adds --no-chrome — an autonomous session never drives a browser),
 #   CCAGE_AUTOCK_INIT_PROMPT (type this + Enter at startup to auto-begin the task),
-#   CCAGE_AUTOCK_INIT_DELAY (seconds to wait before the init prompt; default 6),
+#   CCAGE_AUTOCK_INIT_DELAY (fallback ceiling, seconds, if the TUI ready-marker
+#     never appears — normally the init prompt fires as soon as it does; default 20),
+#   CCAGE_AUTOCK_READY_MARKER (string marking the TUI as rendered; default ❯),
 #   CCAGE_AUTOCK_NUDGE (override the soft-nudge text; {pct}/{sentinel} substituted),
 #   CCAGE_AUTOCK_HARD_NUDGE (override the hard-backstop nudge text; same substitutions),
 #   CCAGE_AUTOCK_NUDGE_TIMEOUT (s before re-nudge if unconfirmed; default 600),
@@ -79,6 +83,7 @@ import struct
 import subprocess
 import sys
 import termios
+import threading
 import time
 import tty
 
@@ -123,6 +128,17 @@ def _num(v, default):
         return default
 
 
+def launch_command(cfg):
+    """The shell command run_proxy hands to the interactive shell.
+    CCAGE_AUTOCK_EXEC wins verbatim (a custom launcher owns its own flags);
+    otherwise `claude`, with --no-chrome unless CCAGE_AUTOCK_CHROME opts back in.
+    The disabled pass-through does NOT use this — it stays a transparent `claude`."""
+    exec_override = os.environ.get("CCAGE_AUTOCK_EXEC")
+    if exec_override:
+        return exec_override
+    return 'claude "$@"' if cfg.chrome else 'claude --no-chrome "$@"'
+
+
 class Config:
     def __init__(self, args):
         self.enabled = _truthy(os.environ.get("CCAGE_AUTOCK"), True)
@@ -139,11 +155,23 @@ class Config:
         # unattended session actually begins its task (a prompt passed as a CLI
         # arg only pre-fills the TUI input box; nobody is there to press Enter).
         self.init_prompt = os.environ.get("CCAGE_AUTOCK_INIT_PROMPT")
-        self.init_delay = _num(os.environ.get("CCAGE_AUTOCK_INIT_DELAY"), 6.0)
+        # init_delay is now a FALLBACK CEILING: the kickoff normally fires as
+        # soon as the TUI ready-marker is seen (measured 5–7s); only if the
+        # marker never appears by the ceiling do we type blind (old behavior).
+        self.init_delay = _num(os.environ.get("CCAGE_AUTOCK_INIT_DELAY"), 20.0)
+        # First occurrence of this string in the ANSI-stripped pty output marks
+        # the TUI input box as rendered. ❯ is the input prompt char; menus also
+        # use it as a selection caret, so the bypass-accept path invalidates it.
+        self.ready_marker = (os.environ.get("CCAGE_AUTOCK_READY_MARKER") or "❯").encode("utf-8")
         # Override the soft-nudge text; {pct} and {sentinel} are substituted.
         self.nudge = os.environ.get("CCAGE_AUTOCK_NUDGE")
         # Override the hard-backstop nudge text (same substitutions).
         self.hard_nudge = os.environ.get("CCAGE_AUTOCK_HARD_NUDGE")
+        # Skip the Claude-in-Chrome startup handshake by default: an autonomous
+        # session never drives a browser, and the connect attempt costs startup
+        # time. CCAGE_AUTOCK_CHROME=1 keeps chrome (also the escape hatch for a
+        # CLI too old to know --no-chrome, which would otherwise exit at launch).
+        self.chrome = _truthy(os.environ.get("CCAGE_AUTOCK_CHROME"), False)
         self.status_only = False
         self.claude_args = self._parse(args)
 
@@ -566,6 +594,7 @@ class Watcher:
         # previous run (which the SessionStart hook also clears at startup) can
         # never trip an immediate stand-down before any work has happened.
         self.start_time = time.time()
+        self.tui_ready = threading.Event()
         self.nudge_at = 0.0
         self.nudge_offset = 0     # transcript byte offset at nudge time
         self.nudge_path = None    # transcript file current at nudge time
@@ -741,10 +770,21 @@ class Watcher:
         # any bypass-permissions accept). Without this an unattended session idles
         # at an empty prompt and never produces work to manage.
         if cfg.init_prompt and not self.stop:
-            time.sleep(cfg.init_delay)
+            deadline = time.time() + cfg.init_delay
+            while not self.stop:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    self._log("ready-marker not seen after %.0fs — typing init prompt anyway"
+                              % cfg.init_delay)
+                    break
+                if self.tui_ready.wait(timeout=min(remaining, 0.5)):
+                    time.sleep(1.0)          # settle: let the frame finish painting
+                    if self.tui_ready.is_set():   # not invalidated by bypass-accept
+                        self._log("TUI ready after %.1fs — sending init prompt"
+                                  % (cfg.init_delay - remaining + 1.0))
+                        break
             if not self.stop:
                 self._type(cfg.init_prompt)
-                self._log("sent init prompt after %.0fs" % cfg.init_delay)
         while not self.stop:
             time.sleep(cfg.poll)
             # Stand down the moment the session is marked done (/checkpoint
@@ -858,7 +898,7 @@ def run_proxy(cfg, cwd, sdir, logpath):
     shell = os.environ.get("SHELL", "/bin/bash")
     # CCAGE_AUTOCK_EXEC overrides the command launched inside the pty (default the
     # cage's `claude` shell function). For custom launchers and for testing.
-    launch = os.environ.get("CCAGE_AUTOCK_EXEC") or 'claude "$@"'
+    launch = launch_command(cfg)
     child_argv = [shell, "-ic", launch, shell] + cfg.claude_args
 
     pid, master_fd = pty.fork()
@@ -877,11 +917,10 @@ def run_proxy(cfg, cwd, sdir, logpath):
         old_attr = None
         raw = False
 
-    write_lock = __import__("threading").Lock()
+    write_lock = threading.Lock()
     logf = open(logpath, "a", buffering=1)
     watcher = Watcher(cfg, master_fd, write_lock, cwd, sdir, logf)
     if cfg.enabled:
-        import threading
         t = threading.Thread(target=watcher.run, daemon=True)
         t.start()
 
@@ -914,20 +953,37 @@ def run_proxy(cfg, cwd, sdir, logpath):
                 if not data:
                     break
                 os.write(1, data)
-                if not bypass_done and time.time() - started < 60:
+                # Scan only while something still needs detecting: the bypass
+                # screen (60s window) or TUI readiness (until found or the
+                # kickoff ceiling + slack lapses) — never for the whole session.
+                elapsed = time.time() - started
+                scan_window = elapsed < 60
+                ready_window = elapsed < max(60.0, cfg.init_delay + 5.0)
+                if (not watcher.tui_ready.is_set() and ready_window) or (not bypass_done and scan_window):
                     out_buf = ANSI.sub(b"", out_buf + data)[-4096:]
                     # Match the screen's distinctive title AND its accept-option
                     # label, not the bare words "Bypass"/"accept" — those occur in
                     # ordinary repo content (changelogs, licences) and a loose
                     # match could fire a spurious Down+Enter into the live TUI.
-                    if b"Bypass Permissions" in out_buf and b"Yes, I accept" in out_buf:
+                    if not bypass_done and scan_window and \
+                       b"Bypass Permissions" in out_buf and b"Yes, I accept" in out_buf:
                         with write_lock:
                             os.write(master_fd, b"\x1b[B")   # down -> "Yes, I accept"
                             time.sleep(0.3)
                             os.write(master_fd, b"\r")        # confirm
                         bypass_done = True
+                        # The bypass menu renders ❯ as its selection caret — any
+                        # readiness inferred from that screen is false. Reset;
+                        # the real TUI frame after acceptance re-sets it.
+                        out_buf = b""
+                        watcher.tui_ready.clear()
                         logf.write("%s  auto-accepted bypass-permissions prompt\n"
                                    % time.strftime("%H:%M:%S"))
+                        logf.flush()
+                    elif not watcher.tui_ready.is_set() and cfg.ready_marker in out_buf:
+                        watcher.tui_ready.set()
+                        logf.write("%s  TUI ready-marker seen (%.1fs after launch)\n"
+                                   % (time.strftime("%H:%M:%S"), time.time() - started))
                         logf.flush()
             if stdin_ok and 0 in rfds:
                 try:
@@ -1042,6 +1098,8 @@ def print_status(cfg, cwd, config_dir, sdir):
     print("  config dir   :", config_dir)
     print("  session dir  :", sdir, "(exists)" if os.path.isdir(sdir) else "(missing)")
     print("  enabled      :", cfg.enabled)
+    print("  launch       :", launch_command(cfg))
+    print("  ready marker :", "%s (ceiling %.0fs)" % (cfg.ready_marker.decode("utf-8"), cfg.init_delay))
     print("  soft / hard  : %.0f%% / %.0f%% (launch)" % (cfg.soft, cfg.hard))
     ov = read_control_file(cwd)
     if ov:

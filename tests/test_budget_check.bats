@@ -88,3 +88,22 @@ blocks() {  # write $1 "## Session" blocks to file $2
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
+
+# ===== byte budget (dense content can bloat under the block cap) =====
+
+@test "dense RESUME under block budget but over byte budget emits a reminder" {
+    local r="$BATS_TEST_TMPDIR/RESUME.md"
+    local line; line=$(printf 'x%.0s' $(seq 1 500))
+    yes "$line" | head -n 40 > "$r"
+    run emit "$r"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *systemMessage* ]]
+    [[ "$output" == *"14000 bytes"* ]]
+}
+
+@test "lean RESUME (few blocks, small bytes) stays silent" {
+    local r="$BATS_TEST_TMPDIR/RESUME.md"; blocks 1 "$r"
+    run emit "$r"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}

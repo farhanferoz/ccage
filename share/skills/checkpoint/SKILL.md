@@ -108,8 +108,8 @@ same-directory case.
 ### 2.1 Create `$resume` from this lean template
 
 Fill in the angle-bracket placeholders from the current session. Keep it short —
-the budget is **≤ 3 `## Session` blocks and ≤ ~250 lines**; anything older lives
-in `$changelog`.
+the budget is **≤ 3 `## Session` blocks, ≤ ~250 lines, and ≤ ~14 KB**; anything
+older lives in `$changelog`.
 
 ```markdown
 # RESUME — <project name>
@@ -218,11 +218,21 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
      `### Open questions`) or to `$changelog`. The block's narrative is meant to be
      ephemeral "where things stand"; durable facts must not die in it.
 5. **Roll to CHANGELOG only when over budget — don't archive proactively.** After
-   the update, if `$resume` now has more than **3** `## Session` blocks (or exceeds
-   ~250 lines), move the **oldest** block(s) into `$changelog` as a dated,
-   newest-first prose entry. Otherwise leave `$changelog` untouched. The roll is a
-   lossless *move*, so deferring it loses nothing — older days still reach CHANGELOG
-   as they age out, whether here or at `--tidy`/close.
+   the update, if `$resume` now has more than **3** `## Session` blocks, exceeds
+   ~250 lines, **or exceeds ~14 KB** (`wc -c` — a dense file bloats under the line
+   cap), move the **oldest** block(s) into `$changelog` as a dated, newest-first
+   prose entry. Otherwise leave `$changelog` untouched. The roll is a lossless
+   *move*, so deferring it loses nothing — older days still reach CHANGELOG as
+   they age out, whether here or at `--tidy`/close.
+
+   **Density pruning (same trigger):** when the byte budget is what tripped,
+   session blocks alone won't fix it — prune the structured sections too: (a) a
+   `### Threads` bullet whose work has **shipped/closed** moves to `$changelog`
+   as a dated prose line (lossless move, keep any still-open sub-question in
+   `### Next`/`### Open questions`); (b) a `### Decisions` bullet already
+   captured in a memory note collapses to its one-line `[[memory-slug]]`
+   pointer; (c) never prune a bullet that is the only record of something
+   still open.
 6. **Apply everything surgically — `Edit`, never a full rewrite.** The in-place line
    updates plus the single same-day block edit are a handful of targeted `Edit`s; a
    CHANGELOG roll is one more. Only fall back to a full `Write` when bootstrapping
@@ -329,7 +339,7 @@ again. It does not checkpoint the caller; do that first if you have unsaved stat
    ```
    If any write failed, leave **every** slot file in place and stop.
 6. **Enforce the budget** on the merged trunk exactly as in §3 step 5 (≤3
-   `## Session` blocks, ~250 lines; overflow → CHANGELOG).
+   `## Session` blocks, ~250 lines, ~14 KB; overflow → CHANGELOG).
 7. **Tell the user:**
    `Merged <N> slot(s) into RESUME.md (+ CHANGELOG). Slot files removed — safe to start slotless.`
 
