@@ -23,7 +23,10 @@ setup() {
     # and the watcher would look in the wrong session dir. Match it here.
     REPO="$(cd "$BATS_TEST_TMPDIR/repo" && pwd -P)"
     export CCAGE_ROOT="$BATS_TEST_TMPDIR"     # cage dir -> $CCAGE_ROOT/.claude-repo
-    unset CCAGE_SLOT CCAGE_AUTOCK CCAGE_AUTOCK_WINDOW
+    # Unset CLAUDE_CONFIG_DIR: when the suite runs inside a real cage it is set in
+    # the environment, and resolve_config_dir's fast path would return it instead
+    # of the CCAGE_ROOT-derived dir these tests pin. Tests must own the env.
+    unset CCAGE_SLOT CCAGE_AUTOCK CCAGE_AUTOCK_WINDOW CLAUDE_CONFIG_DIR
     CAGE="$CCAGE_ROOT/.claude-repo"
     SLUG="${REPO//\//-}"
     SDIR="$CAGE/projects/$SLUG"

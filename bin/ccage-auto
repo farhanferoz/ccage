@@ -255,6 +255,19 @@ def resolve_config_dir(cwd):
     the default naming (sans the rare collision hash)."""
     shell = os.environ.get("SHELL", "/bin/bash")
 
+    # 0. Fast path: inside a cage, CLAUDE_CONFIG_DIR is already exported into every
+    #    subprocess (the wrapper sets it for the launched session), so a nested
+    #    `ccage-auto --status` invoked from the session's own Bash — the common
+    #    case for the /checkpoint-threshold skill — inherits the authoritative
+    #    value. Using it directly skips the ~2s interactive-shell resolution
+    #    below (which sources the full .bashrc, conda init and all). It is unset
+    #    when ccage-auto is the launcher (the watcher resolves the dir at startup
+    #    before it launches claude), so the shell/replica fallbacks still apply
+    #    there — where the override-faithful interactive path matters.
+    cc = os.environ.get("CLAUDE_CONFIG_DIR")
+    if cc:
+        return cc
+
     # 1. Ask the real function through an interactive shell (sees .bashrc + overrides).
     try:
         out = subprocess.run(
