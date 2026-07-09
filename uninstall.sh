@@ -121,10 +121,10 @@ if [ -d "$share_from/skills/keepwarm" ]; then
     fi
 fi
 
-# /checkpoint-threshold skill (Phase 9) — same removal semantics.
-for f in "$share_from/skills/checkpoint-threshold/SKILL.md"; do
-    if [ -f "$f" ]; then run rm -f "$f"; printf 'removed %s\n' "$f"; fi
-done
+# /checkpoint-threshold skill (Phase 9) — same removal semantics. Only one file,
+# so a direct check rather than a single-element `for` (which trips SC2066).
+ct="$share_from/skills/checkpoint-threshold/SKILL.md"
+if [ -f "$ct" ]; then run rm -f "$ct"; printf 'removed %s\n' "$ct"; fi
 if [ -d "$share_from/skills/checkpoint-threshold" ]; then
     if [ "$dry_run" = 1 ]; then
         printf '+ rmdir %s/skills/checkpoint-threshold (if empty)\n' "$share_from"
