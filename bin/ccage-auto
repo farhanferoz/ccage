@@ -1098,8 +1098,8 @@ def print_status(cfg, cwd, config_dir, sdir):
     print("  config dir   :", config_dir)
     print("  session dir  :", sdir, "(exists)" if os.path.isdir(sdir) else "(missing)")
     print("  enabled      :", cfg.enabled)
-    print("  launch         :", launch_command(cfg))
-    print("  ready marker   :", "%s (ceiling %.0fs)" % (cfg.ready_marker.decode("utf-8"), cfg.init_delay))
+    print("  launch       :", launch_command(cfg))
+    print("  ready marker :", "%s (ceiling %.0fs)" % (cfg.ready_marker.decode("utf-8"), cfg.init_delay))
     print("  soft / hard  : %.0f%% / %.0f%% (launch)" % (cfg.soft, cfg.hard))
     ov = read_control_file(cwd)
     if ov:
