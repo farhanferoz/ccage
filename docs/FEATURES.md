@@ -467,6 +467,7 @@ Closes the loop between the structural `ccage handoff` brief and a repo's durabl
 | `CCAGE_NO_AUTOLOAD` | unset | Skip seeding the SessionStart auto-read hook. |
 | `CCAGE_NO_BUDGET_HOOK` | unset | Skip seeding the PostToolUse budget hook. |
 | `CCAGE_RESUME_BUDGET_LINES` | `250` | Line budget before the auto-read hook / doctor flag a bloated RESUME. |
+| `CCAGE_RESUME_BUDGET_BYTES` | `14000` | Byte budget (alongside the line/block budgets) — a dense file can bloat well under the line cap. |
 | `CCAGE_MEMORY_ORPHAN_MAX` | `3` | Un-indexed memory files tolerated before flagging the dir as messy. |
 | `CCAGE_HOOKS_DIR` | `~/.claude/hooks` | Where the hook scripts are installed and referenced from. |
 

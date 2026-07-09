@@ -261,6 +261,7 @@ Injection is just writing keystrokes to the pty — no tmux, no API cost. The on
 | Context window — force (tokens) | `--window N` | `CCAGE_AUTOCK_WINDOW` | per-model |
 | Context window — per-model map | `--window-map 'opus=1000000,haiku=200000'` | `CCAGE_AUTOCK_WINDOWS` | built-in |
 | Poll interval (s) | `--poll N` | `CCAGE_AUTOCK_POLL` | 12 |
+| Claude-in-Chrome handshake | — | `CCAGE_AUTOCK_CHROME=1` to keep it | off (`--no-chrome`) |
 
 Thresholds are validated: an out-of-range value falls back to its default, and `soft ≥ hard` raises `hard` so the backstop always sits above the nudge.
 
@@ -278,6 +279,8 @@ Thresholds are validated: an out-of-range value falls back to its default, and `
 It writes a small git-excluded control file (`.ccage-autock.conf`) in the project dir that the watcher re-reads on its next poll (~12 s) — the change takes effect within seconds, no context lost. The override is per project dir and per run: it **survives ccage-auto's own `/clear` cycles** (so a raised threshold sticks across the checkpoint→clear→resume loop) but is cleared at the next real session start, so it never silently carries into tomorrow. For a *permanent* change, use `--soft`/`--hard` or `CCAGE_AUTOCK_SOFT`/`CCAGE_AUTOCK_HARD` at launch. `pause` is for a delicate stretch (a long subagent run you don't want interrupted), not "off forever" — while paused the window can grow to auto-compact with no checkpoint. Equivalent CLI, usable from another terminal in the same dir: `ccage-auto --set soft=50`, `--pause`, `--resume`, `--reset`.
 
 **Per-model context windows.** Windows differ by model, and the transcript doesn't record which one a session has — a 1M and a 200K session log the *same* model id. The window is re-resolved on every measurement (so a mid-session `/model` switch is handled), most specific first: a forced `--window` → the per-model map → a `[1m]` marker in the id → built-in small families (haiku → 200K) → a 1,000,000 default. The one thing the data genuinely can't tell apart — a 200K vs 1M *variant of the same family* — is yours to pin with `--window-map` (or `--window`). Set the default high (1M) so the safe failure is to defer rather than checkpoint too early.
+
+**Faster autonomous startup.** An autonomous session never drives a browser, so `ccage-auto` launches with `--no-chrome` by default, skipping the Claude-in-Chrome connect handshake — set `CCAGE_AUTOCK_CHROME=1` to keep it (also the escape hatch on a `claude` CLI too old to know the flag). The kickoff prompt (`CCAGE_AUTOCK_INIT_PROMPT`) no longer waits out a blind sleep either: it fires as soon as the TUI's ready-marker is seen in the pty output (typically 5-7s), falling back to a `CCAGE_AUTOCK_INIT_DELAY` ceiling (default 20s) only if the marker never appears.
 
 **Unattended launches.** For a truly hands-off session you'll pass `--dangerously-skip-permissions` (otherwise a permission prompt blocks the session and the watcher can't clear it). On a cage that hasn't accepted bypass mode yet, Claude opens on a "Bypass Permissions mode" screen that defaults to *No, exit* — `ccage-auto` auto-accepts it at startup (you already opted in via the flag); opt out with `CCAGE_AUTOCK_NO_BYPASS_ACCEPT=1`. Don't use `-p`/`--print`: headless mode runs one turn and exits, defeating the watcher.
 
