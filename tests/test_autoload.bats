@@ -200,3 +200,20 @@ memdir() {
     [[ "$output" == *$'\n300'* ]]
     [[ "$output" != *"truncated"* ]]
 }
+
+# ===== byte budget (dense content can bloat under the line cap) =====
+
+@test "RESUME under line budget but over byte budget: emits over-budget NOTE" {
+    local line; line=$(printf 'x%.0s' $(seq 1 500))
+    yes "$line" | head -n 40 > "$REPO/RESUME.md"
+    run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"over budget"* ]]
+}
+
+@test "small RESUME: no byte-budget NOTE" {
+    printf 'short\n' > "$REPO/RESUME.md"
+    run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"over budget"* ]]
+}
