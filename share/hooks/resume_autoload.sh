@@ -51,15 +51,19 @@ case "${CCAGE_SLOT:-}" in
 esac
 resume="$base/RESUME${slot}.md"
 
-# ---- 0. clear a stale completion marker on a genuinely new session ----
-# `.ccage-session-done` (written by `/checkpoint --final`) tells /keepwarm and
-# ccage-auto the work is finished. It must survive `/clear` (source=clear) so an
-# autonomous run's final checkpoint still stands the helpers down — but starting
-# fresh (source=startup) or resuming a session (source=resume, `claude -r`) means
-# the user is working again, so a marker left over from a previous day would
-# falsely quit its helpers. Clear it on both.
+# ---- 0. clear stale ccage-auto state on a genuinely new session ----
+# Two transient files steer the background helpers and must not carry over:
+#   .ccage-session-done  — written by `/checkpoint --final`; tells /keepwarm and
+#                          ccage-auto the work is finished.
+#   .ccage-autock.conf   — written by /checkpoint-threshold; a live soft/hard/
+#                          pause override for a running ccage-auto watcher.
+# Both must survive `/clear` (source=clear) so an autonomous run's own clear
+# cycles keep the final-marker / threshold override in force — but starting fresh
+# (source=startup) or resuming (source=resume, `claude -r`) means the user is
+# working again, so state left over from a previous run would falsely quit or
+# mis-tune today's helpers. Clear both on startup and resume only.
 if [ "$src" = "startup" ] || [ "$src" = "resume" ]; then
-    rm -f "$base/.ccage-session-done" 2>/dev/null
+    rm -f "$base/.ccage-session-done" "$base/.ccage-autock.conf" 2>/dev/null
 fi
 
 # ---- 1. inject RESUME into context ----

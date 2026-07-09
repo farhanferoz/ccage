@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Remove ccage. Leaves per-project config dirs, credentials, and any
 # user-written claude-overrides.sh alone — those are user data. Also removes the
-# Phase 7 session-docs assets (hooks, /checkpoint skill, CLAUDE.md anchor) and
-# the Phase 8 /keepwarm skill, and unseeds ccage's two hook entries from every
+# Phase 7 session-docs assets (hooks, /checkpoint skill, CLAUDE.md anchor), the
+# Phase 8 /keepwarm skill, and the Phase 9 /checkpoint-threshold skill, and
+# unseeds ccage's two hook entries from every
 # cage's settings.json (all other keys survive) so no cage is left executing a
 # deleted hook script on session start. Never touches a repo's RESUME.md /
 # CHANGELOG.md.
@@ -117,6 +118,18 @@ if [ -d "$share_from/skills/keepwarm" ]; then
         printf '+ rmdir %s/skills/keepwarm (if empty)\n' "$share_from"
     elif rmdir "$share_from/skills/keepwarm" 2>/dev/null; then
         printf 'removed empty %s/skills/keepwarm\n' "$share_from"
+    fi
+fi
+
+# /checkpoint-threshold skill (Phase 9) — same removal semantics. Only one file,
+# so a direct check rather than a single-element `for` (which trips SC2066).
+ct="$share_from/skills/checkpoint-threshold/SKILL.md"
+if [ -f "$ct" ]; then run rm -f "$ct"; printf 'removed %s\n' "$ct"; fi
+if [ -d "$share_from/skills/checkpoint-threshold" ]; then
+    if [ "$dry_run" = 1 ]; then
+        printf '+ rmdir %s/skills/checkpoint-threshold (if empty)\n' "$share_from"
+    elif rmdir "$share_from/skills/checkpoint-threshold" 2>/dev/null; then
+        printf 'removed empty %s/skills/checkpoint-threshold\n' "$share_from"
     fi
 fi
 

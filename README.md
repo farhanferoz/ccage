@@ -35,6 +35,7 @@ Drops a tiny shell function over `claude` that:
 12. Ships a `/keepwarm` skill — a bounded cache keep-warm loop for planned absences. `/keepwarm [interval] [max]` (defaults 55 min × 6) schedules minimal self-wake turns that re-read the cached conversation prefix before the cache TTL expires, avoiding the full rewrite on return; while you're active it re-anchors pending pings on a best-effort basis (a ping that still slips through is a free reset — it won't consume the cap, though it's still one cheap cache-read). Costs, limits, and the tier caveat: [docs/FEATURES.md](docs/FEATURES.md).
 13. Ships `ccage enable-mcp` / `disable-mcp` — opt a single project into an MCP server via a project-scoped `.mcp.json`, the isolation-safe way (MCP registrations stay per-project; only agents/skills are globally shared). Settles "why isn't my MCP-backed tool picked up in this cage?" once. See [Per-project MCP opt-in](#per-project-mcp-opt-in-ccage-enable-mcp).
 14. Ships `CCAGE_PLUGINS_FROM` — load a curated folder of plugins into every cage with **no per-project install** (the wrapper passes `--plugin-dir` at launch, so Claude session-loads them). Install once, available everywhere, like your shared skills. See [Shared plugins across cages](#shared-plugins-across-cages-ccage_plugins_from).
+15. Ships `ccage-auto` — an autonomous context manager that runs the whole `/checkpoint` → `/clear` → resume loop for a long-lived (even unattended) session by measuring real context occupancy and driving the checkpoint at a soft threshold, forcing it at a hard one. Retune it **live, mid-session** with the `/checkpoint-threshold` skill (change the thresholds or pause auto-checkpointing without a restart), and the soft nudge is advisory — the model can hold off if checkpointing now would lose in-flight work. See [Autonomous context management](#autonomous-context-management-ccage-auto).
 
 ### Bonus: dodges the `settings.json` write race
 
@@ -246,9 +247,9 @@ ccage-auto --status   # print the resolved transcript + current occupancy, then 
 It launches your normal cage session through a pseudo-terminal and runs a tiny in-process watcher that:
 
 - **measures** real context occupancy from the session's transcript JSONL — `input + cache_read + cache_creation` tokens of the latest turn. No LLM, no estimation, no API calls; CPU cost is rounding-error.
-- at a **soft threshold** (default 35%) types a one-line nudge so the model itself runs `/checkpoint` at a clean breakpoint and prints a sentinel;
+- at a **soft threshold** (default 35%) types a one-line *advisory* nudge: the model checkpoints at a clean breakpoint and prints a sentinel — but it's told to use its judgment and **hold off if checkpointing now would lose in-flight work** (a running subagent, a mid-edit). It's a suggestion, not an order;
 - once the checkpoint is confirmed on disk, types the one thing the model can't do for itself — `/clear` — then a short resume nudge. Your `SessionStart` auto-read hook reloads `RESUME.md`, so work continues from where it left off;
-- at a **hard threshold** (default 55%) forces the checkpoint as a backstop if the model blew past the soft nudge in one long turn.
+- at a **hard threshold** (default 55%) forces the checkpoint as a backstop — the real deadline before auto-compact — if the model deferred too long or blew past the soft nudge in one long turn.
 
 Injection is just writing keystrokes to the pty — no tmux, no API cost. The only model work triggered is the checkpoint + resume you wanted anyway, far cheaper than letting the window balloon. Slot-aware (`CCAGE_SLOT`) and a no-op for slotless cages alike.
 
@@ -262,6 +263,19 @@ Injection is just writing keystrokes to the pty — no tmux, no API cost. The on
 | Poll interval (s) | `--poll N` | `CCAGE_AUTOCK_POLL` | 12 |
 
 Thresholds are validated: an out-of-range value falls back to its default, and `soft ≥ hard` raises `hard` so the backstop always sits above the nudge.
+
+**Retune it live — `/checkpoint-threshold`.** The thresholds above are fixed at launch, but you don't have to restart to change them. Inside a running `ccage-auto` session, the `/checkpoint-threshold` skill adjusts them on the fly:
+
+```
+/checkpoint-threshold 50        # nudge at 50% instead of 35%
+/checkpoint-threshold 50 65     # soft 50%, hard 65%
+/checkpoint-threshold pause      # suspend auto-checkpointing during delicate work
+/checkpoint-threshold resume     # re-enable it
+/checkpoint-threshold status     # show effective thresholds + current occupancy
+/checkpoint-threshold reset      # drop the override, back to launch values
+```
+
+It writes a small git-excluded control file (`.ccage-autock.conf`) in the project dir that the watcher re-reads on its next poll (~12 s) — the change takes effect within seconds, no context lost. The override is per project dir and per run: it **survives ccage-auto's own `/clear` cycles** (so a raised threshold sticks across the checkpoint→clear→resume loop) but is cleared at the next real session start, so it never silently carries into tomorrow. For a *permanent* change, use `--soft`/`--hard` or `CCAGE_AUTOCK_SOFT`/`CCAGE_AUTOCK_HARD` at launch. `pause` is for a delicate stretch (a long subagent run you don't want interrupted), not "off forever" — while paused the window can grow to auto-compact with no checkpoint. Equivalent CLI, usable from another terminal in the same dir: `ccage-auto --set soft=50`, `--pause`, `--resume`, `--reset`.
 
 **Per-model context windows.** Windows differ by model, and the transcript doesn't record which one a session has — a 1M and a 200K session log the *same* model id. The window is re-resolved on every measurement (so a mid-session `/model` switch is handled), most specific first: a forced `--window` → the per-model map → a `[1m]` marker in the id → built-in small families (haiku → 200K) → a 1,000,000 default. The one thing the data genuinely can't tell apart — a 200K vs 1M *variant of the same family* — is yours to pin with `--window-map` (or `--window`). Set the default high (1M) so the safe failure is to defer rather than checkpoint too early.
 
