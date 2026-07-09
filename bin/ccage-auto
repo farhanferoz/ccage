@@ -49,6 +49,8 @@
 #   CCAGE_AUTOCK_SENTINEL, CCAGE_AUTOCK_HARD_INTERRUPT (1/0),
 #   CCAGE_AUTOCK_NO_BYPASS_ACCEPT (1 = don't auto-accept the DSP bypass screen),
 #   CCAGE_AUTOCK_EXEC (override the launched command; default `claude "$@"`),
+#   CCAGE_AUTOCK_CHROME (1 = keep the Claude-in-Chrome handshake; default off,
+#     i.e. launch adds --no-chrome — an autonomous session never drives a browser),
 #   CCAGE_AUTOCK_INIT_PROMPT (type this + Enter at startup to auto-begin the task),
 #   CCAGE_AUTOCK_INIT_DELAY (seconds to wait before the init prompt; default 6),
 #   CCAGE_AUTOCK_NUDGE (override the soft-nudge text; {pct}/{sentinel} substituted),
@@ -123,6 +125,17 @@ def _num(v, default):
         return default
 
 
+def launch_command(cfg):
+    """The shell command run_proxy hands to the interactive shell.
+    CCAGE_AUTOCK_EXEC wins verbatim (a custom launcher owns its own flags);
+    otherwise `claude`, with --no-chrome unless CCAGE_AUTOCK_CHROME opts back in.
+    The disabled pass-through does NOT use this — it stays a transparent `claude`."""
+    exec_override = os.environ.get("CCAGE_AUTOCK_EXEC")
+    if exec_override:
+        return exec_override
+    return 'claude "$@"' if cfg.chrome else 'claude --no-chrome "$@"'
+
+
 class Config:
     def __init__(self, args):
         self.enabled = _truthy(os.environ.get("CCAGE_AUTOCK"), True)
@@ -144,6 +157,11 @@ class Config:
         self.nudge = os.environ.get("CCAGE_AUTOCK_NUDGE")
         # Override the hard-backstop nudge text (same substitutions).
         self.hard_nudge = os.environ.get("CCAGE_AUTOCK_HARD_NUDGE")
+        # Skip the Claude-in-Chrome startup handshake by default: an autonomous
+        # session never drives a browser, and the connect attempt costs startup
+        # time. CCAGE_AUTOCK_CHROME=1 keeps chrome (also the escape hatch for a
+        # CLI too old to know --no-chrome, which would otherwise exit at launch).
+        self.chrome = _truthy(os.environ.get("CCAGE_AUTOCK_CHROME"), False)
         self.status_only = False
         self.claude_args = self._parse(args)
 
@@ -858,7 +876,7 @@ def run_proxy(cfg, cwd, sdir, logpath):
     shell = os.environ.get("SHELL", "/bin/bash")
     # CCAGE_AUTOCK_EXEC overrides the command launched inside the pty (default the
     # cage's `claude` shell function). For custom launchers and for testing.
-    launch = os.environ.get("CCAGE_AUTOCK_EXEC") or 'claude "$@"'
+    launch = launch_command(cfg)
     child_argv = [shell, "-ic", launch, shell] + cfg.claude_args
 
     pid, master_fd = pty.fork()
@@ -1042,6 +1060,7 @@ def print_status(cfg, cwd, config_dir, sdir):
     print("  config dir   :", config_dir)
     print("  session dir  :", sdir, "(exists)" if os.path.isdir(sdir) else "(missing)")
     print("  enabled      :", cfg.enabled)
+    print("  launch         :", launch_command(cfg))
     print("  soft / hard  : %.0f%% / %.0f%% (launch)" % (cfg.soft, cfg.hard))
     ov = read_control_file(cwd)
     if ov:
