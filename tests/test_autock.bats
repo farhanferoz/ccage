@@ -27,6 +27,8 @@ setup() {
     # the environment, and resolve_config_dir's fast path would return it instead
     # of the CCAGE_ROOT-derived dir these tests pin. Tests must own the env.
     unset CCAGE_SLOT CCAGE_AUTOCK CCAGE_AUTOCK_WINDOW CLAUDE_CONFIG_DIR
+    # Hermetic even when the suite itself runs inside an autonomous session.
+    unset CCAGE_AUTONOMOUS CCAGE_AUTOCK_NO_ASK_GUARD
     CAGE="$CCAGE_ROOT/.claude-repo"
     SLUG="${REPO//\//-}"
     SDIR="$CAGE/projects/$SLUG"
@@ -235,6 +237,10 @@ def append_turn(tokens, text="working"):
 append_turn(tokens0)
 
 cap = open(os.environ["FAKE_CAPTURE"], "ab", buffering=0)
+# Record the autonomous marker the proxy exports, so tests can assert the
+# launched child actually inherits it (not just that the parent set it).
+cap.write(("ENV_CCAGE_AUTONOMOUS=%s\n"
+           % os.environ.get("CCAGE_AUTONOMOUS", "unset")).encode())
 buf = b""
 confirmed = False
 deadline = time.time() + float(os.environ.get("FAKE_DEADLINE", "30"))
@@ -546,4 +552,61 @@ PY
     [ "$status" -eq 0 ]
     [[ "$output" == *">>"* ]]
     [[ "$output" == *"9"* ]]
+}
+
+# ---- AskUserQuestion guard (autonomous runs) --------------------------------
+# The watched launch exports CCAGE_AUTONOMOUS=1 and registers a per-run
+# PreToolUse hook via a generated --settings file; the hook blocks
+# AskUserQuestion (exit 2) only when the marker is set.
+
+GUARD="$BATS_TEST_DIRNAME/../share/hooks/autonomous_ask_guard.sh"
+
+@test "ask-guard: blocks (exit 2) with batching guidance when CCAGE_AUTONOMOUS=1" {
+    run -2 bash -c "echo '{}' | CCAGE_AUTONOMOUS=1 bash '$GUARD'"
+    [[ "$output" == *"AskUserQuestion is disabled"* ]]
+    [[ "$output" == *"### Decisions"* ]]
+    [[ "$output" == *"reversible default"* ]]
+}
+
+@test "ask-guard: inert (exit 0, silent) without the autonomous marker" {
+    run bash -c "echo '{}' | env -u CCAGE_AUTONOMOUS bash '$GUARD'"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "unit: write_guard_settings emits the AskUserQuestion matcher + a real hook path" {
+    run python3 - "$AUTO" "$SDIR" <<'PY'
+import importlib.util, importlib.machinery, json, os, sys
+loader = importlib.machinery.SourceFileLoader("ccageauto", sys.argv[1])
+spec = importlib.util.spec_from_loader("ccageauto", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+p = m.write_guard_settings(sys.argv[2])
+assert p and os.path.isfile(p), p
+assert os.path.dirname(p) == sys.argv[2], p
+entry = json.load(open(p))["hooks"]["PreToolUse"][0]
+assert entry["matcher"] == "AskUserQuestion", entry
+cmd = entry["hooks"][0]["command"]
+assert cmd.startswith("bash "), cmd
+hook = cmd[5:].strip().strip("'")
+assert hook.endswith("autonomous_ask_guard.sh") and os.path.isfile(hook), hook
+print("OK")
+PY
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "e2e: watched launch exports CCAGE_AUTONOMOUS=1 and registers the ask-guard" {
+    drive hard "--soft 10 --hard 20 --poll 1"
+    [ "$status" -eq 0 ]
+    cap_has "b'ENV_CCAGE_AUTONOMOUS=1'"
+    [ -f "$SDIR/autonomous-settings.json" ]
+    grep -q '"matcher": "AskUserQuestion"' "$SDIR/autonomous-settings.json"
+    grep -q 'autonomous_ask_guard.sh' "$SDIR/autonomous-settings.json"
+}
+
+@test "e2e: CCAGE_AUTOCK_NO_ASK_GUARD=1 skips registration but still marks the run" {
+    CCAGE_AUTOCK_NO_ASK_GUARD=1 drive hard "--soft 10 --hard 20 --poll 1"
+    [ "$status" -eq 0 ]
+    [ ! -f "$SDIR/autonomous-settings.json" ]
+    cap_has "b'ENV_CCAGE_AUTONOMOUS=1'"
 }

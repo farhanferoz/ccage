@@ -2,6 +2,15 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] — 2026-07-11
+
+### Added — autonomous runs block `AskUserQuestion` mid-run
+- **A watched `ccage-auto` launch now hard-blocks the model's `AskUserQuestion` tool**, closing the "asked me a blocking question with options while I was away, stalling the whole run" hole. `bin/ccage-auto` exports a `CCAGE_AUTONOMOUS=1` marker into the launched session and registers a new PreToolUse hook (`share/hooks/autonomous_ask_guard.sh`) via a per-run generated settings file passed as `claude --settings <file>` — verified end-to-end that `--settings`-registered hooks fire and that PreToolUse exit 2 blocks the call with stderr fed back to the model. The guard's feedback tells the model what to do instead: check the ratified plan doc, else take the reversible default and log it in `RESUME.md` `### Decisions`, and batch genuinely user-only questions for the end of the run; only irreversible/destructive/outward-facing actions justify halting.
+- **Nothing is seeded into any cage's `settings.json`** — the registration lives and dies with the run (the generated file sits in the cage's session dir and is overwritten per launch), and the hook is armed by the env marker, so a stale settings file is inert. The disabled pass-through (`--no-autock`) sets none of this and still behaves exactly like launching `claude`. Opt out per run with `CCAGE_AUTOCK_NO_ASK_GUARD=1`; a missing hook script degrades to a warning, never a failed launch. `install.sh` deploys the hook to the fixed hooks path (`~/.claude/hooks`) so the installed `ccage-auto` can resolve it (checkout-relative wins when running from a repo, keeping tests hermetic); `uninstall.sh` removes it.
+
+### Tests
+- `tests/test_autock.bats` grows from 37 to 42: guard blocks with batching guidance under `CCAGE_AUTONOMOUS=1` / stays inert and silent without it; a unit test of `write_guard_settings` (matcher, quoted real hook path, file placed in the session dir); and two pty e2e tests asserting the launched child actually inherits the marker and the settings file is registered — and that `CCAGE_AUTOCK_NO_ASK_GUARD=1` skips registration while still marking the run.
+
 ## [0.9.1] — 2026-07-09
 
 ### Fixed — `ccage-auto` watcher: two occupancy-tracking races

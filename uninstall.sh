@@ -52,6 +52,11 @@ if [ -f "$prefix/bin/ccage-auto" ]; then
     run rm -f "$prefix/bin/ccage-auto"
     printf 'removed %s/bin/ccage-auto\n' "$prefix"
 fi
+ask_guard="${CCAGE_HOOKS_DIR:-$HOME/.claude/hooks}/autonomous_ask_guard.sh"
+if [ -f "$ask_guard" ]; then
+    run rm -f "$ask_guard"
+    printf 'removed %s\n' "$ask_guard"
+fi
 if [ -f "$prefix/share/ccage/ccage-handoff.sh" ]; then
     run rm -f "$prefix/share/ccage/ccage-handoff.sh"
     printf 'removed %s/share/ccage/ccage-handoff.sh\n' "$prefix"
