@@ -58,8 +58,16 @@
 #   CCAGE_AUTOCK_NUDGE (override the soft-nudge text; {pct}/{sentinel} substituted),
 #   CCAGE_AUTOCK_HARD_NUDGE (override the hard-backstop nudge text; same substitutions),
 #   CCAGE_AUTOCK_NUDGE_TIMEOUT (s before re-nudge if unconfirmed; default 600),
-#   CCAGE_AUTOCK_COOLDOWN (s to ignore thresholds after a reset; default 30).
+#   CCAGE_AUTOCK_COOLDOWN (s to ignore thresholds after a reset; default 30),
+#   CCAGE_AUTOCK_NO_ASK_GUARD (1 = don't register the AskUserQuestion guard).
 #   CCAGE_SLOT is honoured for RESUME naming.
+#
+# A watched launch exports CCAGE_AUTONOMOUS=1 into the session and registers a
+# per-run PreToolUse hook (share/hooks/autonomous_ask_guard.sh, via a generated
+# `--settings` file) that blocks AskUserQuestion — a blocking question would
+# stall an unattended run; the model is told to take the reversible default,
+# log it in RESUME.md '### Decisions', and batch user-only questions for the
+# end of the run. The disabled pass-through (--no-autock) sets none of this.
 #
 # Context windows differ by model and the transcript does NOT record which window
 # a session has (a 1M and a 200K session log the same model id). The window is
@@ -137,6 +145,42 @@ def launch_command(cfg):
     if exec_override:
         return exec_override
     return 'claude "$@"' if cfg.chrome else 'claude --no-chrome "$@"'
+
+
+def ask_guard_path():
+    """Locate autonomous_ask_guard.sh: the copy in this script's own tree first
+    (a checkout — keeps tests hermetic even when ccage is also installed), then
+    the fixed hooks path install.sh deploys to."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in (
+        os.path.join(here, "..", "share", "hooks", "autonomous_ask_guard.sh"),
+        os.path.join(os.path.expanduser("~"), ".claude", "hooks",
+                     "autonomous_ask_guard.sh"),
+    ):
+        if os.path.isfile(cand):
+            return os.path.abspath(cand)
+    return None
+
+
+def write_guard_settings(sdir):
+    """Write the per-run settings file registering the AskUserQuestion guard,
+    and return its path (None if the hook script can't be found). Passed to the
+    launched session via `claude --settings <file>` — the registration lives and
+    dies with the run; no cage settings.json is ever touched. The hook itself is
+    armed by the CCAGE_AUTONOMOUS marker, so a stale file is inert."""
+    guard = ask_guard_path()
+    if not guard:
+        return None
+    os.makedirs(sdir, exist_ok=True)
+    path = os.path.join(sdir, "autonomous-settings.json")
+    payload = {"hooks": {"PreToolUse": [{
+        "matcher": "AskUserQuestion",
+        "hooks": [{"type": "command", "command": "bash %s" % shlex.quote(guard)}],
+    }]}}
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2)
+        f.write("\n")
+    return path
 
 
 class Config:
@@ -1169,6 +1213,19 @@ def main():
         launch = os.environ.get("CCAGE_AUTOCK_EXEC") or 'claude "$@"'
         os.execvp(shell, [shell, "-ic", launch, shell] + cfg.claude_args)
         return 127
+
+    # Mark the launched session (and its hooks) as autonomous, and register the
+    # AskUserQuestion guard for this run only. The disabled pass-through above
+    # is untouched: it behaves exactly like launching `claude`.
+    os.environ["CCAGE_AUTONOMOUS"] = "1"
+    if not _truthy(os.environ.get("CCAGE_AUTOCK_NO_ASK_GUARD"), False):
+        guard_settings = write_guard_settings(sdir)
+        if guard_settings:
+            cfg.claude_args = cfg.claude_args + ["--settings", guard_settings]
+        else:
+            sys.stderr.write(
+                "[ccage-auto] autonomous_ask_guard.sh not found — "
+                "AskUserQuestion guard off for this run\n")
 
     logpath = os.path.join(config_dir, "ccage-autock.log") \
         if os.path.isdir(config_dir) else os.path.join(cwd, ".ccage-autock.log")

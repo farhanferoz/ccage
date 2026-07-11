@@ -121,6 +121,13 @@ if [ "$install_cli" = 1 ]; then
     install_file "$REPO_ROOT/bin/ccage"                 "$prefix/bin/ccage"  0755
     install_file "$REPO_ROOT/bin/ccage-auto"            "$prefix/bin/ccage-auto" 0755
 
+    # ccage-auto's AskUserQuestion guard goes to the fixed hooks path (like the
+    # session-docs hooks) — the installed ccage-auto resolves it there, since
+    # $prefix/bin/../share/hooks does not exist in an installed layout. Inert
+    # unless a watched ccage-auto run registers it via a per-run --settings file.
+    install_file "$REPO_ROOT/share/hooks/autonomous_ask_guard.sh" \
+        "${CCAGE_HOOKS_DIR:-$HOME/.claude/hooks}/autonomous_ask_guard.sh" 0755
+
     # ccage-auto (autonomous context manager) is a python3 script. The rest of
     # ccage works without python3, so warn rather than fail.
     if ! command -v python3 >/dev/null 2>&1; then
