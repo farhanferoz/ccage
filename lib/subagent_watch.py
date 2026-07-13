@@ -51,6 +51,11 @@ def agent_meta(transcript: Path) -> AgentMeta:
 
 _TEAMMATE_MSG = re.compile(r'<teammate-message[^>]*\bteammate_id=\\?"([^"\\]+)\\?"')
 _VOUCH = re.compile(r"CCB-VOUCH\s+agent=([\w-]+)\s+extend=(\d+)")
+# Task 14: the orchestrator's acknowledgement that it stopped a teammate. S2:
+# a TaskStopped teammate leaves NO distinct on-disk terminal marker (its
+# transcript ends like a normal finish), so this reply marker is the only
+# reliable stop-verification signal. Same keying/escaping as _VOUCH.
+_STOPPED = re.compile(r"CCB-STOPPED\s+agent=([\w-]+)")
 # Task 4b: teammate completion comes from the in-band idle_notification (S4:
 # the signal is written to the PARENT transcript, NOT a hook feed-file). Quotes
 # are JSON-escaped on disk, so \\? mirrors the _TEAMMATE_MSG fix. Verified to
@@ -66,6 +71,7 @@ class ParentScan:
     msg_counts: dict[str, int] = field(default_factory=dict)  # liveness (V6: NOT completion)
     vouches: dict[str, int] = field(default_factory=dict)     # cumulative minutes
     idle: dict[str, float] = field(default_factory=dict)      # teammate -> latest idle epoch (Task 4b/S4)
+    stopped: dict[str, int] = field(default_factory=dict)     # teammate -> 1 once CCB-STOPPED seen (Task 14)
 
 
 def scan_parent_transcript(path: Path, prev: ParentScan) -> ParentScan:
@@ -77,7 +83,8 @@ def scan_parent_transcript(path: Path, prev: ParentScan) -> ParentScan:
     marker. Torn final lines are left for the next poll (offset advances
     only past a trailing newline).
     """
-    out = ParentScan(prev.offset, dict(prev.msg_counts), dict(prev.vouches), dict(prev.idle))
+    out = ParentScan(prev.offset, dict(prev.msg_counts), dict(prev.vouches),
+                     dict(prev.idle), dict(prev.stopped))
     try:
         with path.open("rb") as f:
             f.seek(out.offset)
@@ -93,6 +100,8 @@ def scan_parent_transcript(path: Path, prev: ParentScan) -> ParentScan:
                     out.msg_counts[m.group(1)] = out.msg_counts.get(m.group(1), 0) + 1
                 for m in _VOUCH.finditer(text):
                     out.vouches[m.group(1)] = out.vouches.get(m.group(1), 0) + int(m.group(2))
+                for m in _STOPPED.finditer(text):
+                    out.stopped[m.group(1)] = 1
                 for m in _IDLE.finditer(text):
                     try:
                         epoch = _parse_iso(m.group(2)).timestamp()
@@ -224,6 +233,7 @@ class Observation:
     completed: bool          # Task 4b's completion-feed predicate — reversible, never fully trusted (V6)
     vouch_total_min: int     # cumulative vouched minutes for this agent
     now: float               # epoch seconds
+    stopped: bool = False    # Task 14: CCB-STOPPED marker seen (verified stop) — terminal, non-reversible
 
 
 @dataclass(frozen=True)
@@ -263,7 +273,13 @@ def evaluate(rec: AgentRecord, o: Observation, cfg: CCBConfig) -> tuple[AgentRec
     rec = dataclasses.replace(rec)
     actions: list[Action] = []
 
-    if o.completed:
+    # Completion OR a verified stop resolves from ANY phase and emits nothing.
+    # A verified stop (o.stopped, Task 14) differs from completion in one way:
+    # it is terminal, not reversible — S2 confirmed TaskStop ends the teammate's
+    # turn, and the CCB-STOPPED marker is cumulative in the scan, so o.stopped
+    # stays True and RESOLVED never reverts. Completion alone (idle signal) can
+    # still clear and return the agent to watch below (V6).
+    if o.completed or o.stopped:
         rec.phase = AgentPhase.RESOLVED
         rec.breach_ticks, rec.alerted = 0, False
         return rec, actions
@@ -557,6 +573,48 @@ def nudge_message(rec: AgentRecord, elapsed_min: float, stale_min: float,
     )
 
 
+def stop_message(rec: AgentRecord, grace_min: float) -> str:
+    """Tier-B directive (Task 14): the nudge's grace expired with no vouch, so
+    order the stop. Carries the S2 caveat — TaskStop ends the teammate's turn
+    but can orphan its shell sub-processes (they keep costing) — and the exact
+    CCB-STOPPED reply grammar the scanner verifies against."""
+    return (
+        f"[ccage circuit-breaker] Teammate '{rec.teammate_id}' was flagged {grace_min:.0f} min "
+        f"ago and no CCB-VOUCH was seen. Stop it NOW with TaskStop, salvage whatever partial "
+        f"output exists into RESUME.md, and reassign or drop its task. Note: TaskStop ends its "
+        f"turn but can leave its shell sub-processes running (they keep costing) — check for and "
+        f"kill those too. Reply with the marker CCB-STOPPED agent={rec.teammate_id} when done."
+    )
+
+
+def kill_permitted(cfg: CCBConfig, parent_stale_min: float | None) -> bool:
+    """Tier C (Task 15) precondition. The session-kill fires ONLY when the
+    orchestrator itself is unresponsive — its parent transcript has been quiet
+    longer than cfg.parent_stale_min — AND kill is the configured ceiling. A live
+    orchestrator is NEVER killed: it can still act on the re-issued stop. An
+    unreadable parent staleness (None) counts as alive (fail-safe: never kill on
+    missing evidence)."""
+    if cfg.max_tier is not Tier.KILL:
+        return False
+    if parent_stale_min is None:
+        return False
+    return parent_stale_min > cfg.parent_stale_min
+
+
+def pre_kill_dump(agents: dict, session_cost: float | None, open_tasks: int | None) -> str:
+    """A one-line salvage map written to RESUME.md just before a Tier-C kill, so
+    the resumed session knows what every teammate was doing and what it cost. Kept
+    to one line to fit append_resume_alert's single-bullet format."""
+    cost = "unknown" if session_cost is None else "$%.2f" % session_cost
+    ot = "?" if open_tasks is None else str(open_tasks)
+    parts = ["TIER-C KILL pre-mortem (session cost %s, %s open tasks) — salvage map:" % (cost, ot)]
+    for name in sorted(agents):
+        rec = agents[name]
+        parts.append("%s[%s] peak_elapsed=%.0fmin peak_stale=%.0fmin"
+                     % (rec.teammate_id, rec.phase.value, rec.peak_elapsed_min, rec.peak_stale_min))
+    return " ".join(parts)
+
+
 # --- Task 11: the per-poll orchestration (observe mode) ---------------------
 # Pure logic: no threads, no pty, no clock reads (now is injected). All I/O is
 # against paths the caller passes, so this is unit-testable end to end.
@@ -598,20 +656,27 @@ def run_tick(
     tokenol_url: str | None = None,
     log: Callable[[str], None] = lambda _m: None,
     inject: Callable[[str], bool] = lambda _t: False,
+    kill_session: Callable[[str], bool] = lambda _id: False,
     flags: dict | None = None,
 ) -> WatchState:
     """One observe-mode poll tick across every subagent under session_dir.
 
-    Rescans the parent transcript (progress/vouch/idle), lists subagent
+    Rescans the parent transcript (progress/vouch/idle/stopped), lists subagent
     transcripts, builds an Observation per agent from the tested time/idle
     signals, runs the pure `evaluate` state machine, then executes the returned
-    actions. `alert` (RESUME + log + notify) and `nudge` (Tier A: inject the
-    vouch/stop directive into the pty + RESUME/notify/log) are executed; the
-    destructive `stop`/`escalate` (Tiers B/C) are still gated on the attended
-    Task 17 live-fire and only logged as 'phase2 not wired yet'. `evaluate`
-    already caps actions at cfg.max_tier, so `nudge` only reaches here when the
-    caller configured NUDGE+ on a teams session — the default observe rollout
-    never emits it.
+    actions:
+      - `alert`  — RESUME + log + notify (one per breach episode);
+      - `nudge`  — Tier A: inject the vouch/stop directive (via `inject`);
+      - `stop`   — Tier B: inject the stop directive; verification arrives later
+                   as the CCB-STOPPED marker (o.stopped -> RESOLVED + STOP_VERIFIED);
+      - `escalate` — Tier C: if `kill_permitted` (kill tier + unresponsive
+                   orchestrator) write the pre-kill dump and terminate the pty
+                   child (via `kill_session`); else re-issue the stop once and
+                   flag for manual attention (ESCALATE_BLOCKED).
+    `evaluate` caps every action at cfg.max_tier, so `nudge`/`stop` only reach
+    here on a NUDGE+/STOP+ teams session — the default observe rollout emits only
+    `alert`. `inject` (pty write) and `kill_session` (pid SIGTERM) are the two
+    bin-owned side effects; everything else is decided and audited here.
 
     Telemetry (Task 10b): one ledger line per executed alert, per vouch
     consumed, and on the transition INTO RESOLVED only (including healthy
@@ -670,10 +735,12 @@ def run_tick(
         stale_min = stale if stale is not None else 0.0
         idle_epoch = scan.idle.get(meta.teammate_id)
         completed = idle_completed(idle_epoch, _transcript_mtime(t))
+        stopped = bool(scan.stopped.get(meta.teammate_id))
 
         o = Observation(
             elapsed_min=elapsed_min, stale_min=stale_min, completed=completed,
             vouch_total_min=scan.vouches.get(meta.teammate_id, 0), now=now,
+            stopped=stopped,
         )
         base = prev if prev is not None else AgentRecord(name=name, teammate_id=meta.teammate_id)
         rec, actions = evaluate(base, o, eff_cfg)
@@ -687,9 +754,11 @@ def run_tick(
                          session_cost_usd=_cost(), open_tasks=_open_tasks(team_name),
                          now_iso=now_iso, orchestrator_model=orchestrator_model)
 
-        # Completion baseline: one RESOLVED line on the transition in only.
+        # One terminal line on the transition into RESOLVED only. A verified
+        # stop (Task 14) is a distinct event kind so ccb-report can score it as
+        # a true positive (nudge -> stop) rather than a healthy completion.
         if rec.phase is AgentPhase.RESOLVED and (prev is None or prev.phase is not AgentPhase.RESOLVED):
-            _ledger(EventKind.RESOLVED)
+            _ledger(EventKind.STOP_VERIFIED if stopped else EventKind.RESOLVED)
         # A consumed vouch (de-escalation to VOUCHED) is auditable telemetry.
         if prev is not None and rec.vouches_used > prev.vouches_used:
             _ledger(EventKind.VOUCH)
@@ -720,10 +789,56 @@ def run_tick(
                 notify(cfg, summary)
                 log(summary)
                 _ledger(EventKind.NUDGE)
-            else:
-                # Destructive Tiers B/C (stop/escalate) stay gated on the
-                # attended Task 17 live-fire — log the intent, take no action.
-                log("phase2 not wired yet: %s for teammate %s" % (act.kind, meta.teammate_id))
+            elif act.kind == "stop":
+                # Tier B (Task 14): grace expired, no vouch — inject the stop
+                # directive. Verification comes on a later tick when the
+                # CCB-STOPPED marker lands (o.stopped -> RESOLVED + STOP_VERIFIED).
+                inject(stop_message(rec, cfg.grace_min))
+                summary = ("stop requested: teammate %s at %.0fmin (stale %.0fmin), grace %d min"
+                           % (meta.teammate_id, elapsed_min, stale_min, cfg.grace_min))
+                append_resume_alert(resume_path, summary)
+                notify(cfg, summary)
+                log(summary)
+                _ledger(EventKind.STOP)
+            elif act.kind == "escalate":
+                # Tier C (Task 15): the stop's grace expired too. run_tick owns
+                # the decision + audit trail (it has the cost/task/ledger
+                # context); the irreducibly session-level part — terminating the
+                # pty child — is delegated to the bin's kill_session callback,
+                # exactly as pty writes are delegated to inject. Fires once (the
+                # STOP_REQUESTED->ESCALATED transition emits one escalate action).
+                #
+                # kill_permitted keys on parent-transcript quiescence to tell a
+                # WEDGED orchestrator from a merely-busy one. This is sound
+                # because (S1) a mid-tool injection QUEUES when the orchestrator
+                # is stuck and is never consumed -> the transcript stays quiet ->
+                # parent_stale grows. A healthy orchestrator consumes the nudge/
+                # stop at its next tool boundary, writes, and resets the clock (so
+                # it is never killed). Task 17's KILL scenario validates this.
+                parent_stale = (stale_minutes(parent_transcript, now)
+                                if parent_transcript is not None else None)
+                if kill_permitted(cfg, parent_stale):
+                    # agents[name] is still the pre-tick rec here (written back
+                    # after the loop); substitute the current ESCALATED rec so
+                    # the escalating agent shows its true phase in the salvage map.
+                    dump = pre_kill_dump({**agents, name: rec}, _cost(), _open_tasks(meta.team_name))
+                    append_resume_alert(resume_path, dump)
+                    notify(cfg, dump)
+                    log("TIER-C KILL: orchestrator unresponsive (parent quiet %.0fmin) — terminating session"
+                        % (parent_stale or 0.0))
+                    _ledger(EventKind.KILL)
+                    kill_session(meta.teammate_id)
+                else:
+                    # Blocked: tier < kill, or the orchestrator is still alive and
+                    # can act. Re-issue the stop ONCE (the transition fires once),
+                    # flag for manual attention, then park silently in ESCALATED.
+                    inject(stop_message(rec, cfg.grace_min))
+                    summary = ("escalation blocked for teammate %s (tier/parent-alive); "
+                               "manual attention required" % meta.teammate_id)
+                    append_resume_alert(resume_path, summary)
+                    notify(cfg, summary)
+                    log(summary)
+                    _ledger(EventKind.ESCALATE_BLOCKED)
 
         agents[name] = rec
 

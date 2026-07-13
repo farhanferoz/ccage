@@ -978,3 +978,179 @@ def test_subagent_watcher_inject_gated_on_tui_ready(tmp_path):
     assert os.read(r, 4096) == b"ready now\r"
     os.close(r)
     os.close(w)
+
+
+# --- Task 14: Tier B — surgical stop + CCB-STOPPED verification --------------
+
+def test_scanner_captures_ccb_stopped_marker(tmp_path):
+    from lib.subagent_watch import ParentScan, scan_parent_transcript
+
+    p = tmp_path / "parent.jsonl"
+    p.write_text(json.dumps({"type": "user", "message": {"role": "user",
+                 "content": "CCB-STOPPED agent=cb-stuck done"}}) + "\n")
+    scan = scan_parent_transcript(p, ParentScan())
+    assert scan.stopped.get("cb-stuck") == 1
+
+
+def test_stop_message_carries_grammar_and_orphan_caveat():
+    from lib.ccb_types import AgentRecord
+    from lib.subagent_watch import stop_message
+
+    msg = stop_message(AgentRecord(name="agent-x-0", teammate_id="sr6"), grace_min=10)
+    assert "TaskStop" in msg and "CCB-STOPPED agent=sr6" in msg
+    assert "sub-processes" in msg          # S2 orphaned-child caveat is present
+
+
+def test_verified_stop_resolves_from_any_phase_and_never_escalates():
+    from lib.subagent_watch import evaluate
+
+    cfg = CCBConfig()
+    # A CCB-STOPPED marker (o.stopped) resolves regardless of current phase —
+    # even mid-grace STOP_REQUESTED — and emits nothing (never escalates).
+    for phase in (AgentPhase.NUDGED, AgentPhase.STOP_REQUESTED, AgentPhase.SUSPECT):
+        rec, actions = evaluate(_rec(phase=phase),
+                                _obs(elapsed_min=200, stale_min=90, stopped=True), cfg)
+        assert rec.phase is AgentPhase.RESOLVED and actions == []
+    # And it is terminal: with the marker still set, it stays RESOLVED (unlike a
+    # bare completion signal, which can clear and revert to RUNNING).
+    rec, _ = evaluate(_rec(phase=AgentPhase.RESOLVED),
+                      _obs(elapsed_min=200, stale_min=90, stopped=True), cfg)
+    assert rec.phase is AgentPhase.RESOLVED
+
+
+def _stuck_teams_kw(tmp_path, session_dir, now, cfg, **over):
+    """Shared setup for the stop/escalate run_tick tests: one quiet-stuck teammate
+    on a teams session (task dir => is_teams), plus the RESUME/ledger/state paths."""
+    _mk_agent(session_dir, "cb-stuck", "2026-07-13T10:00:00+00:00", mtime=now - 20 * 60)
+    tasks = tmp_path / "tasks" / "session-abcd1234"
+    tasks.mkdir(parents=True, exist_ok=True)
+    (tasks / "1.json").write_text('{"id":"1","status":"in_progress"}')
+    kw = dict(session_dir=session_dir, config_root=tmp_path, session_id="s-uuid",
+              cwd="/p", cfg=cfg, parent_transcript=None,
+              resume_path=tmp_path / "RESUME.md", ledger_path=tmp_path / "events.jsonl",
+              state_path=tmp_path / ".ccb-state.json")
+    kw.update(over)
+    return kw
+
+
+def test_run_tick_stop_then_ccb_stopped_verifies(tmp_path, monkeypatch):
+    from lib.ccb_types import AgentPhase, CCBConfig, Tier
+    from lib.subagent_watch import WatchState, _parse_iso, load_state, run_tick
+
+    monkeypatch.setattr("lib.subagent_watch.session_cost_usd", lambda *a, **k: None)
+    session_dir = tmp_path / "proj"
+    t0 = _parse_iso("2026-07-13T12:00:00+00:00").timestamp()
+    parent = tmp_path / "parent.jsonl"
+    parent.write_text(json.dumps({"type": "assistant", "message": {"role": "assistant",
+                      "content": "working"}}) + "\n")
+
+    injected, killed = [], []
+    cfg = CCBConfig(max_tier=Tier.STOP)          # grace_min=10 default
+    kw = _stuck_teams_kw(tmp_path, session_dir, t0, cfg, parent_transcript=parent,
+                         inject=lambda t: injected.append(t) or True,
+                         kill_session=lambda tid: killed.append(tid) or True)
+
+    state = run_tick(state=WatchState(), now=t0, **kw)          # SUSPECT
+    state = run_tick(state=state, now=t0, **kw)                 # NUDGED (+ nudge inject)
+    assert len(injected) == 1
+    state = run_tick(state=state, now=t0 + 660, **kw)           # grace expired -> STOP_REQUESTED
+    assert load_state(kw["state_path"]).agents["agent-cb-stuck"].phase is AgentPhase.STOP_REQUESTED
+    assert len(injected) == 2 and "CCB-STOPPED agent=cb-stuck" in injected[1]   # stop directive
+
+    # Orchestrator replies with the verification marker; next tick resolves it.
+    with parent.open("a") as f:
+        f.write(json.dumps({"type": "user", "message": {"role": "user",
+                "content": "CCB-STOPPED agent=cb-stuck"}}) + "\n")
+    state = run_tick(state=state, now=t0 + 720, **kw)
+    assert load_state(kw["state_path"]).agents["agent-cb-stuck"].phase is AgentPhase.RESOLVED
+    assert killed == []                                          # Tier B never kills
+
+    events = [json.loads(l)["event"] for l in (kw["ledger_path"]).read_text().splitlines()]
+    assert events == ["alert", "nudge", "stop", "stop_verified"]
+
+
+# --- Task 15: Tier C — session-kill backstop --------------------------------
+
+def test_kill_precondition_requires_unresponsive_parent_and_kill_tier():
+    from lib.ccb_types import CCBConfig, Tier
+    from lib.subagent_watch import kill_permitted
+
+    cfg = CCBConfig(max_tier=Tier.KILL)          # parent_stale_min=15
+    assert kill_permitted(cfg, parent_stale_min=20) is True
+    assert kill_permitted(cfg, parent_stale_min=5) is False       # orchestrator alive -> NEVER kill
+    assert kill_permitted(cfg, parent_stale_min=None) is False     # unreadable -> fail-safe alive
+    assert kill_permitted(CCBConfig(max_tier=Tier.STOP), parent_stale_min=60) is False
+
+
+def _drive_to_escalation(tmp_path, monkeypatch, cfg, parent):
+    """Run the nudge->stop->escalate ladder to the ESCALATED transition (no vouch,
+    no CCB-STOPPED). Returns (kw, injected, killed, final_state)."""
+    from lib.subagent_watch import WatchState, _parse_iso, run_tick
+
+    monkeypatch.setattr("lib.subagent_watch.session_cost_usd", lambda *a, **k: 7.0)
+    session_dir = tmp_path / "proj"
+    t0 = _parse_iso("2026-07-13T12:00:00+00:00").timestamp()
+    injected, killed = [], []
+    kw = _stuck_teams_kw(tmp_path, session_dir, t0, cfg, parent_transcript=parent,
+                         inject=lambda t: injected.append(t) or True,
+                         kill_session=lambda tid: killed.append(tid) or True)
+    state = run_tick(state=WatchState(), now=t0, **kw)           # SUSPECT
+    state = run_tick(state=state, now=t0, **kw)                  # NUDGED
+    state = run_tick(state=state, now=t0 + 660, **kw)            # STOP_REQUESTED
+    state = run_tick(state=state, now=t0 + 660 + 661, **kw)      # ESCALATED
+    return kw, injected, killed, state
+
+
+def test_run_tick_escalate_blocked_at_stop_tier_reissues_stop(tmp_path, monkeypatch):
+    from lib.ccb_types import AgentPhase, CCBConfig, Tier
+    from lib.subagent_watch import load_state
+
+    parent = tmp_path / "parent.jsonl"
+    parent.write_text(json.dumps({"type": "assistant"}) + "\n")     # parent alive-ish (fresh mtime)
+    cfg = CCBConfig(max_tier=Tier.STOP)
+    kw, injected, killed, _ = _drive_to_escalation(tmp_path, monkeypatch, cfg, parent)
+
+    assert killed == []                                             # tier < kill -> never killed
+    assert load_state(kw["state_path"]).agents["agent-cb-stuck"].phase is AgentPhase.ESCALATED
+    events = [json.loads(l)["event"] for l in kw["ledger_path"].read_text().splitlines()]
+    assert events == ["alert", "nudge", "stop", "escalate_blocked"]
+    assert len(injected) == 3 and "CCB-STOPPED agent=cb-stuck" in injected[2]   # stop re-issued once
+    assert "escalation blocked" in kw["resume_path"].read_text()
+
+
+def test_run_tick_escalate_kills_when_orchestrator_unresponsive(tmp_path, monkeypatch):
+    from lib.ccb_types import AgentPhase, CCBConfig, Tier
+    from lib.subagent_watch import _parse_iso, load_state
+
+    parent = tmp_path / "parent.jsonl"
+    parent.write_text(json.dumps({"type": "assistant"}) + "\n")
+    # Parent transcript quiet for an hour (orchestrator wedged); reads never bump
+    # mtime, so parent_stale keeps growing across ticks -> kill_permitted True.
+    old = _parse_iso("2026-07-13T11:00:00+00:00").timestamp()
+    os.utime(parent, (old, old))
+    cfg = CCBConfig(max_tier=Tier.KILL)
+    kw, injected, killed, _ = _drive_to_escalation(tmp_path, monkeypatch, cfg, parent)
+
+    assert killed == ["cb-stuck"]                                   # session terminated
+    assert load_state(kw["state_path"]).agents["agent-cb-stuck"].phase is AgentPhase.ESCALATED
+    events = [json.loads(l)["event"] for l in kw["ledger_path"].read_text().splitlines()]
+    assert events == ["alert", "nudge", "stop", "kill"]
+    dump = kw["resume_path"].read_text()
+    assert "TIER-C KILL pre-mortem" in dump and "cb-stuck[escalated]" in dump
+
+
+def test_subagent_watcher_kill_session_sigterms_the_child(tmp_path):
+    import signal
+    import subprocess
+
+    proc = subprocess.Popen(["sleep", "30"])
+    watcher, log = _mk_watcher(tmp_path, pid=proc.pid)
+    assert watcher.kill_session("cb-stuck") is True
+    assert proc.wait(timeout=5) == -signal.SIGTERM                  # child actually died on SIGTERM
+    assert watcher.stop is True                                     # watcher stood itself down
+
+
+def test_subagent_watcher_kill_session_noop_without_pid(tmp_path):
+    watcher, log = _mk_watcher(tmp_path)                            # no pid
+    assert watcher.kill_session("cb-stuck") is False
+    assert "kill skipped (no pid)" in log.getvalue()

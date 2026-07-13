@@ -979,7 +979,7 @@ class SubagentWatcher:
     loaded (_ccb_watch is not None)."""
 
     def __init__(self, poll, cwd, sdir, logf, master_fd=None, write_lock=None,
-                 ready_event=None):
+                 ready_event=None, pid=None):
         self.poll = poll
         self.cwd = cwd
         self.sdir = sdir
@@ -993,6 +993,10 @@ class SubagentWatcher:
         self.master_fd = master_fd
         self.write_lock = write_lock
         self.ready_event = ready_event
+        # Tier C (Task 15): the pty child pid from run_proxy's pty.fork(), so a
+        # session-kill reuses the existing handle instead of inventing a second
+        # mechanism. None => kill_session is a logged no-op.
+        self.pid = pid
         self._injected_this_tick = False   # rate-limit: one injection per poll
         self.stop = False
         self.start_time = time.time()
@@ -1049,6 +1053,27 @@ class SubagentWatcher:
         self._log("injected nudge: %s" % first)
         return True
 
+    def kill_session(self, teammate_id):
+        """Tier C (Task 15): terminate the pty child — the whole claude session.
+        Reuses the handle run_proxy already owns (self.pid from pty.fork): a
+        SIGTERM lets the read loop hit EOF and run the existing teardown
+        (waitpid), so there is no second kill mechanism. Best-effort — a missing
+        pid or an already-dead child is a logged no-op. Only ever reached when
+        run_tick's kill_permitted gate passed (CCB_MAX_TIER=kill + unresponsive
+        orchestrator)."""
+        if self.pid is None:
+            self._log("kill skipped (no pid): escalated on %s" % teammate_id)
+            return False
+        self._log("TIER-C: SIGTERM to session pid %d (escalated on teammate %s)"
+                  % (self.pid, teammate_id))
+        try:
+            os.kill(self.pid, signal.SIGTERM)
+        except OSError as e:
+            self._log("kill failed (child already gone?): %r" % e)
+            return False
+        self.stop = True    # stand this watcher down; run_proxy tears the child down
+        return True
+
     def run(self):
         self._log("ccb watcher start: max_tier=%s soft=%dmin stale=%dmin hard=%dmin poll=%.0fs"
                   % (self.cfg.max_tier.value, self.cfg.t_soft_min, self.cfg.t_stale_min,
@@ -1093,6 +1118,7 @@ class SubagentWatcher:
             orchestrator_model=orchestrator_model,
             log=self._log,
             inject=self.inject_message,
+            kill_session=self.kill_session,
             flags=self.flags,
         )
 
@@ -1151,7 +1177,7 @@ def run_proxy(cfg, cwd, sdir, logpath):
         # the same tui_ready event the accept path drives (Task 12 Step 2).
         ccb_watcher = SubagentWatcher(cfg.poll, cwd, sdir, logf,
                                       master_fd=master_fd, write_lock=write_lock,
-                                      ready_event=watcher.tui_ready)
+                                      ready_event=watcher.tui_ready, pid=pid)
         threading.Thread(target=ccb_watcher.run, daemon=True).start()
 
     signal.signal(signal.SIGWINCH, lambda *_: set_winsize(master_fd))
