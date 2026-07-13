@@ -627,10 +627,12 @@ import json, os, select, sys, time
 from datetime import datetime, timezone
 
 sdir = os.environ["FAKE_SDIR"]
-subs = os.path.join(sdir, "subagents")
+parent = os.path.join(sdir, "sess.jsonl")
+# Real layout: subagents/ nests under the session-id dir (the active parent
+# transcript's own stem, "sess" here) -- not directly under sdir.
+subs = os.path.join(sdir, "sess", "subagents")
 os.makedirs(subs, exist_ok=True)
 now = time.time()
-parent = os.path.join(sdir, "sess.jsonl")
 
 def write_parent():
     # Low occupancy (context watcher stays idle) + a teammate-message so the CB

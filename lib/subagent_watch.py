@@ -19,9 +19,16 @@ from pathlib import Path
 from lib.ccb_types import ActionKind, AgentPhase, AgentRecord, CCBConfig, EventKind, TaskStatus, Tier, tier_allows
 
 
-def list_subagent_transcripts(session_dir: Path) -> list[Path]:
-    """Every subagent transcript under session_dir/subagents/."""
-    sub_dir = session_dir / "subagents"
+def list_subagent_transcripts(session_dir: Path, session_id: str = "") -> list[Path]:
+    """Every subagent transcript under session_dir/<session_id>/subagents/.
+
+    Real Claude Code sessions nest per-session state one level below the
+    project dir, keyed by the session's own transcript-file stem (session_id).
+    session_id="" (the pre-first-transcript fallback, before it's known) looks
+    directly under session_dir, matching the layout of a session that has no
+    subdirectory yet either."""
+    root = session_dir / session_id if session_id else session_dir
+    sub_dir = root / "subagents"
     if not sub_dir.is_dir():
         return []
     return sorted(sub_dir.glob("agent-*.jsonl"))
@@ -715,7 +722,7 @@ def run_tick(
     if parent_transcript is not None:
         scan = scan_parent_transcript(parent_transcript, scan)
 
-    transcripts = list_subagent_transcripts(session_dir)
+    transcripts = list_subagent_transcripts(session_dir, session_id)
     metas = {t: agent_meta(t) for t in transcripts}
 
     # Session-level context, computed lazily and memoized so a tick makes at

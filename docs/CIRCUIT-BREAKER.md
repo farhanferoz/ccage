@@ -148,6 +148,8 @@ against. Every Task 17 scenario must be reconstructible from the ledger alone.
 
 Until those pass, treat Tiers B/C as unit- and wiring-validated only, and keep the deployed default at `observe`.
 
+**Bug found by the first real attended Task 17 attempt (2026-07-13):** `list_subagent_transcripts` globbed `session_dir/subagents/`, but a real Claude Code session nests subagent transcripts one level deeper, under a directory named for the session's own transcript-file stem (`session_dir/<session_id>/subagents/`). Every unit test's fixture placed transcripts at the flat (wrong) path, so this was never caught — in production the breaker found zero subagents on every tick and never tracked a single teammate, on any tier, since v0.11.0 shipped. Fixed by threading `session_id` into the lookup; regression test builds the real nested layout plus a same-named decoy at the old flat path to prove it isn't picked up. Same root-cause shape as the v0.11.1 installed-lib bug: a test fixture modeled a plausible-but-wrong directory layout.
+
 ## Spike findings (Phase 0)
 
 Run **2026-07-13, from inside a live Agent-Teams session** — that session is
