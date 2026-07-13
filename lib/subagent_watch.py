@@ -88,6 +88,18 @@ _IDLE = re.compile(
     r'\s*,\s*\\?"timestamp\\?"\s*:\s*\\?"([^"\\]+)\\?"')
 
 
+def _is_assistant_line(text: str) -> bool:
+    """True only for a genuine `"type": "assistant"` transcript line. A pty
+    injection lands as an ordinary `"type": "user"` turn -- indistinguishable
+    from real input at that layer -- so compliance markers must be scoped to
+    the model's own authored turns, never the CB's own injected instruction
+    text. Conservative on any parse failure: unparseable is not assistant."""
+    try:
+        return json.loads(text).get("type") == "assistant"
+    except (ValueError, AttributeError):
+        return False
+
+
 @dataclass
 class ParentScan:
     offset: int = 0
@@ -105,6 +117,17 @@ def scan_parent_transcript(path: Path, prev: ParentScan) -> ParentScan:
     the line, not JSON traversal, so nested content shapes can't hide a
     marker. Torn final lines are left for the next poll (offset advances
     only past a trailing newline).
+
+    CCB-VOUCH/CCB-STOPPED are matched ONLY on assistant-authored lines. The
+    nudge/stop directives injected over the pty land in the SAME transcript as
+    an ordinary `"type": "user"` turn (indistinguishable from real input at
+    the pty layer) and necessarily spell out the exact marker grammar as the
+    example the model is meant to copy -- so a role-blind regex self-matches
+    the CB's own injected instruction on the very next poll, "verifying"
+    compliance whether or not the model ever replied. Confirmed live: a real
+    orchestrator explicitly refused to fabricate a stop, yet the CB's own
+    injected "...CCB-STOPPED agent=X when done" line alone satisfied the
+    unfiltered regex and falsely marked the stop verified.
     """
     out = ParentScan(prev.offset, dict(prev.msg_counts), dict(prev.vouches),
                      dict(prev.idle), dict(prev.stopped))
@@ -121,10 +144,11 @@ def scan_parent_transcript(path: Path, prev: ParentScan) -> ParentScan:
                 text = line.decode("utf-8", errors="replace")
                 for m in _TEAMMATE_MSG.finditer(text):
                     out.msg_counts[m.group(1)] = out.msg_counts.get(m.group(1), 0) + 1
-                for m in _VOUCH.finditer(text):
-                    out.vouches[m.group(1)] = out.vouches.get(m.group(1), 0) + int(m.group(2))
-                for m in _STOPPED.finditer(text):
-                    out.stopped[m.group(1)] = 1
+                if _is_assistant_line(text):
+                    for m in _VOUCH.finditer(text):
+                        out.vouches[m.group(1)] = out.vouches.get(m.group(1), 0) + int(m.group(2))
+                    for m in _STOPPED.finditer(text):
+                        out.stopped[m.group(1)] = 1
                 for m in _IDLE.finditer(text):
                     try:
                         epoch = _parse_iso(m.group(2)).timestamp()
