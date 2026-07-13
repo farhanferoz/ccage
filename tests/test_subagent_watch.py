@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from lib.subagent_watch import list_subagent_transcripts
@@ -62,3 +63,45 @@ def test_agent_meta_missing_or_corrupt_falls_back_to_stem(tmp_path):
     t.with_suffix(".meta.json").write_text("{corrupt")
     m = agent_meta(t)                               # unreadable meta: same fallback
     assert m.teammate_id == "agent-a23b9840c03e0811f" and m.team_name is None
+
+
+def _wr(path, blobs):
+    with path.open("a") as f:
+        for b in blobs:
+            f.write(json.dumps(b) + "\n")
+
+
+def test_scanner_counts_messages_and_vouches_incrementally(tmp_path):
+    from lib.subagent_watch import ParentScan, scan_parent_transcript
+
+    t = tmp_path / "parent.jsonl"
+    _wr(t, [
+        {"type": "user", "message": {"content": [{"type": "text",
+            "text": '<teammate-message teammate_id="sr2-f5-bug-audit" summary="progress">body</teammate-message>'}]}},
+        {"type": "assistant", "message": {"content": [{"type": "text",
+            "text": "Expected long run. CCB-VOUCH agent=sr6-cost-regrade extend=90"}]}},
+    ])
+
+    scan = ParentScan()
+    scan = scan_parent_transcript(t, scan)
+    assert scan.msg_counts == {"sr2-f5-bug-audit": 1}    # liveness, NOT completion (V6)
+    assert scan.vouches == {"sr6-cost-regrade": 90}
+    offset_after_first = scan.offset
+
+    # Append another message from the same teammate; rescan resumes from offset.
+    _wr(t, [{"type": "user", "message": {"content": [{"type": "text",
+        "text": '<teammate-message teammate_id="sr2-f5-bug-audit" summary="more">x</teammate-message>'}]}}])
+    scan = scan_parent_transcript(t, scan)
+    assert scan.msg_counts == {"sr2-f5-bug-audit": 2}
+    assert scan.offset > offset_after_first
+
+
+def test_scanner_survives_partial_last_line(tmp_path):
+    from lib.subagent_watch import ParentScan, scan_parent_transcript
+
+    t = tmp_path / "parent.jsonl"
+    t.write_text('{"type":"user","message":{"content":[{"type":"text","text":"ok"}]}}\n{"type":"assis')  # torn write
+
+    scan = scan_parent_transcript(t, ParentScan())
+    # Torn tail must not be consumed (offset stays at end of last full line) and must not raise.
+    assert scan.offset == t.read_text().index('{"type":"assis')
