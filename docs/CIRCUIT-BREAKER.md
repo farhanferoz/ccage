@@ -19,14 +19,29 @@ need a separate hand-run harness. Config dir `~/.claude-ccage`, session
 supervisor (owns the pty, does the watching/poking); the root Claude session is
 the *internal* orchestrator (spawns teammates, receives the vouch/stop nudge).
 
-### S1 — does an out-of-band message reach a running model? — **core: YES**
+### S1 — does an out-of-band message reach a running model? — **RESOLVED: YES**
 - Premise verified: a message injected mid-turn is delivered to the model at the
   next tool boundary (V7; observed repeatedly — user mid-turn messages *and*
   orchestrator→teammate `SendMessage` both land within the running turn).
-- **Not yet tested:** the exact byte sequence `ccage-auto` writes to the session
-  pty master fd — that needs a `ccage-auto`-wrapped session. Fallback if it proves
-  hard: signal file + `UserPromptSubmit` hook (plan S1 abort path). The Tier A/B
-  premise (a nudge reaches the orchestrator) is sound either way.
+- **Exact byte sequence — confirmed:** ccage-auto's `_type()` writes `<text>`
+  (UTF-8) then **`\r` (0x0D)** to the pty master; `_interrupt()` prefixes
+  **`\x1b` (ESC)** for the mid-turn case. Not `\n`, not CSI-u. This is the shipped
+  mechanism: the `make_fake_claude` bats e2e harness (`tests/test_autock.bats`)
+  captures *every injected byte* and asserts on them, and production autock drives
+  a real TUI with it (`/clear` — which requires submit+parse — works).
+- **Live confirmation (2026-07-13)** against a real external `claude` (Haiku 4.5,
+  `--effort low`) via a throwaway standalone pty probe (no repo changes):
+  (i) `text+\r` written to the master fd → the model received it and replied with
+  the probe token (`● <token>` assistant message, "Brewed for 1s"); (ii) `text+\r`
+  injected *while a `sleep` Bash tool was executing* → the TUI **queued** it
+  (`Press up to edit queued messages`) and carried it through `Ran 1 shell command`,
+  then processed it — mid-tool injection is accepted and consumed at the next
+  boundary. (Disk-transcript verification was unreliable only because the probe
+  SIGKILLs the child before it flushes; the raw pty output is authoritative.)
+- **Conclusion:** the pty-write injection path is sound; the signal-file +
+  `UserPromptSubmit` **fallback is NOT needed**. This unblocks Task 12 (injection
+  writer) and Tier A (nudge, non-destructive). The destructive Tier B/C stay gated
+  on the attended Task 17 KILL-by-default live-fire — S1 does not lift that.
 
 ### S2 — does `TaskStop` stop a running teammate? — **turn: YES; shell children: NO**
 - `TaskStop <teammate>` returns success and ends the teammate's turn
