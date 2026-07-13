@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from lib.ccb_types import TaskStatus
+from lib.ccb_types import AgentPhase, AgentRecord, CCBConfig, TaskStatus, Tier, tier_allows
 
 
 def list_subagent_transcripts(session_dir: Path) -> list[Path]:
@@ -181,3 +181,123 @@ def session_cost_usd(session_id: str, tokenol_base_url: str) -> float | None:
         return totals.get("cost_usd") if isinstance(totals, dict) else None
     except (urllib.error.URLError, TimeoutError, ValueError, KeyError, AttributeError):
         return None
+
+
+@dataclass(frozen=True)
+class Observation:
+    elapsed_min: float
+    stale_min: float
+    completed: bool          # Task 4b's completion-feed predicate — reversible, never fully trusted (V6)
+    vouch_total_min: int     # cumulative vouched minutes for this agent
+    now: float               # epoch seconds
+
+
+@dataclass(frozen=True)
+class Action:
+    kind: str                # "alert" | "nudge" | "stop" | "escalate"
+    agent: AgentRecord
+
+
+_DEBOUNCE_TICKS = 2  # consecutive breach polls required before the first tier step (Section 1)
+
+
+def _in_breach(o: Observation, cfg: CCBConfig, extension_min: int) -> bool:
+    # A vouch extends BOTH floors (review #5): a vouched agent must be
+    # protected in the quiet-stuck mode too, not just the churn mode.
+    quiet_stuck = (o.elapsed_min > cfg.t_soft_min + extension_min
+                   and o.stale_min > cfg.t_stale_min)
+    churn_stuck = o.elapsed_min > cfg.t_hard_min + extension_min
+    return quiet_stuck or churn_stuck
+
+
+def evaluate(rec: AgentRecord, o: Observation, cfg: CCBConfig) -> tuple[AgentRecord, list[Action]]:
+    """One poll tick for one agent. Pure: no I/O, no clock reads.
+
+    Invariants (tested above):
+      - completion always wins, emits nothing — and is REVERSIBLE (a cleared
+        completion signal returns the agent to watch; V6);
+      - at most ONE tier step per tick;
+      - debounce: 2 consecutive breach ticks before the first step;
+      - one alert per breach episode (rec.alerted; reset on de-escalation);
+      - a vouch (below cap) always de-escalates to VOUCHED, and VOUCHED
+        re-enters detection like RUNNING (no trap state);
+      - a breach that clears on its own de-escalates SUSPECT, NUDGED, and
+        STOP_REQUESTED (a recovered agent is never escalated);
+      - nothing above cfg.max_tier is ever emitted.
+    """
+    import dataclasses
+    rec = dataclasses.replace(rec)
+    actions: list[Action] = []
+
+    if o.completed:
+        rec.phase = AgentPhase.RESOLVED
+        rec.breach_ticks, rec.alerted = 0, False
+        return rec, actions
+    if rec.phase is AgentPhase.RESOLVED:
+        rec.phase = AgentPhase.RUNNING       # signal cleared: back under watch
+        rec.phase_changed_at = o.now
+        return rec, actions
+
+    # Vouch handling: a new vouch (total grew) below the cap de-escalates.
+    if o.vouch_total_min > rec.extension_min and rec.phase in (
+        AgentPhase.SUSPECT, AgentPhase.NUDGED, AgentPhase.STOP_REQUESTED
+    ):
+        if rec.vouches_used < cfg.max_vouches:
+            rec.vouches_used += 1
+            rec.extension_min = o.vouch_total_min
+            rec.phase = AgentPhase.VOUCHED
+            rec.breach_ticks, rec.alerted = 0, False
+            rec.phase_changed_at = o.now
+            return rec, actions
+        # cap hit: swallow the vouch, stay on the ladder
+
+    breach = _in_breach(o, cfg, rec.extension_min)
+
+    if rec.phase in (AgentPhase.RUNNING, AgentPhase.VOUCHED):
+        if breach:                            # VOUCHED re-detects too (review #3)
+            rec.phase = AgentPhase.SUSPECT
+            rec.breach_ticks = 1
+            rec.phase_changed_at = o.now
+        else:
+            rec.breach_ticks = 0
+        return rec, actions
+
+    if rec.phase is AgentPhase.SUSPECT:
+        if not breach:
+            rec.phase, rec.breach_ticks, rec.alerted = AgentPhase.RUNNING, 0, False
+            return rec, actions
+        rec.breach_ticks += 1
+        if rec.breach_ticks >= _DEBOUNCE_TICKS:
+            if not rec.alerted:               # one alert per episode (review #6)
+                actions.append(Action("alert", rec))
+                rec.alerted = True
+            if tier_allows(cfg.max_tier, Tier.NUDGE):
+                actions.append(Action("nudge", rec))
+                rec.phase = AgentPhase.NUDGED
+                rec.breach_ticks = 0
+                rec.phase_changed_at = o.now
+            # max_tier=OBSERVE: park in SUSPECT, already-alerted, silent
+        return rec, actions
+
+    grace_s = cfg.grace_min * 60
+    if rec.phase is AgentPhase.NUDGED:
+        if not breach:                        # recovered on its own during grace
+            rec.phase, rec.breach_ticks, rec.alerted = AgentPhase.RUNNING, 0, False
+            return rec, actions
+        if (o.now - rec.phase_changed_at) > grace_s and tier_allows(cfg.max_tier, Tier.STOP):
+            rec.phase = AgentPhase.STOP_REQUESTED
+            rec.phase_changed_at = o.now
+            actions.append(Action("stop", rec))
+        return rec, actions
+
+    if rec.phase is AgentPhase.STOP_REQUESTED:
+        if not breach:                        # recovered even after the stop ask (re-review #1):
+            rec.phase, rec.breach_ticks, rec.alerted = AgentPhase.RUNNING, 0, False
+            return rec, actions               # never escalate a now-healthy agent
+        if (o.now - rec.phase_changed_at) > grace_s:
+            rec.phase = AgentPhase.ESCALATED
+            rec.phase_changed_at = o.now
+            actions.append(Action("escalate", rec))
+        return rec, actions
+
+    return rec, actions                       # ESCALATED: session-level logic owns it (Task 15)

@@ -214,3 +214,149 @@ def test_session_cost_lookup_falls_back_on_non_dict_response(monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", lambda *a, **kw: FakeResp())
     # Must not raise AttributeError when the API returns an unexpected shape.
     assert session_cost_usd(session_id="abc123", tokenol_base_url="http://localhost:8787") is None
+
+
+from lib.ccb_types import AgentPhase, AgentRecord, CCBConfig, Tier
+
+
+def _obs(**kw):
+    from lib.subagent_watch import Observation
+    base = dict(elapsed_min=0.0, stale_min=0.0, completed=False,
+                vouch_total_min=0, now=1_000_000.0)
+    base.update(kw)
+    return Observation(**base)
+
+
+def _rec(phase=AgentPhase.RUNNING, **kw):
+    r = AgentRecord(name="agent-x-0123456789abcdef", teammate_id="x", phase=phase)
+    for k, v in kw.items():
+        setattr(r, k, v)
+    return r
+
+
+def test_completion_wins_from_any_phase():
+    from lib.subagent_watch import evaluate
+    for phase in AgentPhase:
+        rec, actions = evaluate(_rec(phase=phase), _obs(completed=True), CCBConfig())
+        assert rec.phase is AgentPhase.RESOLVED
+        assert actions == []          # a completed agent NEVER triggers anything
+
+
+def test_resolved_is_reversible_when_completion_signal_clears():
+    from lib.subagent_watch import evaluate
+    # The completion signal is not fully trusted (V6): if the agent writes
+    # again after going idle, completed flips back to False and the agent
+    # must return to watch — a wrong "done" can never blind the breaker.
+    rec, actions = evaluate(_rec(phase=AgentPhase.RESOLVED), _obs(completed=False), CCBConfig())
+    assert rec.phase is AgentPhase.RUNNING and actions == []
+
+
+def test_healthy_long_agent_below_thresholds_stays_running():
+    from lib.subagent_watch import evaluate
+    rec, actions = evaluate(_rec(), _obs(elapsed_min=100, stale_min=2), CCBConfig())
+    assert rec.phase is AgentPhase.RUNNING and actions == []
+
+
+def test_quiet_stuck_needs_two_consecutive_polls_then_alerts_and_nudges():
+    from lib.subagent_watch import evaluate
+    cfg = CCBConfig()  # soft=45, stale=10, max_tier=STOP
+    o = _obs(elapsed_min=60, stale_min=15)
+
+    rec, actions = evaluate(_rec(), o, cfg)
+    assert rec.phase is AgentPhase.SUSPECT and actions == []       # debounce tick 1
+
+    rec, actions = evaluate(rec, o, cfg)
+    assert rec.phase is AgentPhase.NUDGED
+    assert [a.kind for a in actions] == ["alert", "nudge"]          # one tier step, audited
+
+
+def test_churn_stuck_caught_by_hard_threshold_despite_fresh_writes():
+    from lib.subagent_watch import evaluate
+    cfg = CCBConfig()  # hard=120
+    o = _obs(elapsed_min=130, stale_min=0.1)                        # writing constantly
+    rec, _ = evaluate(_rec(), o, cfg)
+    rec, actions = evaluate(rec, o, cfg)
+    assert rec.phase is AgentPhase.NUDGED                           # v1's blind spot, closed
+
+
+def test_vouch_deescalates_and_protects_both_stuck_modes():
+    from lib.subagent_watch import evaluate
+    cfg = CCBConfig()  # soft=45, stale=10, hard=120, grace=10
+    t0 = 1_000_000.0
+    rec = _rec(phase=AgentPhase.NUDGED, phase_changed_at=t0 - 60)   # within grace
+    rec, actions = evaluate(rec, _obs(elapsed_min=130, vouch_total_min=90), cfg)
+    assert rec.phase is AgentPhase.VOUCHED and rec.vouches_used == 1 and actions == []
+    # Extension shifts BOTH floors (review #5): quiet-stuck needs 45+90=135,
+    # churn needs 120+90=210 — a vouched agent quietly working at 130 min is safe.
+    rec, actions = evaluate(rec, _obs(elapsed_min=130, stale_min=20, vouch_total_min=90), cfg)
+    assert rec.phase is AgentPhase.VOUCHED and actions == []
+    # ...but a breach past the extended budget re-enters the ladder (review #3:
+    # VOUCHED must not be a trap state that escapes detection forever).
+    o = _obs(elapsed_min=260, stale_min=20, vouch_total_min=90)
+    rec, _ = evaluate(rec, o, cfg)                                   # VOUCHED -> SUSPECT
+    rec, actions = evaluate(rec, o, cfg)
+    assert rec.phase is AgentPhase.NUDGED
+    assert [a.kind for a in actions] == ["alert", "nudge"]           # fresh episode, fresh alert
+
+
+def test_vouch_cap_swallows_vouch_then_grace_expiry_stops():
+    from lib.subagent_watch import evaluate
+    cfg = CCBConfig()  # max_vouches=2, grace=10
+    t0 = 1_000_000.0
+    rec = _rec(phase=AgentPhase.NUDGED, vouches_used=2, extension_min=300,
+               phase_changed_at=t0 - 60)                             # within grace (review #4)
+    o_stuck = _obs(elapsed_min=500, stale_min=60, vouch_total_min=400, now=t0)
+    rec, actions = evaluate(rec, o_stuck, cfg)
+    assert rec.phase is AgentPhase.NUDGED and actions == []          # vouch IGNORED (cap hit)
+    rec, actions = evaluate(rec, _obs(elapsed_min=511, stale_min=71, vouch_total_min=400,
+                                      now=t0 + 11 * 60), cfg)
+    assert rec.phase is AgentPhase.STOP_REQUESTED                    # grace expired -> Tier B
+    assert [a.kind for a in actions] == ["stop"]
+
+
+def test_recovery_during_nudge_grace_deescalates_without_vouch():
+    from lib.subagent_watch import evaluate
+    cfg = CCBConfig()
+    t0 = 1_000_000.0
+    rec = _rec(phase=AgentPhase.NUDGED, phase_changed_at=t0 - 60, alerted=True)
+    # Transcript writing again and under every threshold: breach cleared on its own.
+    rec, actions = evaluate(rec, _obs(elapsed_min=50, stale_min=0.5, now=t0), cfg)
+    assert rec.phase is AgentPhase.RUNNING and actions == [] and rec.alerted is False
+
+
+def test_recovery_during_stop_grace_never_escalates():
+    from lib.subagent_watch import evaluate
+    cfg = CCBConfig()
+    t0 = 1_000_000.0
+    rec = _rec(phase=AgentPhase.STOP_REQUESTED, phase_changed_at=t0 - 60, alerted=True)
+    # Breach cleared after the stop directive went out: de-escalate, don't
+    # advance to ESCALATED against a now-healthy agent (re-review #1).
+    rec, actions = evaluate(rec, _obs(elapsed_min=50, stale_min=0.5, now=t0 + 11 * 60), cfg)
+    assert rec.phase is AgentPhase.RUNNING and actions == []
+
+
+def test_nudge_grace_expiry_escalates_to_stop_then_session():
+    from lib.subagent_watch import evaluate
+    cfg = CCBConfig()  # grace=10
+    t0 = 1_000_000.0
+    rec = _rec(phase=AgentPhase.NUDGED, phase_changed_at=t0)
+    rec, actions = evaluate(rec, _obs(elapsed_min=200, stale_min=60, now=t0 + 11 * 60), cfg)
+    assert rec.phase is AgentPhase.STOP_REQUESTED
+    assert [a.kind for a in actions] == ["stop"]
+    rec, actions = evaluate(rec, _obs(elapsed_min=210, stale_min=70, now=t0 + 22 * 60), cfg)
+    assert rec.phase is AgentPhase.ESCALATED
+    assert [a.kind for a in actions] == ["escalate"]
+
+
+def test_max_tier_observe_alerts_exactly_once_then_parks():
+    from lib.subagent_watch import evaluate
+    cfg = CCBConfig(max_tier=Tier.OBSERVE)
+    o = _obs(elapsed_min=600, stale_min=600)
+    rec, actions = evaluate(_rec(), o, cfg)
+    assert actions == []                                             # debounce tick 1
+    rec, actions = evaluate(rec, o, cfg)
+    assert [a.kind for a in actions] == ["alert"]                    # the ONE alert
+    for _ in range(3):                                               # review #6: Phase 1 runs
+        rec, actions = evaluate(rec, o, cfg)                         # for days — no spam
+        assert actions == []
+    assert rec.phase is AgentPhase.SUSPECT                           # parked; no nudge ever
