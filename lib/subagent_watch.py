@@ -5,6 +5,7 @@ Pure logic only: no pty, no threads. bin/ccage-auto owns wiring.
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -77,3 +78,42 @@ def scan_parent_transcript(path: Path, prev: ParentScan) -> ParentScan:
     except OSError:
         pass  # transcript rotated/missing: keep previous state, retry next poll
     return out
+
+
+def _parse_iso(ts: str) -> datetime:
+    """Parse an ISO timestamp that may use a literal 'Z' suffix, and
+    guarantee the result is timezone-aware (assume UTC if unspecified) so
+    subtracting two of these never raises on naive/aware mismatch.
+    """
+    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def elapsed_seconds(path: Path, now_iso: str) -> int | None:
+    """Seconds between the first line's timestamp and now_iso.
+
+    Returns None (never raises) if the file is empty or its first line
+    isn't valid JSON yet — a real race between file creation and the first
+    write landing, not a hypothetical.
+    """
+    with path.open() as f:
+        first_line = f.readline()
+    if not first_line.strip():
+        return None
+    try:
+        first = json.loads(first_line)
+        first_ts = _parse_iso(first["timestamp"])
+    except (json.JSONDecodeError, KeyError, ValueError):
+        return None
+    now = _parse_iso(now_iso)
+    return int((now - first_ts).total_seconds())
+
+
+def stale_minutes(path: Path, now: float) -> float | None:
+    """Minutes since the transcript was last written; None if unreadable."""
+    try:
+        return (now - path.stat().st_mtime) / 60.0
+    except OSError:
+        return None

@@ -105,3 +105,44 @@ def test_scanner_survives_partial_last_line(tmp_path):
     scan = scan_parent_transcript(t, ParentScan())
     # Torn tail must not be consumed (offset stays at end of last full line) and must not raise.
     assert scan.offset == t.read_text().index('{"type":"assis')
+
+
+def test_elapsed_since_first_line(tmp_path):
+    from lib.subagent_watch import elapsed_seconds
+
+    f = tmp_path / "agent-x.jsonl"
+    f.write_text(json.dumps({"timestamp": "2026-07-12T10:13:42.587000+00:00"}) + "\n")
+
+    # 2026-07-12T11:02:10Z is ~2908s after the first line's timestamp
+    now_iso = "2026-07-12T11:02:10.930000+00:00"
+    assert elapsed_seconds(f, now_iso=now_iso) == 2908
+
+
+def test_elapsed_since_first_line_accepts_z_suffix(tmp_path):
+    from lib.subagent_watch import elapsed_seconds
+
+    f = tmp_path / "agent-x.jsonl"
+    f.write_text(json.dumps({"timestamp": "2026-07-12T10:13:42Z"}) + "\n")
+
+    # Must not raise on Python < 3.11, where fromisoformat rejects "Z" outright.
+    assert elapsed_seconds(f, now_iso="2026-07-12T10:14:42Z") == 60
+
+
+def test_elapsed_since_first_line_returns_none_on_empty_file(tmp_path):
+    from lib.subagent_watch import elapsed_seconds
+
+    f = tmp_path / "agent-x.jsonl"
+    f.touch()  # exists but nothing written yet — a real race, not a hypothetical
+
+    # Must degrade gracefully (None = "can't tell yet"), never raise.
+    assert elapsed_seconds(f, now_iso="2026-07-12T10:14:42Z") is None
+
+
+def test_stale_minutes_from_mtime(tmp_path):
+    from lib.subagent_watch import stale_minutes
+
+    f = tmp_path / "agent-x.jsonl"
+    f.write_text("{}\n")
+    now = f.stat().st_mtime + 720          # 12 min since last write
+    assert stale_minutes(f, now=now) == 12.0
+    assert stale_minutes(tmp_path / "gone.jsonl", now=now) is None   # never raises
