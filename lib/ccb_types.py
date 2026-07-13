@@ -1,6 +1,6 @@
 """Closed variant sets and config for the subagent circuit breaker."""
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 
 
@@ -46,9 +46,21 @@ class EventKind(StrEnum):
     RESOLVED = "resolved"           # normal completion; carries peak stats
 
 
+class ActionKind(StrEnum):
+    """The closed set of actions evaluate() emits for run_tick to execute."""
+    ALERT = "alert"
+    NUDGE = "nudge"
+    STOP = "stop"
+    ESCALATE = "escalate"
+
+
 @dataclass
 class CCBConfig:
-    max_tier: Tier = Tier.STOP
+    # Fail SAFE by default: a deployed watcher must never act above OBSERVE
+    # unless explicitly opted up. Production only ever builds this via from_env
+    # (which also fails safe on a malformed value); tests that exercise the
+    # nudge/stop/kill ladder pass max_tier= explicitly.
+    max_tier: Tier = Tier.OBSERVE
     t_soft_min: int = 45
     t_stale_min: int = 10
     t_hard_min: int = 120
@@ -62,11 +74,13 @@ class CCBConfig:
     def from_env(cls, env: dict | None = None) -> "CCBConfig":
         e = os.environ if env is None else env
         cfg = cls()
-        raw_tier = e.get("CCB_MAX_TIER", "")
+        raw_tier = e.get("CCB_MAX_TIER", "").strip().lower()
         try:
             cfg.max_tier = Tier(raw_tier)
         except ValueError:
-            pass  # keep default on absent/garbage value — never crash the watcher
+            # Absent, garbage, or mis-cased ("OBSERVE", " stop ") -> fall back to
+            # the SAFE floor, never silently to the more permissive class default.
+            cfg.max_tier = Tier.OBSERVE
         for attr, var in [
             ("t_soft_min", "CCB_T_SOFT_MIN"), ("t_stale_min", "CCB_T_STALE_MIN"),
             ("t_hard_min", "CCB_T_HARD_MIN"), ("grace_min", "CCB_GRACE_MIN"),

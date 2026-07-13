@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from lib.ccb_types import AgentPhase, AgentRecord, CCBConfig, EventKind, TaskStatus, Tier, tier_allows
+from lib.ccb_types import ActionKind, AgentPhase, AgentRecord, CCBConfig, EventKind, TaskStatus, Tier, tier_allows
 
 
 def list_subagent_transcripts(session_dir: Path) -> list[Path]:
@@ -33,20 +33,36 @@ class AgentMeta:
     team_name: str | None
 
 
+_ID_DISALLOWED = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _sanitize_id(raw: str, limit: int = 80) -> str:
+    """teammate_id is UNTRUSTED — it comes from a subagent's .meta.json, which can
+    carry model-/tool-generated content — and flows into two sinks: RESUME.md
+    (auto-injected into the next session's context by the SessionStart hook) and
+    the orchestrator's pty nudge. Restrict it to the identifier charset the Agent
+    tooling actually emits ([A-Za-z0-9._-]): this strips newlines/control bytes
+    (RESUME-line forge, pty control sequences) AND shell/markdown/quote
+    metacharacters, then caps the length. Legitimate ids are unchanged, so
+    vouch/completion matching against the raw transcript markers is unaffected."""
+    return _ID_DISALLOWED.sub("", raw)[:limit]
+
+
 def agent_meta(transcript: Path) -> AgentMeta:
     """Authoritative identity from <agent>.meta.json (V11). The transcript
     filename encodes a DIFFERENT string than the real teammate id — never
     parse it. Fallback (meta missing/corrupt): the stem, which at least
     dedupes consistently even if it can't match vouch/completion signals.
+    The id is sanitized at this trust boundary (untrusted meta content).
     """
     try:
         m = json.loads(transcript.with_suffix(".meta.json").read_text())
         name = m.get("name")
         if isinstance(name, str) and name:
-            return AgentMeta(teammate_id=name, team_name=m.get("teamName") or None)
+            return AgentMeta(teammate_id=_sanitize_id(name), team_name=m.get("teamName") or None)
     except (OSError, ValueError):
         pass
-    return AgentMeta(teammate_id=transcript.stem, team_name=None)
+    return AgentMeta(teammate_id=_sanitize_id(transcript.stem), team_name=None)
 
 
 _TEAMMATE_MSG = re.compile(r'<teammate-message[^>]*\bteammate_id=\\?"([^"\\]+)\\?"')
@@ -145,8 +161,11 @@ def elapsed_seconds(path: Path, now_iso: str) -> int | None:
     isn't valid JSON yet — a real race between file creation and the first
     write landing, not a hypothetical.
     """
-    with path.open() as f:
-        first_line = f.readline()
+    try:
+        with path.open() as f:
+            first_line = f.readline()
+    except OSError:
+        return None  # glob-then-open race: transcript vanished/became unreadable
     if not first_line.strip():
         return None
     try:
@@ -238,7 +257,7 @@ class Observation:
 
 @dataclass(frozen=True)
 class Action:
-    kind: str                # "alert" | "nudge" | "stop" | "escalate"
+    kind: ActionKind
     agent: AgentRecord
 
 
@@ -269,7 +288,6 @@ def evaluate(rec: AgentRecord, o: Observation, cfg: CCBConfig) -> tuple[AgentRec
         STOP_REQUESTED (a recovered agent is never escalated);
       - nothing above cfg.max_tier is ever emitted.
     """
-    import dataclasses
     rec = dataclasses.replace(rec)
     actions: list[Action] = []
 
@@ -319,10 +337,10 @@ def evaluate(rec: AgentRecord, o: Observation, cfg: CCBConfig) -> tuple[AgentRec
         rec.breach_ticks += 1
         if rec.breach_ticks >= _DEBOUNCE_TICKS:
             if not rec.alerted:               # one alert per episode (review #6)
-                actions.append(Action("alert", rec))
+                actions.append(Action(ActionKind.ALERT, rec))
                 rec.alerted = True
             if tier_allows(cfg.max_tier, Tier.NUDGE):
-                actions.append(Action("nudge", rec))
+                actions.append(Action(ActionKind.NUDGE, rec))
                 rec.phase = AgentPhase.NUDGED
                 rec.breach_ticks = 0
                 rec.phase_changed_at = o.now
@@ -337,7 +355,7 @@ def evaluate(rec: AgentRecord, o: Observation, cfg: CCBConfig) -> tuple[AgentRec
         if (o.now - rec.phase_changed_at) > grace_s and tier_allows(cfg.max_tier, Tier.STOP):
             rec.phase = AgentPhase.STOP_REQUESTED
             rec.phase_changed_at = o.now
-            actions.append(Action("stop", rec))
+            actions.append(Action(ActionKind.STOP, rec))
         return rec, actions
 
     if rec.phase is AgentPhase.STOP_REQUESTED:
@@ -347,7 +365,7 @@ def evaluate(rec: AgentRecord, o: Observation, cfg: CCBConfig) -> tuple[AgentRec
         if (o.now - rec.phase_changed_at) > grace_s:
             rec.phase = AgentPhase.ESCALATED
             rec.phase_changed_at = o.now
-            actions.append(Action("escalate", rec))
+            actions.append(Action(ActionKind.ESCALATE, rec))
         return rec, actions
 
     return rec, actions                       # ESCALATED: session-level logic owns it (Task 15)
@@ -763,8 +781,10 @@ def run_tick(
         if prev is not None and rec.vouches_used > prev.vouches_used:
             _ledger(EventKind.VOUCH)
 
+        undelivered = False   # a nudge/stop that never reached the pty (rate-limited,
+                              # no pty, or TUI not ready) must NOT stick as progress.
         for act in actions:
-            if act.kind == "alert":
+            if act.kind is ActionKind.ALERT:
                 cost = _cost()
                 cost_s = "" if cost is None else ", session $%.2f" % cost
                 ot = _open_tasks(meta.team_name)
@@ -775,32 +795,41 @@ def run_tick(
                 notify(cfg, msg)
                 log(msg)
                 _ledger(EventKind.ALERT)
-            elif act.kind == "nudge":
+            elif act.kind is ActionKind.NUDGE:
                 # Tier A (Task 13): inject the vouch/stop directive into the
                 # orchestrator's pty. deadline = cfg.grace_min (config), extend
                 # hint = the fixed 60-min suggestion — two different numbers.
                 text = nudge_message(
                     rec, elapsed_min, stale_min, _cost(), _open_tasks(meta.team_name),
                     extend_hint_min=_DEFAULT_EXTEND_HINT_MIN, deadline_min=cfg.grace_min)
-                inject(text)
-                summary = ("nudged: teammate %s at %.0fmin (stale %.0fmin), grace %d min"
-                           % (meta.teammate_id, elapsed_min, stale_min, cfg.grace_min))
-                append_resume_alert(resume_path, summary)
-                notify(cfg, summary)
-                log(summary)
-                _ledger(EventKind.NUDGE)
-            elif act.kind == "stop":
+                if inject(text):
+                    summary = ("nudged: teammate %s at %.0fmin (stale %.0fmin), grace %d min"
+                               % (meta.teammate_id, elapsed_min, stale_min, cfg.grace_min))
+                    append_resume_alert(resume_path, summary)
+                    notify(cfg, summary)
+                    log(summary)
+                    _ledger(EventKind.NUDGE)
+                else:
+                    # Delivery dropped: never ledger/RESUME a phantom nudge, and do
+                    # not let the phase advance — evaluate re-issues next tick, so the
+                    # grace clock starts only once the orchestrator was really told.
+                    undelivered = True
+                    log("nudge undelivered, deferred to next tick: teammate %s" % meta.teammate_id)
+            elif act.kind is ActionKind.STOP:
                 # Tier B (Task 14): grace expired, no vouch — inject the stop
                 # directive. Verification comes on a later tick when the
                 # CCB-STOPPED marker lands (o.stopped -> RESOLVED + STOP_VERIFIED).
-                inject(stop_message(rec, cfg.grace_min))
-                summary = ("stop requested: teammate %s at %.0fmin (stale %.0fmin), grace %d min"
-                           % (meta.teammate_id, elapsed_min, stale_min, cfg.grace_min))
-                append_resume_alert(resume_path, summary)
-                notify(cfg, summary)
-                log(summary)
-                _ledger(EventKind.STOP)
-            elif act.kind == "escalate":
+                if inject(stop_message(rec, cfg.grace_min)):
+                    summary = ("stop requested: teammate %s at %.0fmin (stale %.0fmin), grace %d min"
+                               % (meta.teammate_id, elapsed_min, stale_min, cfg.grace_min))
+                    append_resume_alert(resume_path, summary)
+                    notify(cfg, summary)
+                    log(summary)
+                    _ledger(EventKind.STOP)
+                else:
+                    undelivered = True
+                    log("stop undelivered, deferred to next tick: teammate %s" % meta.teammate_id)
+            elif act.kind is ActionKind.ESCALATE:
                 # Tier C (Task 15): the stop's grace expired too. run_tick owns
                 # the decision + audit trail (it has the cost/task/ledger
                 # context); the irreducibly session-level part — terminating the
@@ -840,6 +869,12 @@ def run_tick(
                     log(summary)
                     _ledger(EventKind.ESCALATE_BLOCKED)
 
+        # An undelivered tier action reverts this agent to its pre-tick record
+        # (keeping the monotonic peak stats + the already-emitted alert flag) so
+        # the SAME action fires again next tick once the pty is free/ready.
+        if undelivered:
+            rec = dataclasses.replace(base, peak_elapsed_min=rec.peak_elapsed_min,
+                                      peak_stale_min=rec.peak_stale_min, alerted=rec.alerted)
         agents[name] = rec
 
     new_state = WatchState(agents=agents, parent_scan=scan)

@@ -1176,11 +1176,11 @@ def run_proxy(cfg, cwd, sdir, logpath):
         # the context watcher and the bypass auto-accepter; gate injection on
         # the same tui_ready event the accept path drives (Task 12 Step 2).
         #
-        # lib/ccb_types.py's CCBConfig defaults max_tier to STOP (convenient for
-        # unit tests exercising the full tier range), but a DEPLOYED ccage-auto
-        # must never nudge/stop/kill a session until the operator explicitly
-        # opts up — so production defaults to observe (alert-only) unless
-        # CCB_MAX_TIER is already set in the environment.
+        # CCBConfig already fails safe (defaults to observe, and from_env falls
+        # back to observe on any absent/garbage/mis-cased CCB_MAX_TIER). This
+        # setdefault is belt-and-suspenders and also EXPORTS the tier into the
+        # environment so the child session and any subprocess observe the same
+        # value; an operator opts up by setting CCB_MAX_TIER before launch.
         os.environ.setdefault("CCB_MAX_TIER", "observe")
         ccb_watcher = SubagentWatcher(cfg.poll, cwd, sdir, logf,
                                       master_fd=master_fd, write_lock=write_lock,

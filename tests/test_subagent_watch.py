@@ -36,7 +36,7 @@ def test_config_rejects_bad_tier(monkeypatch):
 
     monkeypatch.setenv("CCB_MAX_TIER", "obliterate")
     cfg = CCBConfig.from_env()
-    assert cfg.max_tier is Tier.STOP  # falls back to default, never raises
+    assert cfg.max_tier is Tier.OBSERVE  # bad value -> fail safe to observe, never raises
 
 
 def test_agent_meta_reads_name_and_team(tmp_path):
@@ -260,7 +260,7 @@ def test_healthy_long_agent_below_thresholds_stays_running():
 
 def test_quiet_stuck_needs_two_consecutive_polls_then_alerts_and_nudges():
     from lib.subagent_watch import evaluate
-    cfg = CCBConfig()  # soft=45, stale=10, max_tier=STOP
+    cfg = CCBConfig(max_tier=Tier.STOP)  # soft=45, stale=10
     o = _obs(elapsed_min=60, stale_min=15)
 
     rec, actions = evaluate(_rec(), o, cfg)
@@ -273,7 +273,7 @@ def test_quiet_stuck_needs_two_consecutive_polls_then_alerts_and_nudges():
 
 def test_churn_stuck_caught_by_hard_threshold_despite_fresh_writes():
     from lib.subagent_watch import evaluate
-    cfg = CCBConfig()  # hard=120
+    cfg = CCBConfig(max_tier=Tier.STOP)  # hard=120
     o = _obs(elapsed_min=130, stale_min=0.1)                        # writing constantly
     rec, _ = evaluate(_rec(), o, cfg)
     rec, actions = evaluate(rec, o, cfg)
@@ -282,7 +282,7 @@ def test_churn_stuck_caught_by_hard_threshold_despite_fresh_writes():
 
 def test_vouch_deescalates_and_protects_both_stuck_modes():
     from lib.subagent_watch import evaluate
-    cfg = CCBConfig()  # soft=45, stale=10, hard=120, grace=10
+    cfg = CCBConfig(max_tier=Tier.STOP)  # soft=45, stale=10, hard=120, grace=10
     t0 = 1_000_000.0
     rec = _rec(phase=AgentPhase.NUDGED, phase_changed_at=t0 - 60)   # within grace
     rec, actions = evaluate(rec, _obs(elapsed_min=130, vouch_total_min=90), cfg)
@@ -302,7 +302,7 @@ def test_vouch_deescalates_and_protects_both_stuck_modes():
 
 def test_vouch_cap_swallows_vouch_then_grace_expiry_stops():
     from lib.subagent_watch import evaluate
-    cfg = CCBConfig()  # max_vouches=2, grace=10
+    cfg = CCBConfig(max_tier=Tier.STOP)  # max_vouches=2, grace=10
     t0 = 1_000_000.0
     rec = _rec(phase=AgentPhase.NUDGED, vouches_used=2, extension_min=300,
                phase_changed_at=t0 - 60)                             # within grace (review #4)
@@ -338,7 +338,7 @@ def test_recovery_during_stop_grace_never_escalates():
 
 def test_nudge_grace_expiry_escalates_to_stop_then_session():
     from lib.subagent_watch import evaluate
-    cfg = CCBConfig()  # grace=10
+    cfg = CCBConfig(max_tier=Tier.STOP)  # grace=10
     t0 = 1_000_000.0
     rec = _rec(phase=AgentPhase.NUDGED, phase_changed_at=t0)
     rec, actions = evaluate(rec, _obs(elapsed_min=200, stale_min=60, now=t0 + 11 * 60), cfg)
@@ -422,7 +422,7 @@ def test_notify_never_raises_on_broken_cmd():
 
 
 def test_ledger_appends_transition_with_signals_and_config(tmp_path):
-    from lib.ccb_types import AgentRecord, CCBConfig, EventKind
+    from lib.ccb_types import AgentRecord, CCBConfig, EventKind, Tier
     from lib.subagent_watch import ledger_write
 
     ledger = tmp_path / "events.jsonl"
@@ -430,7 +430,7 @@ def test_ledger_appends_transition_with_signals_and_config(tmp_path):
                       teammate_id="sr6-cost-regrade",
                       peak_elapsed_min=92.0, peak_stale_min=14.0)
     ledger_write(
-        ledger, EventKind.NUDGE, rec, CCBConfig(),
+        ledger, EventKind.NUDGE, rec, CCBConfig(max_tier=Tier.STOP),
         session_id="1e0c8efe-964a-4167-b722-8019792e8645", cwd="/home/ff235/dev/Oasis/StrategyA",
         elapsed_min=92.0, stale_min=14.0, session_cost_usd=41.2, open_tasks=3,
         now_iso="2026-07-13T12:00:00+00:00", orchestrator_model="claude-opus-4-8[1m]",
@@ -1154,3 +1154,107 @@ def test_subagent_watcher_kill_session_noop_without_pid(tmp_path):
     watcher, log = _mk_watcher(tmp_path)                            # no pid
     assert watcher.kill_session("cb-stuck") is False
     assert "kill skipped (no pid)" in log.getvalue()
+
+
+# --- Review fixes: input sanitization, fail-safe config, race guard, delivery -
+
+def test_agent_meta_sanitizes_control_chars_in_name(tmp_path):
+    from lib.subagent_watch import agent_meta
+
+    t = tmp_path / "agent-x.jsonl"
+    t.write_text("{}\n")
+    # A crafted name with a newline (RESUME-line forge) + an ESC byte (pty control
+    # sequence) must be neutralized at the trust boundary: printable chars and
+    # spaces survive, control bytes do not.
+    t.with_suffix(".meta.json").write_text(json.dumps(
+        {"name": "evil\n- forged bullet\x1b[2Kmore", "teamName": "t"}))
+    m = agent_meta(t)
+    # Strict allowlist: newline/ESC/space AND markdown/shell chars ('[', '(', '$'…)
+    # are all stripped; only [A-Za-z0-9._-] survives.
+    assert all(c not in m.teammate_id for c in "\n\x1b []")
+    assert m.teammate_id == "evil-forgedbullet2Kmore"
+
+
+def test_elapsed_seconds_missing_file_returns_none(tmp_path):
+    from lib.subagent_watch import elapsed_seconds
+
+    # Glob-then-open race: the transcript was listed, then deleted before read.
+    # Must honor its "never raises" contract and return None (find-bugs #3).
+    gone = tmp_path / "agent-vanished.jsonl"
+    assert elapsed_seconds(gone, now_iso="2026-07-12T10:14:42Z") is None
+
+
+def test_config_tier_case_insensitive_and_whitespace_fails_safe(monkeypatch):
+    from lib.ccb_types import CCBConfig, Tier
+
+    # Mis-cased/whitespace values normalize; a real garbage value falls back to
+    # OBSERVE (the safe floor), never a more permissive tier (find-bugs #2).
+    monkeypatch.setenv("CCB_MAX_TIER", "  STOP ")
+    assert CCBConfig.from_env().max_tier is Tier.STOP        # normalized + honored
+    monkeypatch.setenv("CCB_MAX_TIER", "OBSERVE")
+    assert CCBConfig.from_env().max_tier is Tier.OBSERVE
+    monkeypatch.setenv("CCB_MAX_TIER", "kil")                # typo -> fail safe
+    assert CCBConfig.from_env().max_tier is Tier.OBSERVE
+    monkeypatch.delenv("CCB_MAX_TIER", raising=False)        # unset -> safe default
+    assert CCBConfig.from_env().max_tier is Tier.OBSERVE
+
+
+def test_run_tick_undelivered_nudge_neither_advances_nor_claims_delivery(tmp_path, monkeypatch):
+    """One-per-tick pty injection: when two teammates breach in the same tick, the
+    second nudge is dropped. It must NOT be ledgered/RESUMEd as delivered, and the
+    agent must NOT advance to NUDGED with a grace clock the orchestrator was never
+    told about (find-bugs #1). It re-fires next tick once the injector is free."""
+    from lib.ccb_types import AgentPhase, CCBConfig, Tier
+    from lib.subagent_watch import WatchState, _parse_iso, load_state, run_tick
+
+    monkeypatch.setattr("lib.subagent_watch.session_cost_usd", lambda *a, **k: None)
+    session_dir = tmp_path / "proj"
+    now = _parse_iso("2026-07-13T11:00:00+00:00").timestamp()
+    # Two quiet-stuck teammates (sorted: cb-aaa before cb-bbb) on a teams session.
+    _mk_agent(session_dir, "cb-aaa", "2026-07-13T10:00:00+00:00", mtime=now - 20 * 60)
+    _mk_agent(session_dir, "cb-bbb", "2026-07-13T10:00:00+00:00", mtime=now - 20 * 60)
+    tasks = tmp_path / "tasks" / "session-abcd1234"
+    tasks.mkdir(parents=True)
+    (tasks / "1.json").write_text('{"id":"1","status":"in_progress"}')
+
+    # Injector that delivers only ONE message per tick (mirrors the bin rate
+    # limit); the test resets the budget between ticks as SubagentWatcher._tick does.
+    budget = {"n": 1}
+    delivered, dropped = [], []
+
+    def inject(text):
+        if budget["n"] > 0:
+            budget["n"] -= 1
+            delivered.append(text)
+            return True
+        dropped.append(text)
+        return False
+
+    resume = tmp_path / "RESUME.md"
+    ledger = tmp_path / "events.jsonl"
+    state_path = tmp_path / ".ccb-state.json"
+    kw = dict(session_dir=session_dir, config_root=tmp_path, session_id="s",
+              cwd="/p", cfg=CCBConfig(max_tier=Tier.NUDGE), parent_transcript=None,
+              resume_path=resume, ledger_path=ledger, state_path=state_path, inject=inject)
+
+    budget["n"] = 1
+    state = run_tick(state=WatchState(), now=now, **kw)      # tick 1: both SUSPECT, silent
+    budget["n"] = 1
+    state = run_tick(state=state, now=now, **kw)            # tick 2: both nudge; only aaa delivered
+
+    agents = load_state(state_path).agents
+    assert agents["agent-cb-aaa"].phase is AgentPhase.NUDGED        # delivered -> advanced
+    assert agents["agent-cb-bbb"].phase is AgentPhase.SUSPECT       # dropped -> reverted, NOT nudged
+    assert len(delivered) == 1 and "cb-aaa" in delivered[0]
+    assert len(dropped) == 1 and "cb-bbb" in dropped[0]
+    events = [json.loads(l)["event"] for l in ledger.read_text().splitlines()]
+    assert events.count("nudge") == 1                              # only the delivered nudge ledgered
+    text = resume.read_text()
+    assert "nudged: teammate cb-aaa" in text
+    assert "nudged: teammate cb-bbb" not in text                   # no phantom-delivery line
+
+    budget["n"] = 1
+    state = run_tick(state=state, now=now, **kw)           # tick 3: injector free -> bbb nudged for real
+    agents = load_state(state_path).agents
+    assert agents["agent-cb-bbb"].phase is AgentPhase.NUDGED
+    assert len(delivered) == 2 and "cb-bbb" in delivered[1]
