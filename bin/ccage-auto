@@ -1028,6 +1028,10 @@ class SubagentWatcher:
         # The transcript basename (sans .jsonl) is the session id tokenol and the
         # task-dir lookups key on; empty until the session writes its first file.
         session_id = os.path.splitext(os.path.basename(parent))[0] if parent else ""
+        # The orchestrator's model id (from the latest assistant turn) is captured
+        # in every ledger row — reuse the context watcher's transcript reader so
+        # there is one source of truth for "what model is the root running on".
+        orchestrator_model = latest_usage(parent)[1] if parent else None
         self.state = _ccb_watch.run_tick(
             session_dir=Path(self.sdir),
             config_root=Path(self.config_root),
@@ -1040,6 +1044,7 @@ class SubagentWatcher:
             resume_path=Path(self.resume_path),
             ledger_path=Path(self.ledger_path),
             state_path=Path(self.state_path),
+            orchestrator_model=orchestrator_model,
             log=self._log,
             flags=self.flags,
         )

@@ -414,13 +414,18 @@ def notify(cfg: CCBConfig, msg: str) -> None:
 
 
 def ledger_write(path: Path, event: EventKind, rec, cfg, *, session_id: str, cwd: str,
-                 elapsed_min, stale_min, session_cost_usd, open_tasks, now_iso: str) -> None:
+                 elapsed_min, stale_min, session_cost_usd, open_tasks, now_iso: str,
+                 orchestrator_model: str | None = None) -> None:
     """Append one telemetry line; best-effort, never raises (telemetry must
     never take down the watcher). Config snapshot rides along so a later
-    review knows which thresholds produced each decision."""
+    review knows which thresholds produced each decision. The orchestrator's
+    model id is captured from day one so vouch-trust can later be keyed on
+    orchestrator capability (never hardcoded per-model) — the model is a
+    variable, not a constant."""
     row = {
         "ts": now_iso, "event": event.value, "session_id": session_id, "cwd": cwd,
         "agent": rec.name, "teammate_id": rec.teammate_id, "phase": rec.phase.value,
+        "orchestrator_model": orchestrator_model,
         "elapsed_min": elapsed_min, "stale_min": stale_min,
         "session_cost_usd": session_cost_usd, "open_tasks": open_tasks,
         "vouches_used": rec.vouches_used, "extension_min": rec.extension_min,
@@ -557,6 +562,7 @@ def run_tick(
     resume_path: Path,
     ledger_path: Path,
     state_path: Path,
+    orchestrator_model: str | None = None,
     tokenol_url: str | None = None,
     log: Callable[[str], None] = lambda _m: None,
     flags: dict | None = None,
@@ -641,7 +647,7 @@ def run_tick(
             ledger_write(ledger_path, event, rec, cfg, session_id=session_id, cwd=cwd,
                          elapsed_min=elapsed_min, stale_min=stale_min,
                          session_cost_usd=_cost(), open_tasks=_open_tasks(team_name),
-                         now_iso=now_iso)
+                         now_iso=now_iso, orchestrator_model=orchestrator_model)
 
         # Completion baseline: one RESOLVED line on the transition in only.
         if rec.phase is AgentPhase.RESOLVED and (prev is None or prev.phase is not AgentPhase.RESOLVED):

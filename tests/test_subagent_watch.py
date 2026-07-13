@@ -433,13 +433,13 @@ def test_ledger_appends_transition_with_signals_and_config(tmp_path):
         ledger, EventKind.NUDGE, rec, CCBConfig(),
         session_id="1e0c8efe-964a-4167-b722-8019792e8645", cwd="/home/ff235/dev/Oasis/StrategyA",
         elapsed_min=92.0, stale_min=14.0, session_cost_usd=41.2, open_tasks=3,
-        now_iso="2026-07-13T12:00:00+00:00",
+        now_iso="2026-07-13T12:00:00+00:00", orchestrator_model="claude-opus-4-8[1m]",
     )
     ledger_write(  # second line appends, never truncates
         ledger, EventKind.RESOLVED, rec, CCBConfig(),
         session_id="1e0c8efe-964a-4167-b722-8019792e8645", cwd="/home/ff235/dev/Oasis/StrategyA",
         elapsed_min=97.0, stale_min=0.0, session_cost_usd=42.0, open_tasks=2,
-        now_iso="2026-07-13T12:05:00+00:00",
+        now_iso="2026-07-13T12:05:00+00:00",   # model omitted -> captured as None
     )
 
     lines = [json.loads(l) for l in ledger.read_text().splitlines()]
@@ -450,6 +450,8 @@ def test_ledger_appends_transition_with_signals_and_config(tmp_path):
     assert first["cfg"]["t_hard_min"] == 120 and first["cfg"]["max_tier"] == "stop"
     assert first["peak_elapsed_min"] == 92.0     # healthy-distribution data
     assert first["session_id"].startswith("1e0c8efe")
+    assert first["orchestrator_model"] == "claude-opus-4-8[1m]"   # captured from day one
+    assert lines[1]["orchestrator_model"] is None                 # absent -> null, never missing
 
 
 def test_ledger_write_never_raises_on_unwritable_path():
@@ -604,7 +606,8 @@ def test_run_tick_alerts_stuck_agent_writes_ledger_resume_and_state(tmp_path, mo
 
     kw = dict(session_dir=session_dir, config_root=tmp_path, session_id="s-uuid",
               cwd="/home/ff235/dev/proj", cfg=cfg, now=now, parent_transcript=None,
-              resume_path=resume, ledger_path=ledger, state_path=state_path)
+              resume_path=resume, ledger_path=ledger, state_path=state_path,
+              orchestrator_model="claude-sonnet-5")
 
     state = run_tick(state=WatchState(), **kw)   # debounce tick 1: SUSPECT, silent
     assert not resume.exists()                   # nothing alerted on the first breach
@@ -618,6 +621,7 @@ def test_run_tick_alerts_stuck_agent_writes_ledger_resume_and_state(tmp_path, mo
     rows = [json.loads(l) for l in ledger.read_text().splitlines()]
     assert [r["event"] for r in rows] == ["alert"]
     assert rows[0]["teammate_id"] == "cb-stuck" and rows[0]["open_tasks"] == 1
+    assert rows[0]["orchestrator_model"] == "claude-sonnet-5"   # threaded through run_tick
 
     assert sink.read_text().count("cb-stuck") == 1     # notify fired exactly once
 
