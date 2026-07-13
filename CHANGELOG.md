@@ -2,6 +2,11 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.11.1] — 2026-07-13
+
+### Fixed — circuit-breaker lib resolution in the installed layout
+- **The circuit breaker now actually loads when installed.** `bin/ccage-auto`'s `_load_ccb` and `bin/ccb-report` located the lib by matching any directory named `lib/`, so in an installed tree `<prefix>/lib` (e.g. `~/.local/lib`, Python's user site-packages parent) shadowed the intended `<prefix>/share/ccage/lib`: `_load_ccb` silently fell back to a no-op (breaker disabled) and `ccb-report` raised `ModuleNotFoundError`. Both now key on the actual module file (`lib/subagent_watch.py`), so a bare `lib/` decoy is skipped. Added a regression test that builds a fake installed tree with a decoy `lib/` and confirms `ccb-report` resolves the real lib and runs — the existing tests missed this because they exercise the repo layout, where no such decoy exists.
+
 ## [0.11.0] — 2026-07-13
 
 ### Added — circuit breaker: a stuck-subagent watchdog for `ccage-auto`
