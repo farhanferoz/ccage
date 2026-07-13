@@ -1012,10 +1012,26 @@ def test_scanner_captures_ccb_stopped_marker(tmp_path):
     from lib.subagent_watch import ParentScan, scan_parent_transcript
 
     p = tmp_path / "parent.jsonl"
-    p.write_text(json.dumps({"type": "user", "message": {"role": "user",
+    # Genuine compliance replies are the model's own assistant-authored turn --
+    # a "type": "user" line is what a CB-injected instruction looks like, and
+    # must NOT satisfy this (see _is_assistant_line's docstring).
+    p.write_text(json.dumps({"type": "assistant", "message": {"role": "assistant",
                  "content": "CCB-STOPPED agent=cb-stuck done"}}) + "\n")
     scan = scan_parent_transcript(p, ParentScan())
     assert scan.stopped.get("cb-stuck") == 1
+
+
+def test_scanner_ignores_ccb_stopped_in_a_user_role_line(tmp_path):
+    """The CB's own injected stop directive lands as a "type": "user" turn and
+    necessarily spells out the exact CCB-STOPPED grammar as the example the
+    model is meant to copy -- it must never self-satisfy the verification."""
+    from lib.subagent_watch import ParentScan, scan_parent_transcript
+
+    p = tmp_path / "parent.jsonl"
+    p.write_text(json.dumps({"type": "user", "message": {"role": "user",
+                 "content": "...reply with the marker CCB-STOPPED agent=cb-stuck when done."}}) + "\n")
+    scan = scan_parent_transcript(p, ParentScan())
+    assert scan.stopped.get("cb-stuck") is None
 
 
 def test_stop_message_carries_grammar_and_orphan_caveat():
@@ -1084,8 +1100,12 @@ def test_run_tick_stop_then_ccb_stopped_verifies(tmp_path, monkeypatch):
     assert len(injected) == 2 and "CCB-STOPPED agent=cb-stuck" in injected[1]   # stop directive
 
     # Orchestrator replies with the verification marker; next tick resolves it.
+    # A genuine reply is the model's own assistant-authored turn -- the fake
+    # inject() above never writes into `parent`, so this is the only line
+    # carrying the marker; it must be "assistant", not "user" (a "user" line
+    # is what the CB's own injected instruction looks like).
     with parent.open("a") as f:
-        f.write(json.dumps({"type": "user", "message": {"role": "user",
+        f.write(json.dumps({"type": "assistant", "message": {"role": "assistant",
                 "content": "CCB-STOPPED agent=cb-stuck"}}) + "\n")
     state = run_tick(state=state, now=t0 + 720, **kw)
     assert load_state(kw["state_path"]).agents["agent-cb-stuck"].phase is AgentPhase.RESOLVED

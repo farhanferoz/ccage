@@ -124,7 +124,15 @@ against. Every Task 17 scenario must be reconstructible from the ledger alone.
    every scenario (stuck-quiet, healthy+vouch, churner, completed-agent regression,
    unresponsive-orchestrator KILL with a *verified* resume-from-dump, restart
    safety, ledger completeness): flip the shipped `CCBConfig` default and this doc
-   from `stop` to `kill` in a dedicated commit.
+   from `stop` to `kill` in a dedicated commit. **Revised (2026-07-13):** the
+   KILL scenario specifically cannot be staged honestly — a well-behaved
+   orchestrator correctly refuses a prompt asking it to fake being wedged (a
+   busy-wait has no purpose but to tie up the session, exactly what its own
+   safeguards exist to catch), and *should* refuse. Treat Tier-C's live-fire
+   leg as gated on a **naturally occurring** wedge (a real hung call, a real
+   infinite loop) rather than a manufactured one; unit + wiring coverage
+   (`kill_session` against a real process, `kill_permitted`'s gating logic,
+   the full ladder state machine) is the accepted bar until one occurs.
 
 ## 7. Validation status
 
@@ -140,13 +148,30 @@ against. Every Task 17 scenario must be reconstructible from the ledger alone.
 | **Full pty wiring in the real `ccage-auto` process** — `run_proxy`→`SubagentWatcher` (master_fd/lock/ready_event/pid)→thread→real pty write; the Tier-A nudge reaches the child carrying the vouch grammar; `tui_ready` gate; observe = alert-only | **scripted live-fire** (`tests/test_autock.bats`, real ccage-auto + fake claude) |
 | A mid-turn pty injection reaches a **real model** and is consumed at the next tool boundary | spike **S1** (real Haiku) |
 
-**Still requires the attended Task 17 run (the gate for the default flip past `observe`):**
+**Attended Task 17, Leg 1 — PASSED (2026-07-13), against a real session post-fix:**
 
-- A real orchestrator model *acting* on the nudge/stop (running `TaskStop`, replying `CCB-STOPPED`) — S1 proved *reception*, not action.
-- The full Tier-C KILL against a genuinely wedged real session, with a *verified* resume from the pre-kill dump.
-- Churner and healthy-long-plus-vouch behaviour end-to-end with a real teammate.
+A real Sonnet 5 orchestrator (not a stub) received the actual Tier-A nudge
+injected over the real pty mid-session, reasoned about it correctly ("this is
+the expected long-running work"), and replied with the exact
+`CCB-VOUCH agent=stalled-worker extend=60` marker. The breaker parsed it and
+advanced the record to `vouched`. Ledger confirms the full real sequence:
+`alert → nudge → vouch`, `orchestrator_model: claude-sonnet-5`. This is the
+first live-fire evidence of a real model — not a fake `claude` stub — closing
+the loop end to end.
 
-Until those pass, treat Tiers B/C as unit- and wiring-validated only, and keep the deployed default at `observe`.
+**Bug found by the same attended run, a second teammate later in the same session (2026-07-13):** `scan_parent_transcript` matched `CCB-VOUCH`/`CCB-STOPPED` against every transcript line, not just the model's own. The CB's own injected nudge/stop directive lands as an ordinary `"type": "user"` turn — indistinguishable from real input — and necessarily spells out the exact marker grammar as the example to copy, so the very next poll it satisfied its own verification regex regardless of whether the model ever replied. Caught directly: a real orchestrator explicitly refused to fabricate `CCB-STOPPED` for a teammate it had confirmed (via `TaskList`) had already finished, yet the ledger recorded `stop_verified` 12 seconds later — traced to the CB's own injected line, not the refusal text. This retroactively means the *mechanism* backing the Leg 1 vouch above wasn't yet provably discriminating (the model's reply was genuine, confirmed by transcript role and timing, but the pre-fix scanner couldn't tell that from a self-match). Fixed in v0.11.3 by scoping both regexes to `"type": "assistant"` lines only; regression test proves a `"type": "user"` line carrying the exact grammar is ignored.
+
+**Attended Task 17, Leg 2 (Tier-C KILL + verified resume) — deliberately not staged:**
+
+See §6's revised default-flip criterion above. Attempting to manufacture a
+wedge got a (correct) refusal from the orchestrator model. Left as unit- and
+wiring-validated only, pending a real occurrence.
+
+**Still open:**
+
+- Churner and healthy-long-plus-vouch behaviour end-to-end with a real teammate (lower priority than the above; Leg 1's vouch path already exercises the healthy+vouch case).
+
+Tier B/C acting behavior stays unit- and wiring-validated; the deployed default stays at `observe`.
 
 **Bug found by the first real attended Task 17 attempt (2026-07-13):** `list_subagent_transcripts` globbed `session_dir/subagents/`, but a real Claude Code session nests subagent transcripts one level deeper, under a directory named for the session's own transcript-file stem (`session_dir/<session_id>/subagents/`). Every unit test's fixture placed transcripts at the flat (wrong) path, so this was never caught — in production the breaker found zero subagents on every tick and never tracked a single teammate, on any tier, since v0.11.0 shipped. Fixed by threading `session_id` into the lookup; regression test builds the real nested layout plus a same-named decoy at the old flat path to prove it isn't picked up. Same root-cause shape as the v0.11.1 installed-lib bug: a test fixture modeled a plausible-but-wrong directory layout.
 

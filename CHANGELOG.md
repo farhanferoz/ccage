@@ -2,6 +2,11 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.11.3] — 2026-07-13
+
+### Fixed — circuit breaker could falsely "verify" a stop/vouch it never got
+- **A stop or vouch could be marked verified even when the model never sent one.** `scan_parent_transcript` matched the `CCB-VOUCH`/`CCB-STOPPED` compliance regexes against every transcript line regardless of who authored it. But the CB's own nudge/stop directive, injected over the pty, lands in the same transcript as an ordinary `"type": "user"` turn — indistinguishable from real input at that layer — and necessarily spells out the exact marker grammar as the example the model is meant to copy. So the very next poll after an injection, the CB's own instruction text alone satisfied its own verification regex, regardless of whether the model ever replied. Caught live: a real orchestrator explicitly refused to fabricate a `CCB-STOPPED` reply for a teammate it had confirmed (via `TaskList`) had already finished — yet the ledger still recorded `stop_verified` twelve seconds later, traced to the CB's own injected line, not the model's refusal text. Fixed by scoping `CCB-VOUCH`/`CCB-STOPPED` matching to genuine `"type": "assistant"` lines only. Regression test proves a `"type": "user"` line carrying the exact grammar (the injected-instruction shape) is correctly ignored.
+
 ## [0.11.2] — 2026-07-13
 
 ### Fixed — circuit breaker never actually tracked a real teammate
