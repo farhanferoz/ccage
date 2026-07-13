@@ -525,6 +525,38 @@ def summarize_ledger(path: Path) -> dict:
     return out
 
 
+# --- Task 13: Tier A — the nudge message --------------------------------------
+# extend_hint_min is the number the model is told to write in its CCB-VOUCH
+# marker (a fixed suggestion, default 60); deadline_min (= cfg.grace_min) is how
+# long it has before the breaker escalates on its own. They are DIFFERENT
+# numbers (plan Task 13 Step 3): the first extends, the second is the config
+# deadline — conflating them was the plan's own noted bug.
+_DEFAULT_EXTEND_HINT_MIN = 60
+
+
+def nudge_message(rec: AgentRecord, elapsed_min: float, stale_min: float,
+                  session_cost_usd: float | None, open_tasks: int | None,
+                  extend_hint_min: int, deadline_min: int) -> str:
+    """The Tier-A message injected into the orchestrator's pty (S1: reaches the
+    running model at the next tool boundary). Pure and testable — states the
+    facts, the exact CCB-VOUCH grammar to extend, and the TaskStop escape. The
+    injector collapses newlines before writing (single-line is the S1-verified
+    submit shape); the structure here is for readability of the model-facing
+    text and the tests."""
+    cost = f"${session_cost_usd:.2f}" if session_cost_usd is not None else "unknown"
+    open_s = open_tasks if open_tasks is not None else "?"
+    return (
+        f"[ccage circuit-breaker] Teammate '{rec.teammate_id}' has been running "
+        f"{elapsed_min:.0f} min (transcript quiet {stale_min:.0f} min; session cost {cost}; "
+        f"{open_s} open tasks). Decide NOW, do not defer:\n"
+        f"(a) If this is expected long work, include this exact marker in your reply: "
+        f"CCB-VOUCH agent={rec.teammate_id} extend={extend_hint_min}\n"
+        f"(b) Otherwise check it (TaskList / SendMessage) and stop it with TaskStop, "
+        f"then record its partial results in RESUME.md.\n"
+        f"If you do neither within {deadline_min:.0f} min, the circuit breaker escalates on its own."
+    )
+
+
 # --- Task 11: the per-poll orchestration (observe mode) ---------------------
 # Pure logic: no threads, no pty, no clock reads (now is injected). All I/O is
 # against paths the caller passes, so this is unit-testable end to end.
@@ -565,6 +597,7 @@ def run_tick(
     orchestrator_model: str | None = None,
     tokenol_url: str | None = None,
     log: Callable[[str], None] = lambda _m: None,
+    inject: Callable[[str], bool] = lambda _t: False,
     flags: dict | None = None,
 ) -> WatchState:
     """One observe-mode poll tick across every subagent under session_dir.
@@ -572,8 +605,13 @@ def run_tick(
     Rescans the parent transcript (progress/vouch/idle), lists subagent
     transcripts, builds an Observation per agent from the tested time/idle
     signals, runs the pure `evaluate` state machine, then executes the returned
-    actions. Phase 1 executes only `alert` (RESUME + log + notify); nudge/stop/
-    escalate are logged as 'phase2 not wired yet' and otherwise ignored.
+    actions. `alert` (RESUME + log + notify) and `nudge` (Tier A: inject the
+    vouch/stop directive into the pty + RESUME/notify/log) are executed; the
+    destructive `stop`/`escalate` (Tiers B/C) are still gated on the attended
+    Task 17 live-fire and only logged as 'phase2 not wired yet'. `evaluate`
+    already caps actions at cfg.max_tier, so `nudge` only reaches here when the
+    caller configured NUDGE+ on a teams session — the default observe rollout
+    never emits it.
 
     Telemetry (Task 10b): one ledger line per executed alert, per vouch
     consumed, and on the transition INTO RESOLVED only (including healthy
@@ -668,9 +706,23 @@ def run_tick(
                 notify(cfg, msg)
                 log(msg)
                 _ledger(EventKind.ALERT)
+            elif act.kind == "nudge":
+                # Tier A (Task 13): inject the vouch/stop directive into the
+                # orchestrator's pty. deadline = cfg.grace_min (config), extend
+                # hint = the fixed 60-min suggestion — two different numbers.
+                text = nudge_message(
+                    rec, elapsed_min, stale_min, _cost(), _open_tasks(meta.team_name),
+                    extend_hint_min=_DEFAULT_EXTEND_HINT_MIN, deadline_min=cfg.grace_min)
+                inject(text)
+                summary = ("nudged: teammate %s at %.0fmin (stale %.0fmin), grace %d min"
+                           % (meta.teammate_id, elapsed_min, stale_min, cfg.grace_min))
+                append_resume_alert(resume_path, summary)
+                notify(cfg, summary)
+                log(summary)
+                _ledger(EventKind.NUDGE)
             else:
-                # Phase 2 (nudge/stop/escalate) is not wired in observe-mode
-                # Task 11 — log the intent and take no action.
+                # Destructive Tiers B/C (stop/escalate) stay gated on the
+                # attended Task 17 live-fire — log the intent, take no action.
                 log("phase2 not wired yet: %s for teammate %s" % (act.kind, meta.teammate_id))
 
         agents[name] = rec

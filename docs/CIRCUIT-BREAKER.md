@@ -1,14 +1,20 @@
 # Circuit Breaker (subagent watchdog) — feature doc
 
-> **Status:** Phase 1 complete & verified (43/43 tests) — detection + telemetry
-> + `ccb-report` + the **observe-mode watcher wired into `ccage-auto`** (Task 11:
+> **Status:** Phase 1 complete & verified (52/52 tests) — detection + telemetry
+> + `ccb-report` + the watcher wired into `ccage-auto` (Task 11:
 > a `SubagentWatcher` daemon thread delegating to the unit-tested
-> `lib.subagent_watch.run_tick`; alert/RESUME/notify/ledger only, no escalation).
-> Every ledger row now also captures the **orchestrator model** so vouch-trust
-> can later key on capability tier, never a hardcoded model. Phase 2 (autonomous
-> nudge/stop/kill) stays gated on spike S1 (exact pty-write bytes) and the
-> attended Task 17 live-fire. This doc currently holds the **spike findings**;
-> the full ladder / config / vouch-protocol sections land with Task 16.
+> `lib.subagent_watch.run_tick`) — **plus the non-destructive Tier A nudge now
+> built** (Tasks 12–13): spike S1 resolved the pty-write bytes, so a stuck
+> teammate on a `CCB_MAX_TIER>=nudge` teams session gets one injected
+> vouch/stop directive per breach (the injector shares the pty master + write
+> lock with the context watcher and the bypass auto-accepter, gates on
+> `tui_ready`, collapses newlines to the S1-verified single-line submit shape,
+> and rate-limits to one injection per poll). Every ledger row also captures the
+> **orchestrator model** so vouch-trust can later key on capability tier, never a
+> hardcoded model. The **default rollout is still observe = alert-only**; the
+> **destructive Tiers B/C (stop/kill) stay gated** on the attended Task 17
+> live-fire. This doc currently holds the **spike findings**; the full ladder /
+> config / vouch-protocol sections land with Task 16.
 
 ## Spike findings (Phase 0)
 

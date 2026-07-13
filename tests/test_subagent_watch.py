@@ -813,3 +813,168 @@ def test_subagent_watcher_class_tick_end_to_end(tmp_path, monkeypatch):
     assert st.agents["agent-cb-stuck"].phase is AgentPhase.SUSPECT
     assert st.agents["agent-cb-done"].phase is AgentPhase.RESOLVED
     assert st.agents["agent-cb-fresh"].phase is AgentPhase.RUNNING
+
+
+# --- Task 13: the Tier-A nudge message (pure) -------------------------------
+
+def test_nudge_message_contains_protocol_and_facts():
+    from lib.ccb_types import AgentRecord
+    from lib.subagent_watch import nudge_message
+
+    rec = AgentRecord(name="agent-sr6-cost-regrade-a8829e1a20628718",
+                      teammate_id="sr6-cost-regrade")
+    msg = nudge_message(rec, elapsed_min=92, stale_min=14, session_cost_usd=41.2,
+                        open_tasks=3, extend_hint_min=60, deadline_min=10)
+    assert "sr6-cost-regrade" in msg
+    # extend hint (60) rides in the vouch marker; deadline (grace=10) in the escape.
+    assert "CCB-VOUCH agent=sr6-cost-regrade extend=60" in msg
+    assert "TaskStop" in msg and "92" in msg
+    assert "within 10 min" in msg          # deadline = grace, NOT the extend hint
+    assert "$41.20" in msg and "3 open tasks" in msg
+
+
+def test_nudge_message_tolerates_missing_cost_and_open_tasks():
+    from lib.ccb_types import AgentRecord
+    from lib.subagent_watch import nudge_message
+
+    rec = AgentRecord(name="agent-x-0", teammate_id="x")
+    msg = nudge_message(rec, elapsed_min=50, stale_min=12, session_cost_usd=None,
+                        open_tasks=None, extend_hint_min=60, deadline_min=10)
+    assert "unknown" in msg and "? open tasks" in msg     # never a stray None/format crash
+
+
+# --- Task 12/13: nudge action wired through run_tick + the pty injector ------
+
+def test_run_tick_nudge_injects_and_ledgers(tmp_path, monkeypatch):
+    from lib.ccb_types import AgentPhase, CCBConfig, Tier
+    from lib.subagent_watch import WatchState, _parse_iso, load_state, run_tick
+
+    monkeypatch.setattr("lib.subagent_watch.session_cost_usd", lambda *a, **k: 41.2)
+
+    session_dir = tmp_path / "proj"
+    now = _parse_iso("2026-07-13T11:00:00+00:00").timestamp()
+    # Stuck: started 60 min ago (> soft 45), quiet 20 min (> stale 10) -> breach.
+    _mk_agent(session_dir, "cb-stuck", "2026-07-13T10:00:00+00:00", mtime=now - 20 * 60)
+
+    tasks = tmp_path / "tasks" / "session-abcd1234"
+    tasks.mkdir(parents=True)
+    (tasks / "1.json").write_text('{"id":"1","status":"in_progress"}')
+
+    injected = []
+    cfg = CCBConfig(max_tier=Tier.NUDGE)          # teams session -> nudge allowed
+    resume = tmp_path / "RESUME.md"
+    ledger = tmp_path / "events.jsonl"
+    state_path = tmp_path / ".ccb-state.json"
+    kw = dict(session_dir=session_dir, config_root=tmp_path, session_id="s-uuid",
+              cwd="/p", cfg=cfg, now=now, parent_transcript=None,
+              resume_path=resume, ledger_path=ledger, state_path=state_path,
+              inject=lambda t: injected.append(t) or True)
+
+    state = run_tick(state=WatchState(), **kw)    # debounce tick 1: SUSPECT, silent
+    assert injected == []                         # nothing injected on the first breach
+    state = run_tick(state=state, **kw)           # tick 2: alert + nudge
+
+    assert len(injected) == 1                      # exactly one nudge injected
+    text = injected[0]
+    assert "CCB-VOUCH agent=cb-stuck extend=60" in text and "TaskStop" in text
+    assert "within 10 min" in text                 # grace deadline, not the hint
+
+    rows = [json.loads(l) for l in ledger.read_text().splitlines()]
+    assert [r["event"] for r in rows] == ["alert", "nudge"]
+    assert rows[1]["phase"] == "nudged" and rows[1]["teammate_id"] == "cb-stuck"
+
+    assert "nudged: teammate cb-stuck" in resume.read_text()
+    assert load_state(state_path).agents["agent-cb-stuck"].phase is AgentPhase.NUDGED
+
+
+def test_run_tick_observe_never_injects(tmp_path, monkeypatch):
+    from lib.ccb_types import CCBConfig, Tier
+    from lib.subagent_watch import WatchState, _parse_iso, run_tick
+
+    monkeypatch.setattr("lib.subagent_watch.session_cost_usd", lambda *a, **k: None)
+    session_dir = tmp_path / "proj"
+    now = _parse_iso("2026-07-13T11:00:00+00:00").timestamp()
+    _mk_agent(session_dir, "cb-stuck", "2026-07-13T10:00:00+00:00", mtime=now - 20 * 60)
+    tasks = tmp_path / "tasks" / "session-abcd1234"
+    tasks.mkdir(parents=True)
+    (tasks / "1.json").write_text('{"id":"1","status":"in_progress"}')
+
+    injected = []
+    kw = dict(session_dir=session_dir, config_root=tmp_path, session_id="s-uuid",
+              cwd="/p", cfg=CCBConfig(max_tier=Tier.OBSERVE), now=now,
+              parent_transcript=None, resume_path=tmp_path / "RESUME.md",
+              ledger_path=tmp_path / "events.jsonl", state_path=tmp_path / ".ccb-state.json",
+              inject=lambda t: injected.append(t) or True)
+    state = WatchState()
+    for _ in range(4):                             # well past debounce + grace
+        state = run_tick(state=state, **kw)
+    assert injected == []                          # observe mode never nudges
+
+
+def _mk_watcher(tmp_path, **kw):
+    """A real bin SubagentWatcher over a tmp sdir, or skip if the CB lib is
+    absent. StringIO log so _log() is inspectable."""
+    import io
+
+    ccage_auto = _load_ccage_auto()
+    if ccage_auto._ccb_watch is None:
+        import pytest
+        pytest.skip("circuit-breaker lib not importable")
+    sdir = tmp_path / "config" / "projects" / "slug"
+    sdir.mkdir(parents=True)
+    log = io.StringIO()
+    return ccage_auto.SubagentWatcher(poll=1, cwd=str(tmp_path), sdir=str(sdir),
+                                      logf=log, **kw), log
+
+
+def test_subagent_watcher_inject_writes_collapsed_text_then_cr(tmp_path):
+    import threading
+
+    r, w = os.pipe()
+    lock = threading.Lock()
+    watcher, _ = _mk_watcher(tmp_path, master_fd=w, write_lock=lock)
+
+    assert watcher.inject_message("line one\nline two   tabbed") is True
+    got = os.read(r, 4096)
+    # S1's verified shape: single-line body (whitespace/newlines collapsed) + \r.
+    assert got == b"line one line two tabbed\r"
+    os.close(r)
+    os.close(w)
+
+
+def test_subagent_watcher_inject_noop_without_pty(tmp_path):
+    watcher, log = _mk_watcher(tmp_path)                 # no master_fd/write_lock
+    assert watcher.inject_message("hello") is False
+    assert "inject skipped (no pty)" in log.getvalue()
+
+
+def test_subagent_watcher_inject_rate_limited_to_one_per_tick(tmp_path):
+    import threading
+
+    r, w = os.pipe()
+    watcher, log = _mk_watcher(tmp_path, master_fd=w, write_lock=threading.Lock())
+    assert watcher.inject_message("first") is True
+    assert watcher.inject_message("second") is False     # same tick -> refused
+    assert os.read(r, 4096) == b"first\r"                 # only the first reached the pty
+    assert "rate-limited" in log.getvalue()
+    watcher._injected_this_tick = False                  # next tick clears it (as _tick does)
+    assert watcher.inject_message("third") is True
+    assert os.read(r, 4096) == b"third\r"
+    os.close(r)
+    os.close(w)
+
+
+def test_subagent_watcher_inject_gated_on_tui_ready(tmp_path):
+    import threading
+
+    r, w = os.pipe()
+    ready = threading.Event()                            # TUI not ready (bypass screen up)
+    watcher, log = _mk_watcher(tmp_path, master_fd=w, write_lock=threading.Lock(),
+                               ready_event=ready)
+    assert watcher.inject_message("early") is False
+    assert "TUI not ready" in log.getvalue()
+    ready.set()
+    assert watcher.inject_message("ready now") is True
+    assert os.read(r, 4096) == b"ready now\r"
+    os.close(r)
+    os.close(w)

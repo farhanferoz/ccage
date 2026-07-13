@@ -978,11 +978,22 @@ class SubagentWatcher:
     exception-guarded and best-effort). Instantiated only when the CB library
     loaded (_ccb_watch is not None)."""
 
-    def __init__(self, poll, cwd, sdir, logf):
+    def __init__(self, poll, cwd, sdir, logf, master_fd=None, write_lock=None,
+                 ready_event=None):
         self.poll = poll
         self.cwd = cwd
         self.sdir = sdir
         self.log = logf
+        # Injection wiring (Task 12). master_fd/write_lock are the same pty
+        # master and lock the context Watcher and the bypass auto-accepter use,
+        # so a nudge never interleaves bytes with another writer. All three
+        # default to None: in observe mode (or any construction that doesn't
+        # wire the pty) inject_message is a logged no-op, so a nudge degrades to
+        # log-only rather than raising.
+        self.master_fd = master_fd
+        self.write_lock = write_lock
+        self.ready_event = ready_event
+        self._injected_this_tick = False   # rate-limit: one injection per poll
         self.stop = False
         self.start_time = time.time()
         self.cfg = _ccb_types.CCBConfig.from_env()
@@ -1003,6 +1014,40 @@ class SubagentWatcher:
             self.log.flush()
         except Exception:
             pass
+
+    def inject_message(self, text):
+        """Write a Tier-A nudge to the child's pty exactly as a human types it:
+        the text, a settle pause, then `\\r` to submit (spike S1's confirmed
+        byte shape — reaches a running model at the next tool boundary, queues
+        mid-tool). Newlines are collapsed to spaces first: S1 verified a
+        single-line submit; a multi-line paste's submit behaviour is unverified,
+        so we never rely on it. Serialized behind the shared write_lock and
+        rate-limited to one injection per poll tick. Returns True on a real
+        write; a logged no-op (False) when no pty is wired, the TUI isn't ready
+        yet (bypass screen still up — Task 12 Step 2 guard, reusing the context
+        watcher's ready_event), the tick already injected, or the child is gone."""
+        first = text.splitlines()[0] if text else ""
+        if self._injected_this_tick:
+            self._log("inject rate-limited this tick: %s" % first)
+            return False
+        if self.master_fd is None or self.write_lock is None:
+            self._log("inject skipped (no pty): %s" % first)
+            return False
+        if self.ready_event is not None and not self.ready_event.is_set():
+            self._log("inject skipped (TUI not ready): %s" % first)
+            return False
+        line = " ".join(text.split())      # collapse all whitespace/newlines
+        with self.write_lock:
+            try:
+                os.write(self.master_fd, line.encode())
+                time.sleep(KEY_DELAY)
+                os.write(self.master_fd, b"\r")
+            except OSError as e:
+                self._log("inject failed (child gone?): %r" % e)
+                return False
+        self._injected_this_tick = True
+        self._log("injected nudge: %s" % first)
+        return True
 
     def run(self):
         self._log("ccb watcher start: max_tier=%s soft=%dmin stale=%dmin hard=%dmin poll=%.0fs"
@@ -1032,6 +1077,7 @@ class SubagentWatcher:
         # in every ledger row — reuse the context watcher's transcript reader so
         # there is one source of truth for "what model is the root running on".
         orchestrator_model = latest_usage(parent)[1] if parent else None
+        self._injected_this_tick = False   # reset the one-per-tick rate limit
         self.state = _ccb_watch.run_tick(
             session_dir=Path(self.sdir),
             config_root=Path(self.config_root),
@@ -1046,6 +1092,7 @@ class SubagentWatcher:
             state_path=Path(self.state_path),
             orchestrator_model=orchestrator_model,
             log=self._log,
+            inject=self.inject_message,
             flags=self.flags,
         )
 
@@ -1092,12 +1139,19 @@ def run_proxy(cfg, cwd, sdir, logpath):
         t = threading.Thread(target=watcher.run, daemon=True)
         t.start()
 
-    # Circuit breaker: a second daemon thread evaluating subagent transcripts
-    # (observe mode). Shares the context watcher's poll cadence. Optional and
-    # best-effort — an absent lib/ or a tick error never affects the session.
+    # Circuit breaker: a second daemon thread evaluating subagent transcripts.
+    # Alerts always; injects a Tier-A nudge only when CCB_MAX_TIER>=nudge on a
+    # teams session (the default rollout is observe = alert-only). Shares the
+    # context watcher's poll cadence. Optional and best-effort — an absent lib/
+    # or a tick error never affects the session.
     ccb_watcher = None
     if cfg.enabled and _ccb_watch is not None and _ccb_types is not None:
-        ccb_watcher = SubagentWatcher(cfg.poll, cwd, sdir, logf)
+        # Share the pty master + write_lock so a Tier-A nudge serializes against
+        # the context watcher and the bypass auto-accepter; gate injection on
+        # the same tui_ready event the accept path drives (Task 12 Step 2).
+        ccb_watcher = SubagentWatcher(cfg.poll, cwd, sdir, logf,
+                                      master_fd=master_fd, write_lock=write_lock,
+                                      ready_event=watcher.tui_ready)
         threading.Thread(target=ccb_watcher.run, daemon=True).start()
 
     signal.signal(signal.SIGWINCH, lambda *_: set_winsize(master_fd))
