@@ -188,3 +188,29 @@ def test_open_task_count_none_when_no_task_dir(tmp_path):
 
     # None = "not a teams session / no task info" (V10 gates on this), distinct from 0.
     assert open_task_count(tmp_path, session_id="deadbeef-0000-0000-0000-000000000000") is None
+
+
+def test_session_cost_lookup_falls_back_when_tokenol_unreachable(monkeypatch):
+    from lib.subagent_watch import session_cost_usd
+    import urllib.error
+
+    def raise_conn_error(*a, **kw):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", raise_conn_error)
+    # Falls back to None (unknown), never raises — the watcher must degrade
+    # gracefully when tokenol's serve isn't running.
+    assert session_cost_usd(session_id="abc123", tokenol_base_url="http://localhost:8787") is None
+
+
+def test_session_cost_lookup_falls_back_on_non_dict_response(monkeypatch):
+    from lib.subagent_watch import session_cost_usd
+
+    class FakeResp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b"[]"  # a list, not the expected dict shape
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **kw: FakeResp())
+    # Must not raise AttributeError when the API returns an unexpected shape.
+    assert session_cost_usd(session_id="abc123", tokenol_base_url="http://localhost:8787") is None

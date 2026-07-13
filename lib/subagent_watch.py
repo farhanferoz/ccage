@@ -4,6 +4,8 @@ Pure logic only: no pty, no threads. bin/ccage-auto owns wiring.
 """
 import json
 import re
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -157,3 +159,25 @@ def open_task_count(config_root: Path, session_id: str, team_name: str | None = 
         if status in _OPEN_STATUSES:
             n += 1
     return n
+
+
+def session_cost_usd(session_id: str, tokenol_base_url: str) -> float | None:
+    """Whole-session cost (parent + ALL subagents merged) — tokenol cannot
+    scope to one subagent (V3). Annotation only; never a per-agent decision
+    input.
+
+    Returns None (never raises) if tokenol's serve isn't running, the
+    session isn't found, or the response isn't shaped as expected — the
+    watcher must degrade to time-only detection rather than crash when
+    tokenol is unavailable or returns something unexpected.
+    """
+    url = f"{tokenol_base_url}/api/session/{session_id}"
+    try:
+        with urllib.request.urlopen(url, timeout=3) as resp:
+            data = json.loads(resp.read())
+        if not isinstance(data, dict):
+            return None
+        totals = data.get("totals")
+        return totals.get("cost_usd") if isinstance(totals, dict) else None
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError, AttributeError):
+        return None
