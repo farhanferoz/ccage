@@ -1,20 +1,130 @@
 # Circuit Breaker (subagent watchdog) — feature doc
 
-> **Status:** Phase 1 complete & verified (52/52 tests) — detection + telemetry
-> + `ccb-report` + the watcher wired into `ccage-auto` (Task 11:
-> a `SubagentWatcher` daemon thread delegating to the unit-tested
-> `lib.subagent_watch.run_tick`) — **plus the non-destructive Tier A nudge now
-> built** (Tasks 12–13): spike S1 resolved the pty-write bytes, so a stuck
-> teammate on a `CCB_MAX_TIER>=nudge` teams session gets one injected
-> vouch/stop directive per breach (the injector shares the pty master + write
-> lock with the context watcher and the bypass auto-accepter, gates on
-> `tui_ready`, collapses newlines to the S1-verified single-line submit shape,
-> and rate-limits to one injection per poll). Every ledger row also captures the
-> **orchestrator model** so vouch-trust can later key on capability tier, never a
-> hardcoded model. The **default rollout is still observe = alert-only**; the
-> **destructive Tiers B/C (stop/kill) stay gated** on the attended Task 17
-> live-fire. This doc currently holds the **spike findings**; the full ladder /
-> config / vouch-protocol sections land with Task 16.
+> **Status:** the full ladder is **built and unit-verified (61/61 tests)** —
+> detection + telemetry + `ccb-report` + the `SubagentWatcher` thread wired into
+> `ccage-auto`, plus all four tiers: **Observe** (alert), **A/nudge**, **B/stop**,
+> **C/kill** (Tasks 11–15). All decision logic is the pure, unit-tested
+> `lib.subagent_watch`; the bin owns only the two side effects (pty `inject`, pid
+> `kill_session`). Every ledger row captures the **orchestrator model** so
+> vouch-trust can later key on capability tier, never a hardcoded model.
+>
+> **What is NOT yet done:** the attended **Task 17 live-fire** (the gate for
+> raising the shipped default past `observe` and for flipping the Tier-C default
+> on), and deploying `lib/` via `install.sh`. Until the lib is deployed, the
+> breaker is **fully inert in installed cages** (`_load_ccb()` finds no `lib/` →
+> no `SubagentWatcher`). Treat B/C as validated-in-unit-tests-only until Task 17.
+
+## 1. The ladder
+
+Every stuck-teammate breach climbs the same ladder. A step is taken only after
+**two consecutive breach polls** (debounce), and **at most one step per poll**. A
+breach that clears on its own, or a vouch, de-escalates the agent back toward
+`running` — no state is a trap. Nothing above the configured `CCB_MAX_TIER` is
+ever emitted (`evaluate` caps it), so the ceiling is a hard cap, not a hint.
+
+| Tier | Phase reached | Trigger | Action | Reversible? |
+|---|---|---|---|---|
+| **Observe** | `suspect` | breach ×2 | one **alert** → RESUME + log + notify | yes (clears → `running`) |
+| **A — nudge** | `nudged` | tier ≥ `nudge` | inject the vouch/stop **nudge** into the orchestrator's pty; start the grace clock | yes (recover or vouch → `running`/`vouched`) |
+| **B — stop** | `stop_requested` | nudge grace expired, no vouch, tier ≥ `stop` | inject the **stop directive**; verify via the `CCB-STOPPED` marker | yes (recover → `running`; verified → `resolved`) |
+| **C — kill** | `escalated` | stop grace expired **and** `kill_permitted` | pre-kill salvage dump → notify → **SIGTERM the session**; else re-issue stop once + `escalate_blocked` | terminal |
+
+**Operating rule — measure before you escalate.** The whole point of the ledger
+(§4) is that thresholds are *tuned from data*, not guessed. Run in `observe` first,
+read `ccb-report`, and only raise the tier once the healthy-agent peak
+distributions show the thresholds won't fire on legitimate long work.
+
+**Completion always wins.** A teammate that finished (in-band `idle_notification`,
+S4) or was verifiably stopped (`CCB-STOPPED`) resolves from *any* phase and is
+never flagged again — the v1 "completed agent re-flagged later" bug class is
+closed. Completion (idle) is reversible (a later write returns it to watch);
+a verified stop is terminal (S2: `TaskStop` ends the turn).
+
+## 2. Configuration
+
+All via environment, read once at watcher start (`CCBConfig.from_env`). Garbage
+or absent values keep the default — the watcher never crashes on config.
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `CCB_MAX_TIER` | `stop` (code) / **`observe` (rollout)** | ceiling: `observe` \| `nudge` \| `stop` \| `kill` |
+| `CCB_T_SOFT_MIN` | `45` | quiet-stuck elapsed floor (min) |
+| `CCB_T_STALE_MIN` | `10` | transcript-quiet floor for quiet-stuck (min) |
+| `CCB_T_HARD_MIN` | `120` | churn-stuck elapsed floor — catches constant-writers (min) |
+| `CCB_GRACE_MIN` | `10` | grace between ladder steps (min) |
+| `CCB_PARENT_STALE_MIN` | `15` | orchestrator-unresponsive floor for Tier C (min) |
+| `CCB_MAX_VOUCHES` | `2` | vouches honoured per agent before the ladder ignores them |
+| `CCB_NOTIFY_CMD` | *(none)* | shell command fed each alert on stdin (e.g. a Telegram hook) |
+| `CCB_TOKENOL_URL` | `http://localhost:8787` | tokenol base URL for whole-session cost |
+| `CCB_LEDGER` | `~/.local/share/ccage/ccb/events.jsonl` | telemetry ledger path (read by `ccb-report`) |
+
+## 3. Vouch / stop marker protocol
+
+The orchestrator talks back to the breaker with two exact-grammar markers, matched
+verbatim out of the parent transcript (regex over the raw line — nested content
+can't hide one):
+
+- **Extend a legitimately long teammate:** `CCB-VOUCH agent=<teammate_id> extend=<minutes>`
+  — de-escalates to `vouched` and shifts *both* the quiet and churn floors by
+  `<minutes>`. Honoured up to `CCB_MAX_VOUCHES` times, then ignored (a genuinely
+  runaway agent can't be vouched forever). ⚠ A vouch is trust-based: it extends
+  the budget, it does not prove work is happening (Task 4 note).
+- **Confirm a stop:** `CCB-STOPPED agent=<teammate_id>` — the only reliable
+  stop-verification signal, because S2 showed a stopped teammate leaves no
+  distinct on-disk terminal marker. Moves the agent to `resolved` (terminal).
+
+`<teammate_id>` is the authoritative `.meta.json` `"name"`, never the transcript
+filename (Task 3 / V11).
+
+## 4. Telemetry ledger + `ccb-report`
+
+One JSON line per decision is appended to `CCB_LEDGER`, durable across sessions.
+Event kinds: `alert`, `nudge`, `vouch`, `stop`, `stop_verified`, `escalate_blocked`,
+`kill`, `resolved` (the last also emitted for healthy never-flagged agents, so the
+baseline peak distributions have data). Each row carries: `ts`, `event`,
+`session_id`, `cwd`, `agent`, `teammate_id`, `phase`, `orchestrator_model`,
+`elapsed_min`, `stale_min`, `session_cost_usd`, `open_tasks`, `vouches_used`,
+`extension_min`, `peak_elapsed_min`, `peak_stale_min`, and a `cfg` snapshot of the
+thresholds in force.
+
+`bin/ccb-report [--ledger PATH] [--project SUBSTR] [--json]` aggregates it into the
+review: agents seen, nudges, **false positives** (nudge → vouch → finished fine),
+**true positives** (nudge → stop/kill), kills, `escalate_blocked` count, and the
+healthy-agent p50/p95 of peak elapsed/stale — the numbers you tune the thresholds
+against. Every Task 17 scenario must be reconstructible from the ledger alone.
+
+## 5. Scope & caveats
+
+- **Teams sessions only (V10).** A non-teams session can't produce the in-band
+  completion signal the higher tiers rely on, so the breaker is *forced to
+  `observe`* there (alert-only) regardless of `CCB_MAX_TIER` — a stuck agent is
+  still surfaced, never nudged/stopped/killed on a session whose completion we
+  can't read.
+- **Session-merged cost (V3).** `session_cost_usd` is the whole session (parent +
+  all subagents); tokenol can't scope to one teammate. It's annotation only, never
+  a per-agent decision input.
+- **Orphaned shell children (S2).** `TaskStop` ends a teammate's *turn* but can
+  leave its `Bash` sub-processes running (they keep costing) — the stop directive
+  says so and asks the orchestrator to clean them up. There is no per-teammate OS
+  process to kill (S3: in-process teammates), so Tier C's only OS lever is killing
+  the whole session.
+- **Kill is for a wedged orchestrator, not a stuck teammate.** Tier C SIGTERMs the
+  session only when the orchestrator's *own* transcript has gone quiet past
+  `CCB_PARENT_STALE_MIN` — sound because a wedged orchestrator can't consume the
+  queued nudge/stop (S1), so its transcript stays quiet, whereas a live one
+  consumes it and resets the clock. A live orchestrator is never killed.
+
+## 6. Enabling it (rollout + the Tier-C default-flip criterion)
+
+1. `install.sh` deploys `lib/` beside `bin/ccage-auto` (else the breaker is inert).
+2. Run at `CCB_MAX_TIER=observe` and collect a ledger across real teams sessions.
+3. `ccb-report` → confirm healthy p95 sits comfortably under the thresholds; raise
+   to `nudge`, then `stop`, watching the false-positive count stay ~zero.
+4. **Tier-C default flip** — only after the attended **Task 17** live-fire passes
+   every scenario (stuck-quiet, healthy+vouch, churner, completed-agent regression,
+   unresponsive-orchestrator KILL with a *verified* resume-from-dump, restart
+   safety, ledger completeness): flip the shipped `CCBConfig` default and this doc
+   from `stop` to `kill` in a dedicated commit.
 
 ## Spike findings (Phase 0)
 
