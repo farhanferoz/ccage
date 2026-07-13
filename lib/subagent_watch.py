@@ -3,9 +3,12 @@
 Pure logic only: no pty, no threads. bin/ccage-auto owns wiring.
 """
 import dataclasses
+import fcntl
 import json
 import os
 import re
+import subprocess
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -333,3 +336,49 @@ def load_state(path: Path) -> WatchState:
         return WatchState(agents=agents, parent_scan=parent_scan)
     except (OSError, ValueError, KeyError):
         return WatchState()
+
+
+_RESUME_ALERT_HEADING = "### Stuck-subagent alerts"
+_FLOCK_RETRIES = 3
+_FLOCK_RETRY_DELAY_S = 0.2
+
+
+def append_resume_alert(path: Path, line: str) -> None:
+    """Append one alert line to RESUME.md under a dedicated heading,
+    flock-guarded against the other writers touching this file (the
+    existing context watcher, /checkpoint). A delayed alert beats a
+    corrupted RESUME: on repeated lock failure, skip this tick silently.
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with path.open("a+") as f:
+        for attempt in range(_FLOCK_RETRIES):
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if attempt == _FLOCK_RETRIES - 1:
+                    return  # skip this tick rather than write unsynchronized
+                time.sleep(_FLOCK_RETRY_DELAY_S)
+        try:
+            f.seek(0)
+            text = f.read()
+            if _RESUME_ALERT_HEADING not in text:
+                f.seek(0, os.SEEK_END)
+                f.write(f"\n{_RESUME_ALERT_HEADING}\n")
+            f.seek(0, os.SEEK_END)
+            f.write(f"- {now_iso} {line}\n")
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def notify(cfg: CCBConfig, msg: str) -> None:
+    """Best-effort external notification (e.g. the user's Telegram hook);
+    must never raise or hang the watcher even if the configured command is
+    broken, missing, or misbehaving."""
+    if not cfg.notify_cmd:
+        return
+    try:
+        subprocess.run(cfg.notify_cmd, shell=True, input=msg.encode(),
+                       timeout=10, capture_output=True)
+    except Exception:
+        pass

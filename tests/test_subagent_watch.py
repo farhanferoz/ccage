@@ -387,3 +387,34 @@ def test_load_state_missing_or_corrupt_returns_fresh(tmp_path):
     bad = tmp_path / "bad.json"
     bad.write_text("{truncated")
     assert load_state(bad).agents == {}   # never crash the watcher
+
+
+def test_resume_alert_appends_under_heading_with_flock(tmp_path):
+    from lib.subagent_watch import append_resume_alert
+
+    resume = tmp_path / "RESUME.md"
+    resume.write_text("# RESUME\n\n## State\n- fine\n")
+    append_resume_alert(resume, "watch: teammate sr6 nudged at 92min (session $41.20)")
+    append_resume_alert(resume, "watch: teammate sr6 stop requested at 104min")
+
+    text = resume.read_text()
+    assert text.count("### Stuck-subagent alerts") == 1     # heading created once
+    assert "sr6 nudged" in text and "stop requested" in text
+
+
+def test_notify_cmd_receives_message_on_stdin(tmp_path):
+    from lib.ccb_types import CCBConfig
+    from lib.subagent_watch import notify
+
+    out = tmp_path / "sink.txt"
+    cfg = CCBConfig(notify_cmd=f"cat > {out}")
+    notify(cfg, "teammate sr6 nudged")
+    assert out.read_text() == "teammate sr6 nudged"
+
+
+def test_notify_never_raises_on_broken_cmd():
+    from lib.ccb_types import CCBConfig
+    from lib.subagent_watch import notify
+
+    notify(CCBConfig(notify_cmd="/no/such/binary"), "x")   # must not raise
+    notify(CCBConfig(notify_cmd=None), "x")                # no-op
