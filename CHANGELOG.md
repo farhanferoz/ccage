@@ -2,6 +2,16 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.11.0] — 2026-07-13
+
+### Added — circuit breaker: a stuck-subagent watchdog for `ccage-auto`
+- **`ccage-auto` now runs a second daemon thread that watches Agent-Teams subagent transcripts and escalates on a stuck teammate through a tier ladder — `observe → nudge → stop → kill`.** It ships **deployed at `observe`** (alert-only): the watcher appends a bounded alert to `RESUME.md`, logs it, and optionally fires `CCB_NOTIFY_CMD`, but never touches the session. The acting tiers are opt-in via `CCB_MAX_TIER` and only ever act on a teams session whose completion signal is readable. All decision logic lives in the unit-tested `lib/subagent_watch.py` (`evaluate` / `run_tick`); `bin/ccage-auto` owns only the two side effects — a pty nudge injection and a `SIGTERM` session kill — and degrades to a no-op if the lib was not deployed, so the core auto-checkpoint loop is never affected.
+- **A telemetry ledger + `ccb-report`.** Every alert/nudge/stop/kill and every healthy-agent completion is appended to a durable JSONL ledger (`$CCB_LEDGER`, default `~/.local/share/ccage/ccb/events.jsonl`); the new `ccb-report` CLI aggregates it into true/false-positive counts and healthy-agent peak distributions, so the thresholds (`CCB_T_SOFT_MIN`, `CCB_T_STALE_MIN`, `CCB_T_HARD_MIN`, `CCB_GRACE_MIN`, …) can be tuned against real runs. `install.sh` deploys `lib/` to `share/ccage/lib` and `ccb-report` to `<prefix>/bin`.
+- **Fail-safe by construction.** `CCBConfig` defaults to `observe` and `from_env` normalizes + falls back to `observe` on any absent/garbage/mis-cased `CCB_MAX_TIER`, so an operator typo during opt-up can never silently land on a more permissive acting tier. `run_tick` advances an agent past a tier only once the pty injection actually lands (an undelivered nudge/stop reverts and re-fires next tick, so the grace clock starts on delivery). `teammate_id` is allowlisted at the `agent_meta` trust boundary before it reaches `RESUME.md` (auto-injected into the next session) or the pty. Unreadable/missing transcripts, a down tokenol, a broken notify command, and a corrupt state file are all handled conservatively — the breaker never takes down the session it guards.
+
+### Tests
+- New `tests/test_subagent_watch.py` (65 cases) covers the state machine, the tier ladder, delivery gating, config fail-safety, id sanitization, the telemetry ledger, and `ccb-report`. `tests/test_autock.bats` gains pty live-fire cases: a real `ccage-auto` process injects a real Tier-A nudge over the pty, and observe tier alerts without ever injecting.
+
 ## [0.10.0] — 2026-07-11
 
 ### Added — autonomous runs block `AskUserQuestion` mid-run
