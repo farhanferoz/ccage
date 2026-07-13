@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""ccb-report — turn the circuit-breaker telemetry ledger into an evaluation
+and threshold-tuning report.
+
+Answers: is the breaker working (true/false-positive counts), and what should
+the thresholds be (healthy-agent peak distributions vs current CCB_* config)?
+Reads the durable ledger written by lib.subagent_watch.ledger_write (Task 10b).
+See docs/CIRCUIT-BREAKER.md. Aggregation lives in lib/ (unit-tested); this is a
+thin CLI wrapper.
+"""
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from lib.subagent_watch import summarize_ledger  # noqa: E402
+
+DEFAULT_LEDGER = Path(
+    os.environ.get("CCB_LEDGER", "~/.local/share/ccage/ccb/events.jsonl")
+).expanduser()
+
+
+def _fmt(x: float | None) -> str:
+    return "n/a" if x is None else f"{x:.0f}"
+
+
+def _print_human(s: dict, ledger: Path) -> None:
+    print(f"ccb-report  ({ledger})")
+    if not s["agents_seen"]:
+        print("  no ledger data yet — run Phase 1 in observe mode to collect a baseline.")
+        return
+    print(f"  agents seen: {s['agents_seen']}   nudges: {s['nudges']}   "
+          f"kills: {s['kills']}   escalate-blocked: {s['escalate_blocked']}")
+    print(f"  after nudge:  vouched (false-pos): {s['vouched_after_nudge']}   "
+          f"stopped (true-pos): {s['stopped_after_nudge']}")
+    if s["healthy_count"]:
+        print(f"  healthy agents ({s['healthy_count']}): "
+              f"peak elapsed p50={_fmt(s['healthy_peak_elapsed_p50'])} "
+              f"p95={_fmt(s['healthy_peak_elapsed_p95'])} min | "
+              f"peak stale p95={_fmt(s['healthy_peak_stale_p95'])} min")
+        print(f"  tuning hint: keep CCB_T_HARD_MIN >= healthy p95 elapsed "
+              f"({_fmt(s['healthy_peak_elapsed_p95'])}) so normal long agents are not flagged.")
+    else:
+        print("  healthy agents: 0 (no clean baseline yet).")
+    for cwd, ps in sorted(s.get("per_project", {}).items()):
+        print(f"  [{cwd}]  agents={ps['agents_seen']} nudges={ps['nudges']} "
+              f"FP={ps['vouched_after_nudge']} TP={ps['stopped_after_nudge']} "
+              f"kills={ps['kills']} healthy_p95_elapsed={_fmt(ps['healthy_peak_elapsed_p95'])}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="Circuit-breaker ledger evaluation report.")
+    ap.add_argument("--ledger", type=Path, default=DEFAULT_LEDGER,
+                    help="ledger path (default: $CCB_LEDGER or ~/.local/share/ccage/ccb/events.jsonl)")
+    ap.add_argument("--project", help="only show per-project sections whose cwd contains this substring")
+    ap.add_argument("--json", action="store_true", help="machine-readable JSON output")
+    args = ap.parse_args(argv)
+
+    summary = summarize_ledger(args.ledger)
+    if args.project:
+        summary["per_project"] = {k: v for k, v in summary.get("per_project", {}).items()
+                                  if args.project in k}
+    if args.json:
+        print(json.dumps(summary, indent=2))
+    else:
+        _print_human(summary, args.ledger)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

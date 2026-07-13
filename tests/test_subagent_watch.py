@@ -461,3 +461,51 @@ def test_ledger_write_never_raises_on_unwritable_path():
                  session_id="s", cwd="/x", elapsed_min=1, stale_min=1,
                  session_cost_usd=None, open_tasks=None,
                  now_iso="2026-07-13T12:00:00+00:00")  # must not raise
+
+
+def test_report_aggregates_outcomes_and_percentiles(tmp_path):
+    import json
+    from lib.subagent_watch import summarize_ledger
+
+    ledger = tmp_path / "events.jsonl"
+    rows = [
+        # healthy agent, never flagged: baseline data
+        {"event": "resolved", "teammate_id": "ok1", "cwd": "/p", "peak_elapsed_min": 80.0,
+         "peak_stale_min": 4.0, "vouches_used": 0, "ts": "2026-07-13T10:00:00+00:00"},
+        # flagged, vouched, finished fine: FALSE POSITIVE
+        {"event": "nudge", "teammate_id": "long1", "cwd": "/p", "peak_elapsed_min": 130.0,
+         "peak_stale_min": 12.0, "vouches_used": 0, "ts": "2026-07-13T10:10:00+00:00"},
+        {"event": "vouch", "teammate_id": "long1", "cwd": "/p", "peak_elapsed_min": 130.0,
+         "peak_stale_min": 12.0, "vouches_used": 1, "ts": "2026-07-13T10:12:00+00:00"},
+        {"event": "resolved", "teammate_id": "long1", "cwd": "/p", "peak_elapsed_min": 200.0,
+         "peak_stale_min": 12.0, "vouches_used": 1, "ts": "2026-07-13T11:30:00+00:00"},
+        # flagged, stopped: TRUE POSITIVE
+        {"event": "nudge", "teammate_id": "stuck1", "cwd": "/p", "peak_elapsed_min": 125.0,
+         "peak_stale_min": 60.0, "vouches_used": 0, "ts": "2026-07-13T12:00:00+00:00"},
+        {"event": "stop", "teammate_id": "stuck1", "cwd": "/p", "peak_elapsed_min": 140.0,
+         "peak_stale_min": 75.0, "vouches_used": 0, "ts": "2026-07-13T12:11:00+00:00"},
+        {"event": "stop_verified", "teammate_id": "stuck1", "cwd": "/p",
+         "peak_elapsed_min": 141.0, "peak_stale_min": 75.0, "vouches_used": 0,
+         "ts": "2026-07-13T12:14:00+00:00"},
+    ]
+    ledger.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+    s = summarize_ledger(ledger)
+    assert s["agents_seen"] == 3
+    assert s["nudges"] == 2
+    assert s["vouched_after_nudge"] == 1      # false-positive count
+    assert s["stopped_after_nudge"] == 1      # true-positive count
+    assert s["kills"] == 0
+    assert s["healthy_peak_elapsed_p95"] >= 80.0   # threshold-tuning input
+
+
+def test_report_handles_empty_or_corrupt_ledger(tmp_path):
+    from lib.subagent_watch import summarize_ledger
+
+    empty = tmp_path / "none.jsonl"
+    assert summarize_ledger(empty)["agents_seen"] == 0
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text("not json\n" + '{"event": "resolved", "teammate_id": "a", "cwd": "/p", '
+                   '"peak_elapsed_min": 1, "peak_stale_min": 1, "vouches_used": 0, '
+                   '"ts": "2026-07-13T10:00:00+00:00"}\n')
+    assert summarize_ledger(bad)["agents_seen"] == 1   # skips bad lines, never raises

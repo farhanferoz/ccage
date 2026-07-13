@@ -405,3 +405,87 @@ def ledger_write(path: Path, event: EventKind, rec, cfg, *, session_id: str, cwd
             f.write(json.dumps(row) + "\n")
     except OSError:
         pass
+
+
+# --- Task 18: ledger evaluation / threshold-tuning report -------------------
+
+_FLAG_EVENTS = frozenset({EventKind.NUDGE, EventKind.ALERT, EventKind.STOP,
+                          EventKind.STOP_VERIFIED, EventKind.KILL, EventKind.ESCALATE_BLOCKED})
+_STOP_LIKE = frozenset({EventKind.STOP, EventKind.STOP_VERIFIED})
+
+
+def _percentile(values: list[float], q: float) -> float | None:
+    """Linear-interpolation percentile (q in [0, 1]); None on empty input.
+    A single value returns itself — avoids statistics.quantiles' n>=2 rule so
+    the very first healthy agent still yields a usable baseline."""
+    s = sorted(values)
+    if not s:
+        return None
+    pos = q * (len(s) - 1)
+    lo = int(pos)
+    hi = min(lo + 1, len(s) - 1)
+    return s[lo] + (s[hi] - s[lo]) * (pos - lo)
+
+
+def _summarize_groups(gdict: dict) -> dict:
+    """One group = every ledger event for a single (cwd, teammate_id). Classify
+    each agent's outcome and roll up counts + the healthy-agent peak
+    distributions (the data thresholds should be tuned against)."""
+    nudges = kills = 0
+    vouched_after_nudge = stopped_after_nudge = escalate_blocked = 0
+    healthy_elapsed: list[float] = []
+    healthy_stale: list[float] = []
+    for events in gdict.values():
+        kinds = {e.get("event") for e in events}
+        nudges += sum(1 for e in events if e.get("event") == EventKind.NUDGE)
+        kills += sum(1 for e in events if e.get("event") == EventKind.KILL)
+        if EventKind.ESCALATE_BLOCKED in kinds:
+            escalate_blocked += 1
+        if EventKind.NUDGE in kinds:
+            if kinds & _STOP_LIKE or EventKind.KILL in kinds:
+                stopped_after_nudge += 1          # true positive: nudge -> stop/kill
+            elif EventKind.VOUCH in kinds:
+                vouched_after_nudge += 1           # false positive: nudge -> vouch, finished fine
+        if not kinds & _FLAG_EVENTS:               # never flagged => healthy baseline
+            healthy_elapsed.append(max((e.get("peak_elapsed_min") or 0.0) for e in events))
+            healthy_stale.append(max((e.get("peak_stale_min") or 0.0) for e in events))
+    return {
+        "agents_seen": len(gdict),
+        "nudges": nudges,
+        "vouched_after_nudge": vouched_after_nudge,   # false-positive count
+        "stopped_after_nudge": stopped_after_nudge,   # true-positive count
+        "kills": kills,
+        "escalate_blocked": escalate_blocked,
+        "healthy_count": len(healthy_elapsed),
+        "healthy_peak_elapsed_p50": _percentile(healthy_elapsed, 0.50),
+        "healthy_peak_elapsed_p95": _percentile(healthy_elapsed, 0.95),
+        "healthy_peak_stale_p50": _percentile(healthy_stale, 0.50),
+        "healthy_peak_stale_p95": _percentile(healthy_stale, 0.95),
+    }
+
+
+def summarize_ledger(path: Path) -> dict:
+    """Aggregate the telemetry ledger (Task 10b) into the evaluation the user
+    asked for: is the breaker working, what did it cost, what should the
+    thresholds be? Groups by (cwd, teammate_id); best-effort — skips corrupt
+    lines, never raises. Returns the flat rollup plus a per_project breakdown."""
+    groups: dict = {}
+    try:
+        with path.open() as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    row = json.loads(raw)
+                except ValueError:
+                    continue
+                groups.setdefault((row.get("cwd", ""), row.get("teammate_id", "")), []).append(row)
+    except OSError:
+        pass
+    out = _summarize_groups(groups)
+    projects: dict = {}
+    for (cwd, tid), events in groups.items():
+        projects.setdefault(cwd, {})[(cwd, tid)] = events
+    out["per_project"] = {cwd: _summarize_groups(g) for cwd, g in projects.items()}
+    return out
