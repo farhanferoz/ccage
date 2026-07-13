@@ -520,6 +520,36 @@ a Claude Code build with self-scheduling wake-ups (the mechanism behind the bund
 
 ---
 
+## Subagent circuit breaker [in ccage-auto; observe-mode]
+
+A second daemon thread inside `ccage-auto` (`SubagentWatcher`) that watches every
+teammate transcript for a *runaway* subagent — one running far past its expected
+budget with a quiet transcript, or churning past the hard ceiling — and climbs a
+reversible ladder: **alert → nudge → stop → kill**. All decision logic lives in the
+unit-tested `lib/subagent_watch.py`; the thread owns only the poll loop and the two
+side effects (inject a message into the orchestrator's pty; SIGTERM the session as a
+last resort when the orchestrator itself is wedged). The orchestrator talks back
+with `CCB-VOUCH agent=<id> extend=<min>` (extend a legitimately long teammate) and
+`CCB-STOPPED agent=<id>` (confirm a stop). Every decision is appended to a durable
+JSONL ledger that `bin/ccb-report` turns into a false-positive/true-positive +
+threshold-tuning report.
+
+**Full reference:** [`docs/CIRCUIT-BREAKER.md`](CIRCUIT-BREAKER.md) — the ladder,
+config table, marker grammar, ledger schema, scope limits, and the rollout/enable
+procedure.
+
+- **Inert unless the lib is deployed.** `ccage-auto`'s `_load_ccb()` looks for
+  `lib/` beside the binary (repo layout, or `share/ccage/lib` when installed); if
+  it isn't there the watcher is never constructed and core auto-checkpointing is
+  untouched.
+- **Teams sessions only, `observe` by default.** Non-teams sessions are forced to
+  alert-only (they lack the completion signal the higher tiers need). Config is all
+  `CCB_*` env vars (see the reference); `CCB_NOTIFY_CMD` reuses the same Telegram
+  hook wiring as the context watcher (user config, machine-specific — not in the
+  repo).
+
+---
+
 ## `ccusage-all` [shipped]
 
 Function defined in `share/claude-ccusage.sh`. Iterates every `$CCAGE_ROOT/$CCAGE_PREFIX*` directory with a `projects/` subdir, exports `CLAUDE_CONFIG_DIR`, and runs `npx -y ccusage "$@"` against each.

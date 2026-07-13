@@ -610,3 +610,122 @@ PY
     [ ! -f "$SDIR/autonomous-settings.json" ]
     cap_has "b'ENV_CCAGE_AUTONOMOUS=1'"
 }
+
+# ---- Circuit-breaker live-fire (Task 17: scripted) --------------------------
+# Drives the REAL ccage-auto process with a fake claude that (a) renders the
+# ready-marker, (b) keeps the parent transcript at low occupancy AND marks it a
+# teams session (a teammate-message), and (c) plants a stuck teammate transcript.
+# The SubagentWatcher thread must then inject a Tier-A nudge over the real pty —
+# the one seam the pure run_tick unit tests can't reach (run_proxy wiring the
+# master_fd / write_lock / ready_event / pid into the watcher, the thread, and a
+# real pty write). Context thresholds are pinned high so the ONLY injection is
+# the breaker's.
+
+make_cb_fake_claude() {
+    cat > "$1" <<'PY'
+import json, os, select, sys, time
+from datetime import datetime, timezone
+
+sdir = os.environ["FAKE_SDIR"]
+subs = os.path.join(sdir, "subagents")
+os.makedirs(subs, exist_ok=True)
+now = time.time()
+parent = os.path.join(sdir, "sess.jsonl")
+
+def write_parent():
+    # Low occupancy (context watcher stays idle) + a teammate-message so the CB
+    # sees a teams session. Re-written each loop so its mtime stays newer than the
+    # watcher's start_time (active_jsonl's `since` filter).
+    low = 20000; half = low // 2
+    turn = {"type": "assistant", "message": {
+        "model": "claude-opus-4-8",
+        "usage": {"input_tokens": half, "cache_read_input_tokens": low - half,
+                  "cache_creation_input_tokens": 0},
+        "content": [{"type": "text", "text": "orchestrating"}]}}
+    tm = {"type": "user", "message": {"role": "user",
+          "content": '<teammate-message teammate_id="cb-stuck">status?</teammate-message>'}}
+    with open(parent, "a") as f:
+        f.write(json.dumps(turn) + "\n")
+        f.write(json.dumps(tm) + "\n")
+
+write_parent()
+
+# One stuck teammate: first line 10 min old (elapsed), transcript quiet 10 min
+# (staleness) — breaches CCB_T_SOFT_MIN/CCB_T_STALE_MIN=1. Never touched again.
+stuck = os.path.join(subs, "agent-cb-stuck.jsonl")
+old_iso = datetime.fromtimestamp(now - 600, timezone.utc).isoformat()
+with open(stuck, "w") as f:
+    f.write(json.dumps({"type": "assistant", "timestamp": old_iso}) + "\n")
+with open(os.path.join(subs, "agent-cb-stuck.meta.json"), "w") as f:
+    f.write(json.dumps({"name": "cb-stuck", "teamName": "session-fake1234",
+                        "taskKind": "in_process_teammate"}))
+os.utime(stuck, (now - 600, now - 600))
+
+# Render the TUI ready-marker so the watcher's tui_ready gate opens (a real TUI
+# prints it; the CB injector refuses to type before it does).
+sys.stdout.write("❯ ")
+sys.stdout.flush()
+
+cap = open(os.environ["FAKE_CAPTURE"], "ab", buffering=0)
+buf = b""
+deadline = time.time() + float(os.environ.get("FAKE_DEADLINE", "30"))
+while time.time() < deadline:
+    r, _, _ = select.select([0], [], [], 0.3)
+    if 0 in r:
+        try:
+            d = os.read(0, 65536)
+        except OSError:
+            break
+        if not d:
+            break
+        cap.write(d); buf += d
+    if b"ccage circuit-breaker" in buf:      # the Tier-A nudge landed
+        time.sleep(0.3)
+        break
+    write_parent()                            # keep the parent transcript live
+sys.exit(0)
+PY
+}
+
+@test "cb live-fire: a stuck teammate gets a Tier-A nudge injected over the real pty" {
+    STUB="$BATS_TEST_TMPDIR/cbfake.py"
+    CAP="$BATS_TEST_TMPDIR/cbcapture.bin"
+    LEDGER="$BATS_TEST_TMPDIR/ccb-ledger.jsonl"
+    make_cb_fake_claude "$STUB"
+    : > "$CAP"
+    run bash -c "cd '$REPO' && \
+        CCAGE_AUTOCK_NO_BYPASS_ACCEPT=1 \
+        CCAGE_AUTOCK_EXEC='python3 \"$STUB\"' \
+        FAKE_SDIR='$SDIR' FAKE_CAPTURE='$CAP' FAKE_DEADLINE=25 \
+        CCB_MAX_TIER=nudge CCB_T_SOFT_MIN=1 CCB_T_STALE_MIN=1 \
+        CCB_LEDGER='$LEDGER' \
+        '$AUTO' --soft 90 --hard 95 --poll 1 </dev/null"
+    [ "$status" -eq 0 ]
+    # The breaker's nudge bytes reached the child's pty, carrying the vouch grammar.
+    cap_has "b'ccage circuit-breaker'"
+    cap_has "b'CCB-VOUCH agent=cb-stuck'"
+    ! cap_has "b'auto-checkpoint'"                       # context watcher stayed idle
+    grep -q "\[ccb\] injected nudge" "$CAGE/ccage-autock.log"
+    # Ledger telemetry: the alert + nudge for this teammate are recorded.
+    grep -q '"event": "nudge"' "$LEDGER"
+    grep -q '"teammate_id": "cb-stuck"' "$LEDGER"
+}
+
+@test "cb live-fire: observe tier alerts but never injects a nudge" {
+    STUB="$BATS_TEST_TMPDIR/cbfake.py"
+    CAP="$BATS_TEST_TMPDIR/cbcapture.bin"
+    LEDGER="$BATS_TEST_TMPDIR/ccb-ledger.jsonl"
+    make_cb_fake_claude "$STUB"
+    : > "$CAP"
+    run bash -c "cd '$REPO' && \
+        CCAGE_AUTOCK_NO_BYPASS_ACCEPT=1 \
+        CCAGE_AUTOCK_EXEC='python3 \"$STUB\"' \
+        FAKE_SDIR='$SDIR' FAKE_CAPTURE='$CAP' FAKE_DEADLINE=8 \
+        CCB_MAX_TIER=observe CCB_T_SOFT_MIN=1 CCB_T_STALE_MIN=1 \
+        CCB_LEDGER='$LEDGER' \
+        '$AUTO' --soft 90 --hard 95 --poll 1 </dev/null"
+    [ "$status" -eq 0 ]
+    ! cap_has "b'ccage circuit-breaker'"                 # observe = alert-only, no pty write
+    grep -q '"event": "alert"' "$LEDGER"                 # but the alert IS recorded
+    ! grep -q '"event": "nudge"' "$LEDGER"
+}

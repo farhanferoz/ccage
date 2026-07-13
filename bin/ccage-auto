@@ -94,6 +94,33 @@ import termios
 import threading
 import time
 import tty
+from pathlib import Path
+
+
+# ----------------------------------------------------------------------------
+# Circuit breaker (subagent watchdog) — optional add-on. Its decision logic
+# lives in lib/ (unit-tested); this script only wires it to a poll thread.
+# Resolve lib/ next to the repo checkout OR an installed share/ccage tree, and
+# degrade to a no-op if it is absent — the core auto-checkpointing must run even
+# when the circuit-breaker library was not deployed.
+# ----------------------------------------------------------------------------
+def _load_ccb():
+    here = os.path.dirname(os.path.realpath(__file__))
+    for root in (os.path.join(here, ".."),                     # repo:      <root>/lib
+                 os.path.join(here, "..", "share", "ccage")):   # installed: share/ccage/lib
+        if os.path.isdir(os.path.join(root, "lib")):
+            root = os.path.realpath(root)
+            if root not in sys.path:
+                sys.path.insert(0, root)
+            break
+    try:
+        from lib import ccb_types, subagent_watch
+        return subagent_watch, ccb_types
+    except Exception:
+        return None, None
+
+
+_ccb_watch, _ccb_types = _load_ccb()
 
 # ----------------------------------------------------------------------------
 # Configuration
@@ -939,6 +966,164 @@ class Watcher:
 
 
 # ----------------------------------------------------------------------------
+# Circuit breaker — subagent watchdog thread (observe mode, Phase 1)
+# ----------------------------------------------------------------------------
+
+class SubagentWatcher:
+    """A second daemon thread beside the context Watcher. Each poll it evaluates
+    every subagent transcript for the stuck-subagent circuit breaker (observe
+    mode). All decision logic is the unit-tested lib.subagent_watch.run_tick;
+    this owns only config/state/paths and the poll loop, so a bug here can lose
+    a breaker tick but never corrupt the session it guards (every tick is
+    exception-guarded and best-effort). Instantiated only when the CB library
+    loaded (_ccb_watch is not None)."""
+
+    def __init__(self, poll, cwd, sdir, logf, master_fd=None, write_lock=None,
+                 ready_event=None, pid=None):
+        self.poll = poll
+        self.cwd = cwd
+        self.sdir = sdir
+        self.log = logf
+        # Injection wiring (Task 12). master_fd/write_lock are the same pty
+        # master and lock the context Watcher and the bypass auto-accepter use,
+        # so a nudge never interleaves bytes with another writer. All three
+        # default to None: in observe mode (or any construction that doesn't
+        # wire the pty) inject_message is a logged no-op, so a nudge degrades to
+        # log-only rather than raising.
+        self.master_fd = master_fd
+        self.write_lock = write_lock
+        self.ready_event = ready_event
+        # Tier C (Task 15): the pty child pid from run_proxy's pty.fork(), so a
+        # session-kill reuses the existing handle instead of inventing a second
+        # mechanism. None => kill_session is a logged no-op.
+        self.pid = pid
+        self._injected_this_tick = False   # rate-limit: one injection per poll
+        self.stop = False
+        self.start_time = time.time()
+        self.cfg = _ccb_types.CCBConfig.from_env()
+        self.state_path = os.path.join(sdir, ".ccb-state.json")
+        self.state = _ccb_watch.load_state(Path(self.state_path))
+        # sdir is <config-dir>/projects/<slug>; the tasks/ dir sits at the config
+        # root, so climb two levels for open_task_count's search root.
+        self.config_root = os.path.dirname(os.path.dirname(sdir))
+        self.resume_path = os.path.join(cwd, "RESUME%s.md" % slot_suffix())
+        # Same durable ledger bin/ccb-report reads (Task 10b / Task 18).
+        self.ledger_path = os.path.expanduser(
+            os.environ.get("CCB_LEDGER", "~/.local/share/ccage/ccb/events.jsonl"))
+        self.flags = {}
+
+    def _log(self, msg):
+        try:
+            self.log.write("%s  [ccb] %s\n" % (time.strftime("%H:%M:%S"), msg))
+            self.log.flush()
+        except Exception:
+            pass
+
+    def inject_message(self, text):
+        """Write a Tier-A nudge to the child's pty exactly as a human types it:
+        the text, a settle pause, then `\\r` to submit (spike S1's confirmed
+        byte shape — reaches a running model at the next tool boundary, queues
+        mid-tool). Newlines are collapsed to spaces first: S1 verified a
+        single-line submit; a multi-line paste's submit behaviour is unverified,
+        so we never rely on it. Serialized behind the shared write_lock and
+        rate-limited to one injection per poll tick. Returns True on a real
+        write; a logged no-op (False) when no pty is wired, the TUI isn't ready
+        yet (bypass screen still up — Task 12 Step 2 guard, reusing the context
+        watcher's ready_event), the tick already injected, or the child is gone."""
+        first = text.splitlines()[0] if text else ""
+        if self._injected_this_tick:
+            self._log("inject rate-limited this tick: %s" % first)
+            return False
+        if self.master_fd is None or self.write_lock is None:
+            self._log("inject skipped (no pty): %s" % first)
+            return False
+        if self.ready_event is not None and not self.ready_event.is_set():
+            self._log("inject skipped (TUI not ready): %s" % first)
+            return False
+        line = " ".join(text.split())      # collapse all whitespace/newlines
+        with self.write_lock:
+            try:
+                os.write(self.master_fd, line.encode())
+                time.sleep(KEY_DELAY)
+                os.write(self.master_fd, b"\r")
+            except OSError as e:
+                self._log("inject failed (child gone?): %r" % e)
+                return False
+        self._injected_this_tick = True
+        self._log("injected nudge: %s" % first)
+        return True
+
+    def kill_session(self, teammate_id):
+        """Tier C (Task 15): terminate the pty child — the whole claude session.
+        Reuses the handle run_proxy already owns (self.pid from pty.fork): a
+        SIGTERM lets the read loop hit EOF and run the existing teardown
+        (waitpid), so there is no second kill mechanism. Best-effort — a missing
+        pid or an already-dead child is a logged no-op. Only ever reached when
+        run_tick's kill_permitted gate passed (CCB_MAX_TIER=kill + unresponsive
+        orchestrator)."""
+        if self.pid is None:
+            self._log("kill skipped (no pid): escalated on %s" % teammate_id)
+            return False
+        self._log("TIER-C: SIGTERM to session pid %d (escalated on teammate %s)"
+                  % (self.pid, teammate_id))
+        try:
+            os.kill(self.pid, signal.SIGTERM)
+        except OSError as e:
+            self._log("kill failed (child already gone?): %r" % e)
+            return False
+        self.stop = True    # stand this watcher down; run_proxy tears the child down
+        return True
+
+    def run(self):
+        self._log("ccb watcher start: max_tier=%s soft=%dmin stale=%dmin hard=%dmin poll=%.0fs"
+                  % (self.cfg.max_tier.value, self.cfg.t_soft_min, self.cfg.t_stale_min,
+                     self.cfg.t_hard_min, self.poll))
+        while not self.stop:
+            time.sleep(self.poll)
+            # Stand down with the session when its work is marked done, matching
+            # the context watcher (line ~845). ccage-auto owns the /clear cycle,
+            # so the done-marker is read with no /clear-survival caveat.
+            if session_done_mtime(self.cwd) > self.start_time:
+                self._log("session marked done — ccb standing down")
+                self.stop = True
+                break
+            try:
+                self._tick()
+            except Exception as e:
+                # The breaker must never take down the session it guards.
+                self._log("tick error (ignored): %r" % e)
+
+    def _tick(self):
+        parent = active_jsonl(self.sdir, self.start_time)
+        # The transcript basename (sans .jsonl) is the session id tokenol and the
+        # task-dir lookups key on; empty until the session writes its first file.
+        session_id = os.path.splitext(os.path.basename(parent))[0] if parent else ""
+        # The orchestrator's model id (from the latest assistant turn) is captured
+        # in every ledger row — reuse the context watcher's transcript reader so
+        # there is one source of truth for "what model is the root running on".
+        orchestrator_model = latest_usage(parent)[1] if parent else None
+        self._injected_this_tick = False   # reset the one-per-tick rate limit
+        self.state = _ccb_watch.run_tick(
+            session_dir=Path(self.sdir),
+            config_root=Path(self.config_root),
+            session_id=session_id,
+            cwd=self.cwd,
+            cfg=self.cfg,
+            state=self.state,
+            now=time.time(),
+            parent_transcript=Path(parent) if parent else None,
+            resume_path=Path(self.resume_path),
+            ledger_path=Path(self.ledger_path),
+            state_path=Path(self.state_path),
+            orchestrator_model=orchestrator_model,
+            log=self._log,
+            inject=self.inject_message,
+            kill_session=self.kill_session,
+            flags=self.flags,
+        )
+
+
+# ----------------------------------------------------------------------------
 # pty proxy
 # ----------------------------------------------------------------------------
 
@@ -979,6 +1164,28 @@ def run_proxy(cfg, cwd, sdir, logpath):
     if cfg.enabled:
         t = threading.Thread(target=watcher.run, daemon=True)
         t.start()
+
+    # Circuit breaker: a second daemon thread evaluating subagent transcripts.
+    # Alerts always; injects a Tier-A nudge only when CCB_MAX_TIER>=nudge on a
+    # teams session (the default rollout is observe = alert-only). Shares the
+    # context watcher's poll cadence. Optional and best-effort — an absent lib/
+    # or a tick error never affects the session.
+    ccb_watcher = None
+    if cfg.enabled and _ccb_watch is not None and _ccb_types is not None:
+        # Share the pty master + write_lock so a Tier-A nudge serializes against
+        # the context watcher and the bypass auto-accepter; gate injection on
+        # the same tui_ready event the accept path drives (Task 12 Step 2).
+        #
+        # CCBConfig already fails safe (defaults to observe, and from_env falls
+        # back to observe on any absent/garbage/mis-cased CCB_MAX_TIER). This
+        # setdefault is belt-and-suspenders and also EXPORTS the tier into the
+        # environment so the child session and any subprocess observe the same
+        # value; an operator opts up by setting CCB_MAX_TIER before launch.
+        os.environ.setdefault("CCB_MAX_TIER", "observe")
+        ccb_watcher = SubagentWatcher(cfg.poll, cwd, sdir, logf,
+                                      master_fd=master_fd, write_lock=write_lock,
+                                      ready_event=watcher.tui_ready, pid=pid)
+        threading.Thread(target=ccb_watcher.run, daemon=True).start()
 
     signal.signal(signal.SIGWINCH, lambda *_: set_winsize(master_fd))
 
@@ -1055,6 +1262,8 @@ def run_proxy(cfg, cwd, sdir, logpath):
                         os.write(master_fd, data)
     finally:
         watcher.stop = True
+        if ccb_watcher is not None:
+            ccb_watcher.stop = True
         if raw and old_attr is not None:
             termios.tcsetattr(0, termios.TCSADRAIN, old_attr)
         try:

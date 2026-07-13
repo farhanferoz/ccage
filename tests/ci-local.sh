@@ -11,6 +11,11 @@
 #
 # Keep the commands below in sync with ci.yml — if you change one, change both.
 # (This file lives under tests/ and is not itself in CI's shellcheck list.)
+#
+# ONE deliberate superset: the pytest step (5) is local-only. ci.yml is a shell
+# matrix with no python3/pytest, so the circuit-breaker unit tests run here (and
+# in the pre-push gate) rather than in GitHub CI. It is guarded to skip cleanly
+# where pytest is absent, so it never turns a shell-only checkout red.
 
 set -u
 cd "$(dirname "$0")/.." || exit 2
@@ -59,6 +64,21 @@ if ./tests/bats/bin/bats tests/; then
     ok "bats"
 else
     bad "bats"
+fi
+
+# 5. pytest — circuit-breaker unit tests (Python). Local superset (see header):
+#    guarded so a checkout without python3/pytest skips cleanly. `-p no:hydra_pytest`
+#    disables a conda-registered plugin that otherwise crashes collection; it is a
+#    no-op where that plugin is absent.
+step "pytest (circuit-breaker unit tests)"
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import pytest' >/dev/null 2>&1; then
+    if python3 -m pytest tests/test_subagent_watch.py -p no:hydra_pytest -q; then
+        ok "pytest"
+    else
+        bad "pytest"
+    fi
+else
+    printf 'SKIP: python3/pytest not available (CI shell legs lack it; run before pushing CB changes)\n'
 fi
 
 step "summary"
