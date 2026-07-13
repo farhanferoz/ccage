@@ -700,3 +700,116 @@ def test_run_tick_non_teams_forces_observe_only_and_logs_once(tmp_path, monkeypa
     # Even at cfg=STOP the agent only ever parks in SUSPECT (observe behaviour),
     # never NUDGED — proving the non-teams cap held across the grace window.
     assert load_state(tmp_path / ".ccb-state.json").agents["agent-solo"].phase is AgentPhase.SUSPECT
+
+
+# --- Task 11 Step 3: the bin SubagentWatcher wiring, end to end -------------
+
+def _load_ccage_auto():
+    """Import bin/ccage-auto as a module (it has no .py extension). Module-level
+    code is import-safe: main() is guarded by __main__, and _load_ccb() only
+    resolves lib/. Returns the module, or None if CB failed to load."""
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+
+    path = str(Path(__file__).resolve().parent.parent / "bin" / "ccage-auto")
+    loader = SourceFileLoader("ccage_auto", path)
+    spec = importlib.util.spec_from_loader("ccage_auto", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def test_subagent_watcher_class_tick_end_to_end(tmp_path, monkeypatch):
+    """Drive the REAL bin `SubagentWatcher` synchronously via `_tick()` — the
+    wiring glue the `run_tick` unit tests don't reach: config_root derivation
+    (`sdir.parent.parent`), the RESUME/ledger paths, `session_id` from
+    `active_jsonl`, `orchestrator_model` from `latest_usage`, and state
+    persistence. This is the observe-mode live-fire (Task 11 Step 3) made
+    deterministic — no pty, no thread, no wall-clock injection games."""
+    import time as _time
+    from datetime import datetime, timezone
+
+    from lib.ccb_types import AgentPhase
+    from lib.subagent_watch import load_state
+
+    ccage_auto = _load_ccage_auto()
+    if ccage_auto._ccb_watch is None:
+        import pytest
+        pytest.skip("circuit-breaker lib not importable")
+
+    monkeypatch.setattr("lib.subagent_watch.session_cost_usd", lambda *a, **k: None)
+    monkeypatch.delenv("CCAGE_SLOT", raising=False)
+
+    now = _time.time()
+    cfg_root = tmp_path / "config"
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    sdir = cfg_root / "projects" / ccage_auto.cwd_slug(str(cwd))
+    subs = sdir / "subagents"
+    subs.mkdir(parents=True)
+
+    def iso(e):
+        return datetime.fromtimestamp(e, timezone.utc).isoformat()
+
+    def mk(name, first_ts, mtime, team="session-live1234"):
+        p = subs / ("agent-%s.jsonl" % name)
+        p.write_text(json.dumps({"type": "assistant", "timestamp": iso(first_ts)}) + "\n")
+        p.with_suffix(".meta.json").write_text(json.dumps(
+            {"name": name, "teamName": team, "taskKind": "in_process_teammate"}))
+        os.utime(p, (mtime, mtime))
+
+    mk("cb-stuck", now - 7200, now - 1800)      # 120min old, 30min stale -> breach
+    mk("cb-fresh", now, now)                     # brand new -> healthy, silent
+    idle_epoch = now - 300
+    mk("cb-done", now - 3600, idle_epoch - 60)   # went idle, wrote nothing since -> RESOLVED
+
+    tdir = cfg_root / "tasks" / "session-live1234"
+    tdir.mkdir(parents=True)
+    (tdir / "1.json").write_text('{"id":"1","status":"in_progress"}')
+
+    notify = tmp_path / "notify.txt"
+    ledger = tmp_path / "ledger.jsonl"
+    monkeypatch.setenv("CCB_MAX_TIER", "observe")
+    monkeypatch.setenv("CCB_T_SOFT_MIN", "1")
+    monkeypatch.setenv("CCB_T_STALE_MIN", "1")
+    monkeypatch.setenv("CCB_NOTIFY_CMD", "cat >> %s" % notify)
+    monkeypatch.setenv("CCB_LEDGER", str(ledger))
+
+    logf = (tmp_path / "log").open("a")
+    w = ccage_auto.SubagentWatcher(poll=1, cwd=str(cwd), sdir=str(sdir), logf=logf)
+
+    # Parent transcript must post-date the watcher's start_time (active_jsonl
+    # `since` filter); it carries the orchestrator model + the in-band idle signal.
+    parent = sdir / "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"
+    content = ('<teammate-message teammate_id="cb-done">\n'
+               '{"type":"idle_notification","from":"cb-done","timestamp":"'
+               + iso(idle_epoch) + '","idleReason":"available"}\n</teammate-message>')
+    with parent.open("w") as f:
+        f.write(json.dumps({"type": "assistant", "message": {
+            "model": "claude-opus-4-8[1m]",
+            "usage": {"input_tokens": 20, "cache_read_input_tokens": 5,
+                      "cache_creation_input_tokens": 2}}}) + "\n")
+        f.write(json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n")
+    os.utime(parent, (w.start_time + 5, w.start_time + 5))
+
+    w._tick()          # debounce tick 1
+    w._tick()          # tick 2 -> the alert
+    logf.close()
+
+    rows = [json.loads(x) for x in ledger.read_text().splitlines()]
+    events = [(r["event"], r["teammate_id"]) for r in rows]
+    assert ("alert", "cb-stuck") in events
+    assert ("resolved", "cb-done") in events                       # healthy-resolved baseline
+    assert not any(tid == "cb-fresh" for _, tid in events)         # healthy agent never logged
+    assert sum(1 for e, _ in events if e == "alert") == 1          # no re-alert
+    assert sum(1 for e, _ in events if e == "resolved") == 1       # RESOLVED logged once, not per tick
+    assert all(r.get("orchestrator_model") == "claude-opus-4-8[1m]" for r in rows)
+
+    resume_txt = (cwd / "RESUME.md").read_text()
+    assert "### Stuck-subagent alerts" in resume_txt and "cb-stuck stuck" in resume_txt
+    assert notify.read_text().count("cb-stuck") == 1
+
+    st = load_state(sdir / ".ccb-state.json")
+    assert st.agents["agent-cb-stuck"].phase is AgentPhase.SUSPECT
+    assert st.agents["agent-cb-done"].phase is AgentPhase.RESOLVED
+    assert st.agents["agent-cb-fresh"].phase is AgentPhase.RUNNING
