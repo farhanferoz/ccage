@@ -20,6 +20,29 @@ def test_lists_jsonl_files_under_subagents_dir(tmp_path):
     )
 
 
+def test_lists_transcripts_nested_under_session_id_dir(tmp_path):
+    """Real Claude Code sessions nest subagents/ one level below the project
+    dir, under a subdirectory named for the session's own transcript-file
+    stem (session_id) -- not directly under the project dir. Confirmed via a
+    live-fire run against a real 2.1.207 session (v0.11.0 shipped without
+    this: list_subagent_transcripts(session_dir) alone always found nothing
+    in production, so the breaker never tracked any real teammate)."""
+    project_dir = tmp_path / "-home-ff235-scratch-ccb-test"
+    session_id = "46b8e302-cbd9-4249-b21b-2d1f480d2838"
+    sub_dir = project_dir / session_id / "subagents"
+    sub_dir.mkdir(parents=True)
+    (sub_dir / "agent-astalled-worker-59d371a9b7309229.jsonl").write_text("{}\n")
+    # A same-named decoy directly under the project dir (pre-session-id layout)
+    # must NOT be picked up once a session_id is given -- it's the wrong agent.
+    decoy = project_dir / "subagents"
+    decoy.mkdir(parents=True)
+    (decoy / "agent-decoy.jsonl").write_text("{}\n")
+
+    found = list_subagent_transcripts(project_dir, session_id)
+
+    assert [f.name for f in found] == ["agent-astalled-worker-59d371a9b7309229.jsonl"]
+
+
 def test_config_reads_env_overrides(monkeypatch):
     from lib.ccb_types import CCBConfig, Tier
 
@@ -589,9 +612,10 @@ def test_run_tick_alerts_stuck_agent_writes_ledger_resume_and_state(tmp_path, mo
     session_dir = tmp_path / "proj"
     now = _parse_iso("2026-07-13T11:00:00+00:00").timestamp()
     # Stuck: started 60 min ago, transcript quiet for 20 min -> quiet breach.
-    _mk_agent(session_dir, "cb-stuck", "2026-07-13T10:00:00+00:00", mtime=now - 20 * 60)
+    # Nested under the session_id dir, matching the real Claude Code layout.
+    _mk_agent(session_dir / "s-uuid", "cb-stuck", "2026-07-13T10:00:00+00:00", mtime=now - 20 * 60)
     # Healthy: just started, writing now -> stays RUNNING, never alerts.
-    _mk_agent(session_dir, "cb-fresh", "2026-07-13T11:00:00+00:00", mtime=now)
+    _mk_agent(session_dir / "s-uuid", "cb-fresh", "2026-07-13T11:00:00+00:00", mtime=now)
 
     # A teams session: a task dir makes open_task_count return a real number.
     tasks = tmp_path / "tasks" / "session-abcd1234"
@@ -640,7 +664,7 @@ def test_run_tick_logs_one_resolved_line_on_completion_no_dup(tmp_path, monkeypa
     idle_ts = "2026-07-13T10:30:00.000Z"
     idle_epoch = _parse_iso(idle_ts).timestamp()
     # Completed: went idle at idle_ts and wrote nothing since (mtime < idle).
-    _mk_agent(session_dir, "cb-done", "2026-07-13T10:00:00+00:00", mtime=idle_epoch - 60)
+    _mk_agent(session_dir / "s-uuid", "cb-done", "2026-07-13T10:00:00+00:00", mtime=idle_epoch - 60)
 
     # Parent transcript carries the in-band idle_notification (S4 completion).
     parent = tmp_path / "parent.jsonl"
@@ -745,7 +769,9 @@ def test_subagent_watcher_class_tick_end_to_end(tmp_path, monkeypatch):
     cwd = tmp_path / "proj"
     cwd.mkdir()
     sdir = cfg_root / "projects" / ccage_auto.cwd_slug(str(cwd))
-    subs = sdir / "subagents"
+    # Real layout: subagents/ nests under the session-id dir (the active parent
+    # transcript's own stem, "aaaa...eeee" below) -- not directly under sdir.
+    subs = sdir / "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" / "subagents"
     subs.mkdir(parents=True)
 
     def iso(e):
@@ -854,7 +880,7 @@ def test_run_tick_nudge_injects_and_ledgers(tmp_path, monkeypatch):
     session_dir = tmp_path / "proj"
     now = _parse_iso("2026-07-13T11:00:00+00:00").timestamp()
     # Stuck: started 60 min ago (> soft 45), quiet 20 min (> stale 10) -> breach.
-    _mk_agent(session_dir, "cb-stuck", "2026-07-13T10:00:00+00:00", mtime=now - 20 * 60)
+    _mk_agent(session_dir / "s-uuid", "cb-stuck", "2026-07-13T10:00:00+00:00", mtime=now - 20 * 60)
 
     tasks = tmp_path / "tasks" / "session-abcd1234"
     tasks.mkdir(parents=True)
@@ -894,7 +920,7 @@ def test_run_tick_observe_never_injects(tmp_path, monkeypatch):
     monkeypatch.setattr("lib.subagent_watch.session_cost_usd", lambda *a, **k: None)
     session_dir = tmp_path / "proj"
     now = _parse_iso("2026-07-13T11:00:00+00:00").timestamp()
-    _mk_agent(session_dir, "cb-stuck", "2026-07-13T10:00:00+00:00", mtime=now - 20 * 60)
+    _mk_agent(session_dir / "s-uuid", "cb-stuck", "2026-07-13T10:00:00+00:00", mtime=now - 20 * 60)
     tasks = tmp_path / "tasks" / "session-abcd1234"
     tasks.mkdir(parents=True)
     (tasks / "1.json").write_text('{"id":"1","status":"in_progress"}')
@@ -1021,7 +1047,7 @@ def test_verified_stop_resolves_from_any_phase_and_never_escalates():
 def _stuck_teams_kw(tmp_path, session_dir, now, cfg, **over):
     """Shared setup for the stop/escalate run_tick tests: one quiet-stuck teammate
     on a teams session (task dir => is_teams), plus the RESUME/ledger/state paths."""
-    _mk_agent(session_dir, "cb-stuck", "2026-07-13T10:00:00+00:00", mtime=now - 20 * 60)
+    _mk_agent(session_dir / "s-uuid", "cb-stuck", "2026-07-13T10:00:00+00:00", mtime=now - 20 * 60)
     tasks = tmp_path / "tasks" / "session-abcd1234"
     tasks.mkdir(parents=True, exist_ok=True)
     (tasks / "1.json").write_text('{"id":"1","status":"in_progress"}')
@@ -1211,8 +1237,8 @@ def test_run_tick_undelivered_nudge_neither_advances_nor_claims_delivery(tmp_pat
     session_dir = tmp_path / "proj"
     now = _parse_iso("2026-07-13T11:00:00+00:00").timestamp()
     # Two quiet-stuck teammates (sorted: cb-aaa before cb-bbb) on a teams session.
-    _mk_agent(session_dir, "cb-aaa", "2026-07-13T10:00:00+00:00", mtime=now - 20 * 60)
-    _mk_agent(session_dir, "cb-bbb", "2026-07-13T10:00:00+00:00", mtime=now - 20 * 60)
+    _mk_agent(session_dir / "s", "cb-aaa", "2026-07-13T10:00:00+00:00", mtime=now - 20 * 60)
+    _mk_agent(session_dir / "s", "cb-bbb", "2026-07-13T10:00:00+00:00", mtime=now - 20 * 60)
     tasks = tmp_path / "tasks" / "session-abcd1234"
     tasks.mkdir(parents=True)
     (tasks / "1.json").write_text('{"id":"1","status":"in_progress"}')

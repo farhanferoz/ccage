@@ -2,6 +2,11 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.11.2] — 2026-07-13
+
+### Fixed — circuit breaker never actually tracked a real teammate
+- **The stuck-subagent circuit breaker discovered zero teammates in every real Claude Code session, on every tier, since v0.11.0 shipped.** `list_subagent_transcripts` globbed `session_dir/subagents/`, but a real session nests subagent transcripts one level deeper, under a directory named for the session's own transcript-file stem (`session_dir/<session_id>/subagents/`). Every unit test's fixture placed transcripts at the flat (wrong) path, so this went uncaught until an attended live-fire run against a real session surfaced it: `.ccb-state.json` stayed `{"agents": {}}` after nine real minutes with a genuinely idle, correctly-formed teammate transcript sitting one directory below where the code looked. Fixed by threading `session_id` into the lookup. Regression test builds the real nested layout plus a same-named decoy at the old flat path to prove it isn't picked up by mistake; the two `test_autock.bats` live-fire fixtures (which drive a real `ccage-auto` process) are corrected to the same real layout. Same root-cause shape as the v0.11.1 installed-lib bug: a test fixture modeled a plausible-but-wrong directory layout. Still ships deployed at `observe` — this does not change the default rollout tier, only fixes discovery being silently broken underneath it.
+
 ## [0.11.1] — 2026-07-13
 
 ### Fixed — circuit-breaker lib resolution in the installed layout
