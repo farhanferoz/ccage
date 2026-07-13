@@ -11,6 +11,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -517,3 +518,157 @@ def summarize_ledger(path: Path) -> dict:
         projects.setdefault(cwd, {})[(cwd, tid)] = events
     out["per_project"] = {cwd: _summarize_groups(g) for cwd, g in projects.items()}
     return out
+
+
+# --- Task 11: the per-poll orchestration (observe mode) ---------------------
+# Pure logic: no threads, no pty, no clock reads (now is injected). All I/O is
+# against paths the caller passes, so this is unit-testable end to end.
+# bin/ccage-auto's SubagentWatcher is a thin thread wrapper around run_tick.
+
+
+def _effective_cfg(cfg: CCBConfig, is_teams: bool) -> CCBConfig:
+    """Non-teams sessions (V10) cannot produce the in-band completion signal the
+    higher tiers rely on, so the breaker never acts beyond OBSERVE there — a
+    stuck agent is still alerted, but never nudged/stopped/killed on a session
+    whose completion we can't read. Teams sessions (or already-observe config)
+    keep the caller's tier unchanged."""
+    if is_teams or cfg.max_tier is Tier.OBSERVE:
+        return cfg
+    return dataclasses.replace(cfg, max_tier=Tier.OBSERVE)
+
+
+def _transcript_mtime(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def run_tick(
+    *,
+    session_dir: Path,
+    config_root: Path,
+    session_id: str,
+    cwd: str,
+    cfg: CCBConfig,
+    state: WatchState,
+    now: float,
+    parent_transcript: Path | None,
+    resume_path: Path,
+    ledger_path: Path,
+    state_path: Path,
+    tokenol_url: str | None = None,
+    log: Callable[[str], None] = lambda _m: None,
+    flags: dict | None = None,
+) -> WatchState:
+    """One observe-mode poll tick across every subagent under session_dir.
+
+    Rescans the parent transcript (progress/vouch/idle), lists subagent
+    transcripts, builds an Observation per agent from the tested time/idle
+    signals, runs the pure `evaluate` state machine, then executes the returned
+    actions. Phase 1 executes only `alert` (RESUME + log + notify); nudge/stop/
+    escalate are logged as 'phase2 not wired yet' and otherwise ignored.
+
+    Telemetry (Task 10b): one ledger line per executed alert, per vouch
+    consumed, and on the transition INTO RESOLVED only (including healthy
+    never-flagged agents — the peak-stats baseline thresholds get tuned
+    against). The RESOLVED line is gated on `prev.phase != RESOLVED` so a
+    completed agent re-evaluating to RESOLVED every poll never appends a
+    duplicate. State is persisted before returning; the returned WatchState is
+    the input for the next tick.
+
+    `flags` is a caller-owned scratch dict used only to log the non-teams
+    forced-observe notice once per run.
+    """
+    flags = {} if flags is None else flags
+    now_iso = datetime.fromtimestamp(now, timezone.utc).isoformat()
+    tok_url = tokenol_url if tokenol_url is not None else cfg.tokenol_url
+
+    scan = state.parent_scan
+    if parent_transcript is not None:
+        scan = scan_parent_transcript(parent_transcript, scan)
+
+    transcripts = list_subagent_transcripts(session_dir)
+    metas = {t: agent_meta(t) for t in transcripts}
+
+    # Session-level context, computed lazily and memoized so a tick makes at
+    # most one tokenol call and one task-dir read per distinct team.
+    open_tasks_cache: dict[str | None, int | None] = {}
+    def _open_tasks(team_name: str | None) -> int | None:
+        if team_name not in open_tasks_cache:
+            open_tasks_cache[team_name] = open_task_count(config_root, session_id, team_name)
+        return open_tasks_cache[team_name]
+
+    cost_cache: dict[str, float | None] = {}
+    def _cost() -> float | None:
+        if "v" not in cost_cache:
+            cost_cache["v"] = session_cost_usd(session_id, tok_url) if session_id else None
+        return cost_cache["v"]
+
+    # Teams detection (V10): a teammate-message, an in-band idle signal, or a
+    # task dir all mark a teams session. Non-teams => forced observe-only.
+    any_task_dir = any(_open_tasks(m.team_name) is not None for m in metas.values())
+    is_teams = bool(scan.msg_counts) or bool(scan.idle) or any_task_dir
+    if not is_teams and cfg.max_tier is not Tier.OBSERVE and not flags.get("non_teams_logged"):
+        log("non-teams session: circuit breaker forced to observe-only (V10)")
+        flags["non_teams_logged"] = True
+    eff_cfg = _effective_cfg(cfg, is_teams)
+
+    agents = dict(state.agents)
+    for t in transcripts:
+        meta = metas[t]
+        name = t.stem
+        prev = agents.get(name)
+
+        elapsed = elapsed_seconds(t, now_iso)
+        elapsed_min = elapsed / 60.0 if elapsed is not None else 0.0
+        stale = stale_minutes(t, now)
+        stale_min = stale if stale is not None else 0.0
+        idle_epoch = scan.idle.get(meta.teammate_id)
+        completed = idle_completed(idle_epoch, _transcript_mtime(t))
+
+        o = Observation(
+            elapsed_min=elapsed_min, stale_min=stale_min, completed=completed,
+            vouch_total_min=scan.vouches.get(meta.teammate_id, 0), now=now,
+        )
+        base = prev if prev is not None else AgentRecord(name=name, teammate_id=meta.teammate_id)
+        rec, actions = evaluate(base, o, eff_cfg)
+        rec.peak_elapsed_min = max(rec.peak_elapsed_min, elapsed_min)
+        rec.peak_stale_min = max(rec.peak_stale_min, stale_min)
+
+        def _ledger(event: EventKind, rec=rec, elapsed_min=elapsed_min,
+                    stale_min=stale_min, team_name=meta.team_name) -> None:
+            ledger_write(ledger_path, event, rec, cfg, session_id=session_id, cwd=cwd,
+                         elapsed_min=elapsed_min, stale_min=stale_min,
+                         session_cost_usd=_cost(), open_tasks=_open_tasks(team_name),
+                         now_iso=now_iso)
+
+        # Completion baseline: one RESOLVED line on the transition in only.
+        if rec.phase is AgentPhase.RESOLVED and (prev is None or prev.phase is not AgentPhase.RESOLVED):
+            _ledger(EventKind.RESOLVED)
+        # A consumed vouch (de-escalation to VOUCHED) is auditable telemetry.
+        if prev is not None and rec.vouches_used > prev.vouches_used:
+            _ledger(EventKind.VOUCH)
+
+        for act in actions:
+            if act.kind == "alert":
+                cost = _cost()
+                cost_s = "" if cost is None else ", session $%.2f" % cost
+                ot = _open_tasks(meta.team_name)
+                ot_s = "" if ot is None else ", %d open task%s" % (ot, "" if ot == 1 else "s")
+                msg = ("watch: teammate %s stuck at %.0fmin (stale %.0fmin%s%s)"
+                       % (meta.teammate_id, elapsed_min, stale_min, ot_s, cost_s))
+                append_resume_alert(resume_path, msg)
+                notify(cfg, msg)
+                log(msg)
+                _ledger(EventKind.ALERT)
+            else:
+                # Phase 2 (nudge/stop/escalate) is not wired in observe-mode
+                # Task 11 — log the intent and take no action.
+                log("phase2 not wired yet: %s for teammate %s" % (act.kind, meta.teammate_id))
+
+        agents[name] = rec
+
+    new_state = WatchState(agents=agents, parent_scan=scan)
+    save_state(state_path, new_state)
+    return new_state

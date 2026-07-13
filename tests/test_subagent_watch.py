@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 from lib.subagent_watch import list_subagent_transcripts
@@ -555,3 +556,143 @@ def test_idle_completed_predicate_is_reversible():
     assert idle_completed(idle, transcript_mtime=1001.0) is False   # wrote after idle -> re-watch
     assert idle_completed(None, transcript_mtime=999.0) is False    # no idle signal seen
     assert idle_completed(idle, transcript_mtime=None) is False     # unknown mtime
+
+
+# --- Task 11: run_tick orchestration (observe mode) -------------------------
+
+def _mk_agent(session_dir, name, first_ts, *, mtime=None, team_name="session-abcd1234"):
+    """A subagent transcript + its .meta.json under session_dir/subagents.
+    `first_ts` is the first line's timestamp (drives elapsed); `mtime`, if
+    given, is pinned via os.utime (drives staleness) so tests need no wall
+    clock. Returns the transcript path (stem = 'agent-<name>')."""
+    sub = session_dir / "subagents"
+    sub.mkdir(parents=True, exist_ok=True)
+    p = sub / ("agent-%s.jsonl" % name)
+    p.write_text(json.dumps({"type": "assistant", "timestamp": first_ts}) + "\n")
+    meta = {"name": name, "taskKind": "in_process_teammate"}
+    if team_name is not None:
+        meta["teamName"] = team_name
+    p.with_suffix(".meta.json").write_text(json.dumps(meta))
+    if mtime is not None:
+        os.utime(p, (mtime, mtime))
+    return p
+
+
+def test_run_tick_alerts_stuck_agent_writes_ledger_resume_and_state(tmp_path, monkeypatch):
+    from lib.ccb_types import AgentPhase, CCBConfig, Tier
+    from lib.subagent_watch import WatchState, _parse_iso, load_state, run_tick
+
+    monkeypatch.setattr("lib.subagent_watch.session_cost_usd", lambda *a, **k: 12.5)
+
+    session_dir = tmp_path / "proj"
+    now = _parse_iso("2026-07-13T11:00:00+00:00").timestamp()
+    # Stuck: started 60 min ago, transcript quiet for 20 min -> quiet breach.
+    _mk_agent(session_dir, "cb-stuck", "2026-07-13T10:00:00+00:00", mtime=now - 20 * 60)
+    # Healthy: just started, writing now -> stays RUNNING, never alerts.
+    _mk_agent(session_dir, "cb-fresh", "2026-07-13T11:00:00+00:00", mtime=now)
+
+    # A teams session: a task dir makes open_task_count return a real number.
+    tasks = tmp_path / "tasks" / "session-abcd1234"
+    tasks.mkdir(parents=True)
+    (tasks / "1.json").write_text('{"id":"1","status":"in_progress"}')
+
+    sink = tmp_path / "notify.txt"
+    cfg = CCBConfig(max_tier=Tier.OBSERVE, notify_cmd="cat >> %s" % sink)
+    resume = tmp_path / "RESUME.md"
+    ledger = tmp_path / "events.jsonl"
+    state_path = tmp_path / ".ccb-state.json"
+
+    kw = dict(session_dir=session_dir, config_root=tmp_path, session_id="s-uuid",
+              cwd="/home/ff235/dev/proj", cfg=cfg, now=now, parent_transcript=None,
+              resume_path=resume, ledger_path=ledger, state_path=state_path)
+
+    state = run_tick(state=WatchState(), **kw)   # debounce tick 1: SUSPECT, silent
+    assert not resume.exists()                   # nothing alerted on the first breach
+    state = run_tick(state=state, **kw)          # tick 2: the one alert
+
+    text = resume.read_text()
+    assert "### Stuck-subagent alerts" in text
+    assert "cb-stuck stuck at 60min" in text and "1 open task" in text and "$12.50" in text
+    assert "cb-fresh" not in text                # healthy agent never alerted
+
+    rows = [json.loads(l) for l in ledger.read_text().splitlines()]
+    assert [r["event"] for r in rows] == ["alert"]
+    assert rows[0]["teammate_id"] == "cb-stuck" and rows[0]["open_tasks"] == 1
+
+    assert sink.read_text().count("cb-stuck") == 1     # notify fired exactly once
+
+    persisted = load_state(state_path)
+    assert persisted.agents["agent-cb-stuck"].phase is AgentPhase.SUSPECT
+    assert persisted.agents["agent-cb-fresh"].phase is AgentPhase.RUNNING
+
+
+def test_run_tick_logs_one_resolved_line_on_completion_no_dup(tmp_path, monkeypatch):
+    from lib.ccb_types import AgentPhase, CCBConfig, Tier
+    from lib.subagent_watch import WatchState, _parse_iso, load_state, run_tick
+
+    monkeypatch.setattr("lib.subagent_watch.session_cost_usd", lambda *a, **k: None)
+
+    session_dir = tmp_path / "proj"
+    idle_ts = "2026-07-13T10:30:00.000Z"
+    idle_epoch = _parse_iso(idle_ts).timestamp()
+    # Completed: went idle at idle_ts and wrote nothing since (mtime < idle).
+    _mk_agent(session_dir, "cb-done", "2026-07-13T10:00:00+00:00", mtime=idle_epoch - 60)
+
+    # Parent transcript carries the in-band idle_notification (S4 completion).
+    parent = tmp_path / "parent.jsonl"
+    content = ('<teammate-message teammate_id="cb-done">\n'
+               '{"type":"idle_notification","from":"cb-done","timestamp":"'
+               + idle_ts + '","idleReason":"available"}\n</teammate-message>')
+    parent.write_text(
+        json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n")
+
+    now = _parse_iso("2026-07-13T11:00:00+00:00").timestamp()
+    resume = tmp_path / "RESUME.md"
+    ledger = tmp_path / "events.jsonl"
+    state_path = tmp_path / ".ccb-state.json"
+
+    kw = dict(session_dir=session_dir, config_root=tmp_path, session_id="s-uuid",
+              cwd="/p", cfg=CCBConfig(max_tier=Tier.OBSERVE), now=now,
+              parent_transcript=parent, resume_path=resume, ledger_path=ledger,
+              state_path=state_path)
+
+    state = WatchState()
+    for _ in range(3):                           # transition-in fires once, then never again
+        state = run_tick(state=state, **kw)
+
+    rows = [json.loads(l) for l in ledger.read_text().splitlines()]
+    assert [r["event"] for r in rows] == ["resolved"]     # exactly one, never duplicated per tick
+    assert not resume.exists()                            # a completed agent never alerts
+    assert load_state(state_path).agents["agent-cb-done"].phase is AgentPhase.RESOLVED
+
+
+def test_run_tick_non_teams_forces_observe_only_and_logs_once(tmp_path, monkeypatch):
+    from lib.ccb_types import AgentPhase, CCBConfig, Tier
+    from lib.subagent_watch import WatchState, _parse_iso, load_state, run_tick
+
+    monkeypatch.setattr("lib.subagent_watch.session_cost_usd", lambda *a, **k: None)
+
+    session_dir = tmp_path / "proj"
+    now = _parse_iso("2026-07-13T11:00:00+00:00").timestamp()
+    # Stuck, but a non-teams session: no team, no idle, no task dir.
+    _mk_agent(session_dir, "solo", "2026-07-13T09:00:00+00:00",
+              mtime=now - 40 * 60, team_name=None)
+
+    logs = []
+    resume = tmp_path / "RESUME.md"
+    kw = dict(session_dir=session_dir, config_root=tmp_path, session_id="",
+              cwd="/p", cfg=CCBConfig(max_tier=Tier.STOP),   # would allow nudges in a teams session
+              now=now, parent_transcript=None, resume_path=resume,
+              ledger_path=tmp_path / "events.jsonl", state_path=tmp_path / ".ccb-state.json",
+              log=logs.append, flags={})
+
+    state = WatchState()
+    for _ in range(4):
+        state = run_tick(state=state, **kw)
+
+    forced = [m for m in logs if "forced to observe-only" in m]
+    assert len(forced) == 1                                  # logged once, not every tick
+    assert not any("phase2 not wired" in m for m in logs)    # capped before any nudge action
+    # Even at cfg=STOP the agent only ever parks in SUSPECT (observe behaviour),
+    # never NUDGED — proving the non-teams cap held across the grace window.
+    assert load_state(tmp_path / ".ccb-state.json").agents["agent-solo"].phase is AgentPhase.SUSPECT
