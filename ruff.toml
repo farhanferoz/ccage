@@ -1,0 +1,8 @@
+# Ruff config for ccage's Python tooling (bin/ccage-auto helpers, tests).
+# Scope is deliberately narrow: the repo is shell-first, so this only exists to
+# tune the PLR2004 magic-value check that the code-hygiene hook feeds back on.
+[lint.per-file-ignores]
+# Test assertions compare against reviewed literal expectations (timeouts,
+# byte counts, tier thresholds). PLR2004 is a false positive there — the whole
+# point of the assertion is the exact literal. Suppress it for tests only.
+"tests/**" = ["PLR2004"]
