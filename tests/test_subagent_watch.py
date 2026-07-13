@@ -35,3 +35,30 @@ def test_config_rejects_bad_tier(monkeypatch):
     monkeypatch.setenv("CCB_MAX_TIER", "obliterate")
     cfg = CCBConfig.from_env()
     assert cfg.max_tier is Tier.STOP  # falls back to default, never raises
+
+
+def test_agent_meta_reads_name_and_team(tmp_path):
+    from lib.subagent_watch import agent_meta
+
+    t = tmp_path / "agent-asr6-cost-regrade-a8829e1a20628718.jsonl"
+    t.write_text("{}\n")
+    t.with_suffix(".meta.json").write_text(
+        '{"agentType":"sr6-cost-regrade","name":"sr6-cost-regrade",'
+        '"teamName":"session-cc9d022f","taskKind":"in_process_teammate"}'
+    )
+    m = agent_meta(t)
+    assert m.teammate_id == "sr6-cost-regrade"     # NOT "asr6-cost-regrade"
+    assert m.team_name == "session-cc9d022f"
+
+
+def test_agent_meta_missing_or_corrupt_falls_back_to_stem(tmp_path):
+    from lib.subagent_watch import agent_meta
+
+    t = tmp_path / "agent-a23b9840c03e0811f.jsonl"
+    t.write_text("{}\n")
+    m = agent_meta(t)                               # no meta file at all
+    assert m.teammate_id == "agent-a23b9840c03e0811f" and m.team_name is None
+
+    t.with_suffix(".meta.json").write_text("{corrupt")
+    m = agent_meta(t)                               # unreadable meta: same fallback
+    assert m.teammate_id == "agent-a23b9840c03e0811f" and m.team_name is None
