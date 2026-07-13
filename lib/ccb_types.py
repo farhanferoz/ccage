@@ -35,6 +35,17 @@ class TaskStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+class EventKind(StrEnum):
+    ALERT = "alert"
+    NUDGE = "nudge"
+    VOUCH = "vouch"
+    STOP = "stop"
+    STOP_VERIFIED = "stop_verified"
+    ESCALATE_BLOCKED = "escalate_blocked"
+    KILL = "kill"
+    RESOLVED = "resolved"           # normal completion; carries peak stats
+
+
 @dataclass
 class CCBConfig:
     max_tier: Tier = Tier.STOP

@@ -418,3 +418,46 @@ def test_notify_never_raises_on_broken_cmd():
 
     notify(CCBConfig(notify_cmd="/no/such/binary"), "x")   # must not raise
     notify(CCBConfig(notify_cmd=None), "x")                # no-op
+
+
+def test_ledger_appends_transition_with_signals_and_config(tmp_path):
+    from lib.ccb_types import AgentRecord, CCBConfig, EventKind
+    from lib.subagent_watch import ledger_write
+
+    ledger = tmp_path / "events.jsonl"
+    rec = AgentRecord(name="agent-sr6-cost-regrade-a8829e1a20628718",
+                      teammate_id="sr6-cost-regrade",
+                      peak_elapsed_min=92.0, peak_stale_min=14.0)
+    ledger_write(
+        ledger, EventKind.NUDGE, rec, CCBConfig(),
+        session_id="1e0c8efe-964a-4167-b722-8019792e8645", cwd="/home/ff235/dev/Oasis/StrategyA",
+        elapsed_min=92.0, stale_min=14.0, session_cost_usd=41.2, open_tasks=3,
+        now_iso="2026-07-13T12:00:00+00:00",
+    )
+    ledger_write(  # second line appends, never truncates
+        ledger, EventKind.RESOLVED, rec, CCBConfig(),
+        session_id="1e0c8efe-964a-4167-b722-8019792e8645", cwd="/home/ff235/dev/Oasis/StrategyA",
+        elapsed_min=97.0, stale_min=0.0, session_cost_usd=42.0, open_tasks=2,
+        now_iso="2026-07-13T12:05:00+00:00",
+    )
+
+    lines = [json.loads(l) for l in ledger.read_text().splitlines()]
+    assert [l["event"] for l in lines] == ["nudge", "resolved"]
+    first = lines[0]
+    assert first["teammate_id"] == "sr6-cost-regrade"
+    assert first["elapsed_min"] == 92.0 and first["session_cost_usd"] == 41.2
+    assert first["cfg"]["t_hard_min"] == 120 and first["cfg"]["max_tier"] == "stop"
+    assert first["peak_elapsed_min"] == 92.0     # healthy-distribution data
+    assert first["session_id"].startswith("1e0c8efe")
+
+
+def test_ledger_write_never_raises_on_unwritable_path():
+    from lib.ccb_types import AgentRecord, CCBConfig, EventKind
+    from lib.subagent_watch import ledger_write
+    from pathlib import Path
+
+    rec = AgentRecord(name="agent-x-0123456789abcdef", teammate_id="x")
+    ledger_write(Path("/proc/nope/events.jsonl"), EventKind.ALERT, rec, CCBConfig(),
+                 session_id="s", cwd="/x", elapsed_min=1, stale_min=1,
+                 session_cost_usd=None, open_tasks=None,
+                 now_iso="2026-07-13T12:00:00+00:00")  # must not raise

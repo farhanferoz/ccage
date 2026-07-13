@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from lib.ccb_types import AgentPhase, AgentRecord, CCBConfig, TaskStatus, Tier, tier_allows
+from lib.ccb_types import AgentPhase, AgentRecord, CCBConfig, EventKind, TaskStatus, Tier, tier_allows
 
 
 def list_subagent_transcripts(session_dir: Path) -> list[Path]:
@@ -381,4 +381,27 @@ def notify(cfg: CCBConfig, msg: str) -> None:
         subprocess.run(cfg.notify_cmd, shell=True, input=msg.encode(),
                        timeout=10, capture_output=True)
     except Exception:
+        pass
+
+
+def ledger_write(path: Path, event: EventKind, rec, cfg, *, session_id: str, cwd: str,
+                 elapsed_min, stale_min, session_cost_usd, open_tasks, now_iso: str) -> None:
+    """Append one telemetry line; best-effort, never raises (telemetry must
+    never take down the watcher). Config snapshot rides along so a later
+    review knows which thresholds produced each decision."""
+    row = {
+        "ts": now_iso, "event": event.value, "session_id": session_id, "cwd": cwd,
+        "agent": rec.name, "teammate_id": rec.teammate_id, "phase": rec.phase.value,
+        "elapsed_min": elapsed_min, "stale_min": stale_min,
+        "session_cost_usd": session_cost_usd, "open_tasks": open_tasks,
+        "vouches_used": rec.vouches_used, "extension_min": rec.extension_min,
+        "peak_elapsed_min": rec.peak_elapsed_min, "peak_stale_min": rec.peak_stale_min,
+        "cfg": {k: (v.value if hasattr(v, "value") else v)
+                for k, v in dataclasses.asdict(cfg).items() if k != "notify_cmd"},
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as f:
+            f.write(json.dumps(row) + "\n")
+    except OSError:
         pass
