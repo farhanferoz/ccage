@@ -360,3 +360,30 @@ def test_max_tier_observe_alerts_exactly_once_then_parks():
         rec, actions = evaluate(rec, o, cfg)                         # for days — no spam
         assert actions == []
     assert rec.phase is AgentPhase.SUSPECT                           # parked; no nudge ever
+
+
+def test_state_roundtrip_and_no_realert_after_restart(tmp_path):
+    from lib.ccb_types import AgentPhase, AgentRecord
+    from lib.subagent_watch import ParentScan, WatchState, load_state, save_state
+
+    st = WatchState(
+        agents={"agent-x-0123456789abcdef": AgentRecord(
+            name="agent-x-0123456789abcdef", teammate_id="x",
+            phase=AgentPhase.NUDGED, vouches_used=1, extension_min=90,
+            phase_changed_at=1_000_000.0)},
+        parent_scan=ParentScan(offset=12345, msg_counts={"y": 7}, vouches={"x": 90}),
+    )
+    p = tmp_path / ".ccb-state.json"
+    save_state(p, st)
+    st2 = load_state(p)
+    assert st2.agents["agent-x-0123456789abcdef"].phase is AgentPhase.NUDGED
+    assert st2.parent_scan.offset == 12345 and st2.parent_scan.msg_counts == {"y": 7}
+
+
+def test_load_state_missing_or_corrupt_returns_fresh(tmp_path):
+    from lib.subagent_watch import load_state
+
+    assert load_state(tmp_path / "absent.json").agents == {}
+    bad = tmp_path / "bad.json"
+    bad.write_text("{truncated")
+    assert load_state(bad).agents == {}   # never crash the watcher

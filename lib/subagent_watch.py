@@ -2,7 +2,9 @@
 
 Pure logic only: no pty, no threads. bin/ccage-auto owns wiring.
 """
+import dataclasses
 import json
+import os
 import re
 import urllib.error
 import urllib.request
@@ -301,3 +303,33 @@ def evaluate(rec: AgentRecord, o: Observation, cfg: CCBConfig) -> tuple[AgentRec
         return rec, actions
 
     return rec, actions                       # ESCALATED: session-level logic owns it (Task 15)
+
+
+@dataclass
+class WatchState:
+    agents: dict[str, AgentRecord] = field(default_factory=dict)
+    parent_scan: ParentScan = field(default_factory=ParentScan)
+
+
+def save_state(path: Path, state: WatchState) -> None:
+    """Atomic write (tmp + rename) so a crash mid-write can never leave a
+    truncated/corrupt state file for the next restart to trip over."""
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(dataclasses.asdict(state)))
+    os.replace(tmp, path)
+
+
+def load_state(path: Path) -> WatchState:
+    """Rehydrate WatchState from disk. Missing or corrupt state is never
+    fatal — the watcher just starts fresh (worst case: one re-alert)."""
+    try:
+        data = json.loads(path.read_text())
+        agents = {}
+        for name, rec in data["agents"].items():
+            rec = dict(rec)
+            rec["phase"] = AgentPhase(rec["phase"])
+            agents[name] = AgentRecord(**rec)
+        parent_scan = ParentScan(**data["parent_scan"])
+        return WatchState(agents=agents, parent_scan=parent_scan)
+    except (OSError, ValueError, KeyError):
+        return WatchState()
