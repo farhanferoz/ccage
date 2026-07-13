@@ -18,8 +18,11 @@ from pathlib import Path
 # mirroring bin/ccage-auto's _load_ccb() (repo: <bin>/../lib; installed:
 # <bin>/../share/ccage/lib) since bin/ccb-report ships to $prefix/bin too.
 _here = Path(__file__).resolve().parent
+# Match the actual module file, not just any dir named "lib": an installed
+# <prefix>/lib (e.g. ~/.local/lib, Python's user site) would otherwise shadow
+# <prefix>/share/ccage/lib.
 for _root in (_here.parent, _here.parent / "share" / "ccage"):
-    if (_root / "lib").is_dir():
+    if (_root / "lib" / "subagent_watch.py").is_file():
         sys.path.insert(0, str(_root))
         break
 

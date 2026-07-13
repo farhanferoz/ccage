@@ -1258,3 +1258,31 @@ def test_run_tick_undelivered_nudge_neither_advances_nor_claims_delivery(tmp_pat
     agents = load_state(state_path).agents
     assert agents["agent-cb-bbb"].phase is AgentPhase.NUDGED
     assert len(delivered) == 2 and "cb-bbb" in delivered[1]
+
+
+def test_installed_layout_resolves_lib_past_a_decoy_lib_dir(tmp_path):
+    """Regression: in an installed tree, <prefix>/lib (e.g. ~/.local/lib, Python's
+    user site) must NOT shadow <prefix>/share/ccage/lib. Both bin/ccb-report and
+    bin/ccage-auto's _load_ccb resolve the lib by matching lib/subagent_watch.py,
+    not any dir merely named "lib". Build a fake installed tree WITH a decoy lib/
+    at the prefix and confirm ccb-report still resolves the real lib and runs."""
+    import shutil
+    import subprocess
+    import sys
+
+    repo = Path(__file__).resolve().parent.parent
+    prefix = tmp_path / "prefix"
+    (prefix / "bin").mkdir(parents=True)
+    (prefix / "share" / "ccage" / "lib").mkdir(parents=True)
+    (prefix / "lib").mkdir()                                     # the decoy that shadowed it
+    shutil.copy(repo / "bin" / "ccb-report", prefix / "bin" / "ccb-report")
+    for p in (repo / "lib").glob("*.py"):                        # incl. __init__.py if present
+        shutil.copy(p, prefix / "share" / "ccage" / "lib" / p.name)
+
+    ledger = tmp_path / "events.jsonl"
+    ledger.write_text("")
+    r = subprocess.run([sys.executable, str(prefix / "bin" / "ccb-report"),
+                        "--ledger", str(ledger), "--json"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr                          # no ModuleNotFoundError
+    assert '"agents_seen"' in r.stdout

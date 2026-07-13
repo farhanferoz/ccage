@@ -108,7 +108,10 @@ def _load_ccb():
     here = os.path.dirname(os.path.realpath(__file__))
     for root in (os.path.join(here, ".."),                     # repo:      <root>/lib
                  os.path.join(here, "..", "share", "ccage")):   # installed: share/ccage/lib
-        if os.path.isdir(os.path.join(root, "lib")):
+        # Match the actual module file, not just any dir named "lib": in an
+        # installed layout <prefix>/lib (e.g. ~/.local/lib, Python's user site)
+        # exists and would otherwise shadow <prefix>/share/ccage/lib.
+        if os.path.isfile(os.path.join(root, "lib", "subagent_watch.py")):
             root = os.path.realpath(root)
             if root not in sys.path:
                 sys.path.insert(0, root)
