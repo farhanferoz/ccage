@@ -126,6 +126,28 @@ against. Every Task 17 scenario must be reconstructible from the ledger alone.
    safety, ledger completeness): flip the shipped `CCBConfig` default and this doc
    from `stop` to `kill` in a dedicated commit.
 
+## 7. Validation status
+
+**Deterministic coverage (61 unit tests + 2 scripted live-fire bats):**
+
+| What | How |
+|---|---|
+| Full ladder state machine (every transition, vouch, recovery, debounce, cap) | `evaluate` unit tests |
+| `run_tick` end-to-end: alert, nudge, stop→`CCB-STOPPED`→`stop_verified`, escalate-blocked, escalate→kill | `run_tick` unit tests |
+| Injection bytes (`<text>`+`\r`, newlines collapsed), rate-limit, no-pty / not-ready no-ops | `inject_message` over an `os.pipe` |
+| Real session SIGTERM | `kill_session` against a real child process |
+| Restart safety (state round-trip, no re-alert), completed-agent never re-flagged | state + `evaluate` unit tests |
+| **Full pty wiring in the real `ccage-auto` process** — `run_proxy`→`SubagentWatcher` (master_fd/lock/ready_event/pid)→thread→real pty write; the Tier-A nudge reaches the child carrying the vouch grammar; `tui_ready` gate; observe = alert-only | **scripted live-fire** (`tests/test_autock.bats`, real ccage-auto + fake claude) |
+| A mid-turn pty injection reaches a **real model** and is consumed at the next tool boundary | spike **S1** (real Haiku) |
+
+**Still requires the attended Task 17 run (the gate for the default flip past `observe`):**
+
+- A real orchestrator model *acting* on the nudge/stop (running `TaskStop`, replying `CCB-STOPPED`) — S1 proved *reception*, not action.
+- The full Tier-C KILL against a genuinely wedged real session, with a *verified* resume from the pre-kill dump.
+- Churner and healthy-long-plus-vouch behaviour end-to-end with a real teammate.
+
+Until those pass, treat Tiers B/C as unit- and wiring-validated only, and keep the deployed default at `observe`.
+
 ## Spike findings (Phase 0)
 
 Run **2026-07-13, from inside a live Agent-Teams session** — that session is
