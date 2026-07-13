@@ -10,6 +10,9 @@
 #   <prefix>/share/ccage/ccage-enable-mcp.sh — enable-mcp/disable-mcp library
 #   <prefix>/bin/ccage            — CLI dispatcher (uses the libraries)
 #   <prefix>/bin/ccage-auto       — autonomous context manager (python3 pty wrapper)
+#   <prefix>/share/ccage/lib/ccb_types.py      — circuit-breaker types/config lib
+#   <prefix>/share/ccage/lib/subagent_watch.py — circuit-breaker watcher lib
+#   <prefix>/bin/ccb-report       — circuit-breaker ledger evaluation report CLI
 #   ~/.claude/hooks/resume_autoload.sh      — SessionStart auto-read hook
 #   ~/.claude/hooks/resume_budget_check.sh  — PostToolUse RESUME budget guard
 #   <share-from>/skills/checkpoint/         — /checkpoint skill (reaches cages
@@ -120,6 +123,14 @@ if [ "$install_cli" = 1 ]; then
     install_file "$REPO_ROOT/share/ccage-enable-mcp.sh" "$prefix/share/ccage/ccage-enable-mcp.sh"
     install_file "$REPO_ROOT/bin/ccage"                 "$prefix/bin/ccage"  0755
     install_file "$REPO_ROOT/bin/ccage-auto"            "$prefix/bin/ccage-auto" 0755
+
+    # Circuit-breaker (subagent watchdog) lib + report tool. ccage-auto's
+    # _load_ccb() finds the lib at share/ccage/lib in an installed layout;
+    # absent (e.g. --no-cli) it degrades to a no-op, never affecting the core
+    # auto-checkpointing loop.
+    install_file "$REPO_ROOT/lib/ccb_types.py"      "$prefix/share/ccage/lib/ccb_types.py"
+    install_file "$REPO_ROOT/lib/subagent_watch.py" "$prefix/share/ccage/lib/subagent_watch.py"
+    install_file "$REPO_ROOT/bin/ccb-report"         "$prefix/bin/ccb-report" 0755
 
     # ccage-auto's AskUserQuestion guard goes to the fixed hooks path (like the
     # session-docs hooks) — the installed ccage-auto resolves it there, since

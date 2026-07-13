@@ -99,6 +99,13 @@ setup() {
     [ -f "$FAKE_HOME/.local/share/ccage/ccage-enable-mcp.sh" ]
 }
 
+@test "install: circuit-breaker lib and ccb-report land at prefix" {
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    [ -f "$FAKE_HOME/.local/share/ccage/lib/subagent_watch.py" ]
+    [ -f "$FAKE_HOME/.local/share/ccage/lib/ccb_types.py" ]
+    [ -x "$FAKE_HOME/.local/bin/ccb-report" ]
+}
+
 @test "install --no-cli: bin/ccage and libraries not installed" {
     HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --no-cli --prefix "$FAKE_HOME/.local" >/dev/null
     [ ! -e "$FAKE_HOME/.local/bin/ccage" ]

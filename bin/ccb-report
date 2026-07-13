@@ -14,7 +14,14 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Resolve lib/ next to the repo checkout OR an installed share/ccage tree,
+# mirroring bin/ccage-auto's _load_ccb() (repo: <bin>/../lib; installed:
+# <bin>/../share/ccage/lib) since bin/ccb-report ships to $prefix/bin too.
+_here = Path(__file__).resolve().parent
+for _root in (_here.parent, _here.parent / "share" / "ccage"):
+    if (_root / "lib").is_dir():
+        sys.path.insert(0, str(_root))
+        break
 
 from lib.subagent_watch import summarize_ledger  # noqa: E402
 
