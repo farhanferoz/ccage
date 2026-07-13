@@ -509,3 +509,49 @@ def test_report_handles_empty_or_corrupt_ledger(tmp_path):
                    '"peak_elapsed_min": 1, "peak_stale_min": 1, "vouches_used": 0, '
                    '"ts": "2026-07-13T10:00:00+00:00"}\n')
     assert summarize_ledger(bad)["agents_seen"] == 1   # skips bad lines, never raises
+
+
+def test_scanner_captures_in_band_idle_notification(tmp_path):
+    from lib.subagent_watch import ParentScan, scan_parent_transcript, _parse_iso
+
+    ts = "2026-07-13T12:35:12.937Z"
+    idle_json = ('{"type":"idle_notification","from":"cb-phase1","timestamp":"'
+                 + ts + '","idleReason":"available"}')
+    content = ("Another Claude session sent a message:\n"
+               '<teammate-message teammate_id="cb-phase1" color="blue">\n'
+               + idle_json + "\n</teammate-message>")
+    t = tmp_path / "parent.jsonl"
+    _wr(t, [{"type": "user", "message": {"role": "user", "content": content}}])
+
+    scan = scan_parent_transcript(t, ParentScan())
+    # idle captured from the PARENT transcript (in-band, S4), keyed by 'from'
+    # (== the teammate's .meta.json "name"), stored as epoch seconds.
+    assert scan.idle == {"cb-phase1": _parse_iso(ts).timestamp()}
+
+
+def test_scanner_keeps_latest_idle_and_survives_bad_timestamp(tmp_path):
+    from lib.subagent_watch import ParentScan, scan_parent_transcript, _parse_iso
+
+    def idle_line(name, ts):
+        return {"type": "user", "message": {"role": "user", "content":
+                '<teammate-message teammate_id="' + name + '">\n'
+                '{"type":"idle_notification","from":"' + name + '","timestamp":"'
+                + ts + '","idleReason":"available"}\n</teammate-message>'}}
+
+    t = tmp_path / "parent.jsonl"
+    _wr(t, [idle_line("a", "2026-07-13T10:00:00.000Z"),
+            idle_line("a", "2026-07-13T11:00:00.000Z"),   # later idle wins
+            idle_line("b", "not-a-timestamp")])            # unparseable -> skipped, no crash
+    scan = scan_parent_transcript(t, ParentScan())
+    assert scan.idle == {"a": _parse_iso("2026-07-13T11:00:00.000Z").timestamp()}
+
+
+def test_idle_completed_predicate_is_reversible():
+    from lib.subagent_watch import idle_completed
+
+    idle = 1000.0
+    assert idle_completed(idle, transcript_mtime=999.0) is True     # nothing written since idle
+    assert idle_completed(idle, transcript_mtime=1000.0) is True    # boundary: idle >= last write
+    assert idle_completed(idle, transcript_mtime=1001.0) is False   # wrote after idle -> re-watch
+    assert idle_completed(None, transcript_mtime=999.0) is False    # no idle signal seen
+    assert idle_completed(idle, transcript_mtime=None) is False     # unknown mtime

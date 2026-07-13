@@ -50,6 +50,13 @@ def agent_meta(transcript: Path) -> AgentMeta:
 
 _TEAMMATE_MSG = re.compile(r'<teammate-message[^>]*\bteammate_id=\\?"([^"\\]+)\\?"')
 _VOUCH = re.compile(r"CCB-VOUCH\s+agent=([\w-]+)\s+extend=(\d+)")
+# Task 4b: teammate completion comes from the in-band idle_notification (S4:
+# the signal is written to the PARENT transcript, NOT a hook feed-file). Quotes
+# are JSON-escaped on disk, so \\? mirrors the _TEAMMATE_MSG fix. Verified to
+# capture real teammates (cb-phase1, cb-spike-stop) from the live transcript.
+_IDLE = re.compile(
+    r'idle_notification\\?"\s*,\s*\\?"from\\?"\s*:\s*\\?"([^"\\]+)\\?"'
+    r'\s*,\s*\\?"timestamp\\?"\s*:\s*\\?"([^"\\]+)\\?"')
 
 
 @dataclass
@@ -57,6 +64,7 @@ class ParentScan:
     offset: int = 0
     msg_counts: dict[str, int] = field(default_factory=dict)  # liveness (V6: NOT completion)
     vouches: dict[str, int] = field(default_factory=dict)     # cumulative minutes
+    idle: dict[str, float] = field(default_factory=dict)      # teammate -> latest idle epoch (Task 4b/S4)
 
 
 def scan_parent_transcript(path: Path, prev: ParentScan) -> ParentScan:
@@ -68,7 +76,7 @@ def scan_parent_transcript(path: Path, prev: ParentScan) -> ParentScan:
     marker. Torn final lines are left for the next poll (offset advances
     only past a trailing newline).
     """
-    out = ParentScan(prev.offset, dict(prev.msg_counts), dict(prev.vouches))
+    out = ParentScan(prev.offset, dict(prev.msg_counts), dict(prev.vouches), dict(prev.idle))
     try:
         with path.open("rb") as f:
             f.seek(out.offset)
@@ -84,9 +92,29 @@ def scan_parent_transcript(path: Path, prev: ParentScan) -> ParentScan:
                     out.msg_counts[m.group(1)] = out.msg_counts.get(m.group(1), 0) + 1
                 for m in _VOUCH.finditer(text):
                     out.vouches[m.group(1)] = out.vouches.get(m.group(1), 0) + int(m.group(2))
+                for m in _IDLE.finditer(text):
+                    try:
+                        epoch = _parse_iso(m.group(2)).timestamp()
+                    except (ValueError, TypeError, OverflowError, AttributeError):
+                        continue  # unparseable ts: skip, never crash the scan
+                    name = m.group(1)
+                    if epoch > out.idle.get(name, 0.0):
+                        out.idle[name] = epoch
     except OSError:
         pass  # transcript rotated/missing: keep previous state, retry next poll
     return out
+
+
+def idle_completed(idle_epoch: float | None, transcript_mtime: float | None) -> bool:
+    """Task 4b completion predicate, from the S4-verified in-band idle signal.
+    A teammate is complete when it emitted an idle_notification AND has not
+    written to its transcript since — renewed writes after idle mean it resumed,
+    so completion is REVERSIBLE and can never permanently blind the breaker (V6).
+    Both signals required; either missing => not complete (fail-safe: keep
+    watching)."""
+    if idle_epoch is None or transcript_mtime is None:
+        return False
+    return transcript_mtime <= idle_epoch
 
 
 def _parse_iso(ts: str) -> datetime:
@@ -334,8 +362,8 @@ def load_state(path: Path) -> WatchState:
             agents[name] = AgentRecord(**rec)
         parent_scan = ParentScan(**data["parent_scan"])
         return WatchState(agents=agents, parent_scan=parent_scan)
-    except (OSError, ValueError, KeyError):
-        return WatchState()
+    except (OSError, ValueError, KeyError, TypeError):
+        return WatchState()  # any schema drift / corruption => start fresh, never crash
 
 
 _RESUME_ALERT_HEADING = "### Stuck-subagent alerts"
