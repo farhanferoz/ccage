@@ -1,9 +1,14 @@
 # Circuit Breaker (subagent watchdog) — feature doc
 
-> **Status:** Phase 1 (detection + telemetry + `ccb-report`) built & verified
-> (37/37 tests). Phase 2 (autonomous escalation) is gated on the spikes below.
-> This doc currently holds the **spike findings**; the full ladder / config /
-> vouch-protocol sections land with Task 16.
+> **Status:** Phase 1 complete & verified (43/43 tests) — detection + telemetry
+> + `ccb-report` + the **observe-mode watcher wired into `ccage-auto`** (Task 11:
+> a `SubagentWatcher` daemon thread delegating to the unit-tested
+> `lib.subagent_watch.run_tick`; alert/RESUME/notify/ledger only, no escalation).
+> Every ledger row now also captures the **orchestrator model** so vouch-trust
+> can later key on capability tier, never a hardcoded model. Phase 2 (autonomous
+> nudge/stop/kill) stays gated on spike S1 (exact pty-write bytes) and the
+> attended Task 17 live-fire. This doc currently holds the **spike findings**;
+> the full ladder / config / vouch-protocol sections land with Task 16.
 
 ## Spike findings (Phase 0)
 
