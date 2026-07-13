@@ -146,3 +146,45 @@ def test_stale_minutes_from_mtime(tmp_path):
     now = f.stat().st_mtime + 720          # 12 min since last write
     assert stale_minutes(f, now=now) == 12.0
     assert stale_minutes(tmp_path / "gone.jsonl", now=now) is None   # never raises
+
+
+def test_open_task_count_parses_status_not_presence(tmp_path):
+    from lib.subagent_watch import open_task_count
+
+    sid = "5097af1b-48e3-4019-9d7a-fbf611f152ee"
+    d = tmp_path / "tasks" / f"session-{sid[:8]}"   # teams naming (V5)
+    d.mkdir(parents=True)
+    (d / "1.json").write_text('{"id":"1","status":"completed"}')   # persists on disk (V4)!
+    (d / "2.json").write_text('{"id":"2","status":"in_progress"}')
+    (d / "3.json").write_text('{"id":"3","status":"pending"}')
+    (d / "4.json").write_text("not json")  # corrupt → UNKNOWN → counted open (fail-open)
+
+    assert open_task_count(tmp_path, session_id=sid) == 3  # in_progress + pending + unknown
+
+
+def test_open_task_count_full_uuid_dir_variant(tmp_path):
+    from lib.subagent_watch import open_task_count
+
+    sid = "409497e5-401d-4499-a9ac-767f8e0f16e8"
+    d = tmp_path / "tasks" / sid                     # non-teams naming (V5)
+    d.mkdir(parents=True)
+    (d / "1.json").write_text('{"id":"1","status":"pending"}')
+    assert open_task_count(tmp_path, session_id=sid) == 1
+
+
+def test_open_task_count_prefers_meta_team_name(tmp_path):
+    from lib.subagent_watch import open_task_count
+
+    # Real incident shape (V11): team dir name unrelated to the session UUID.
+    d = tmp_path / "tasks" / "session-cc9d022f"
+    d.mkdir(parents=True)
+    (d / "1.json").write_text('{"id":"1","status":"in_progress"}')
+    assert open_task_count(tmp_path, session_id="1e0c8efe-964a-4167-b722-8019792e8645",
+                           team_name="session-cc9d022f") == 1
+
+
+def test_open_task_count_none_when_no_task_dir(tmp_path):
+    from lib.subagent_watch import open_task_count
+
+    # None = "not a teams session / no task info" (V10 gates on this), distinct from 0.
+    assert open_task_count(tmp_path, session_id="deadbeef-0000-0000-0000-000000000000") is None

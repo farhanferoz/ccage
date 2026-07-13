@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from lib.ccb_types import TaskStatus
+
 
 def list_subagent_transcripts(session_dir: Path) -> list[Path]:
     """Every subagent transcript under session_dir/subagents/."""
@@ -117,3 +119,41 @@ def stale_minutes(path: Path, now: float) -> float | None:
         return (now - path.stat().st_mtime) / 60.0
     except OSError:
         return None
+
+
+_OPEN_STATUSES = {TaskStatus.PENDING, TaskStatus.IN_PROGRESS, TaskStatus.UNKNOWN}
+
+
+def _task_dir(config_root: Path, session_id: str, team_name: str | None = None) -> Path | None:
+    """Prefer the meta.json teamName (V11 — the ONLY reliable mapping; the
+    incident session's team dir 'session-cc9d022f' is NOT derivable from its
+    session UUID 1e0c8efe…). UUID-shaped fallbacks cover non-team sessions."""
+    cands = []
+    if team_name:
+        cands.append(config_root / "tasks" / team_name)
+    cands += [config_root / "tasks" / session_id,
+              config_root / "tasks" / f"session-{session_id[:8]}"]
+    for cand in cands:
+        if cand.is_dir():
+            return cand
+    return None
+
+
+def open_task_count(config_root: Path, session_id: str, team_name: str | None = None) -> int | None:
+    """Open tasks for this session; None if no task dir exists (not a teams session).
+
+    Presence proves nothing (completed files persist on disk — V4); only the
+    status field decides. Unreadable files count as open (fail-open).
+    """
+    d = _task_dir(config_root, session_id, team_name)
+    if d is None:
+        return None
+    n = 0
+    for p in d.glob("*.json"):
+        try:
+            status = TaskStatus(json.loads(p.read_text()).get("status", ""))
+        except (OSError, ValueError):
+            status = TaskStatus.UNKNOWN
+        if status in _OPEN_STATUSES:
+            n += 1
+    return n
