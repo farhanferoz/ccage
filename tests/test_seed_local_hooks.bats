@@ -150,3 +150,62 @@ JSON
     _ccage_seed_local_hooks "$CAGE"
     [ "$(jq '[ .hooks.UserPromptSubmit[]?.hooks[]? ] | length' "$SETTINGS")" = "1" ]
 }
+
+@test "EVERY hook in a multi-hook matcher group is seeded, not just the first" {
+    # The bug: the seeder identified an entry by its FIRST hook
+    # (`script_base(cmds[0])`), so hook #2+ in a matcher group were invisible --
+    # never named, never checked, never seeded.
+    CCAGE_SEED_LOCAL_HOOKS=1
+    write_src <<JSON
+{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[
+  {"type":"command","command":"bash $HOOKS_DIR/xpu-guard.sh"},
+  {"type":"command","command":"bash $HOOKS_DIR/commit_provenance_guard.sh"}
+]}]}}
+JSON
+    _ccage_seed_local_hooks "$CAGE"
+    has_cmd PreToolUse "bash $HOOKS_DIR/xpu-guard.sh"
+    has_cmd PreToolUse "bash $HOOKS_DIR/commit_provenance_guard.sh"
+    # each lands as its own single-hook entry, matcher preserved
+    run jq -e '[ .hooks.PreToolUse[] | select(.matcher=="Bash") ] | length == 2' "$SETTINGS"
+    [ "$status" -eq 0 ]
+}
+
+@test "a second hook is seeded even when the first is already present" {
+    # The real-world shape: xpu-guard was already in all 71 cages, so the group
+    # was skipped wholesale and the NEW guard reached zero of them -- while every
+    # check reported "already complete". A false all-clear.
+    CCAGE_SEED_LOCAL_HOOKS=1
+    cat > "$SETTINGS" <<JSON
+{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"bash $HOOKS_DIR/xpu-guard.sh"}]}]}}
+JSON
+    write_src <<JSON
+{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[
+  {"type":"command","command":"bash $HOOKS_DIR/xpu-guard.sh"},
+  {"type":"command","command":"bash $HOOKS_DIR/commit_provenance_guard.sh"}
+]}]}}
+JSON
+    _ccage_seed_local_hooks "$CAGE"
+    has_cmd PreToolUse "bash $HOOKS_DIR/commit_provenance_guard.sh"
+    # ...and the already-present one is not duplicated by copying the group
+    run jq -e '[ .hooks.PreToolUse[]?.hooks[]?.command
+                | select(test("xpu-guard")) ] | length == 1' "$SETTINGS"
+    [ "$status" -eq 0 ]
+}
+
+@test "a group mixing a ccage-owned hook with a user hook seeds the user's half" {
+    # Previously any group CONTAINING a ccage-owned hook was skipped entirely,
+    # taking the user's hook down with it.
+    CCAGE_SEED_LOCAL_HOOKS=1
+    write_src <<JSON
+{"hooks":{"PostToolUse":[{"matcher":"Write|Edit","hooks":[
+  {"type":"command","command":"bash $HOOKS_DIR/resume_budget_check.sh"},
+  {"type":"command","command":"bash $HOOKS_DIR/code_hygiene_check.sh"}
+]}]}}
+JSON
+    _ccage_seed_local_hooks "$CAGE"
+    has_cmd PostToolUse "bash $HOOKS_DIR/code_hygiene_check.sh"
+    # ccage-owned one still skipped -- it has its own opt-out
+    run jq -e '[ .hooks.PostToolUse[]?.hooks[]?.command
+                | select(test("resume_budget_check")) ] | length == 0' "$SETTINGS"
+    [ "$status" -eq 0 ]
+}

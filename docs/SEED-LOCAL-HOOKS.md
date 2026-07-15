@@ -42,7 +42,10 @@ absent in effect.
 session-docs seeder, so it runs **every launch**, self-heals, and backfills existing cages.
 
 It reads the user's real `~/.claude/settings.json` and merges into the cage's
-`settings.json` every hook entry that **registers a script under `~/.claude/hooks`**.
+`settings.json` **every hook that registers a script under `~/.claude/hooks`** — judged
+**one hook at a time**, not one *entry* at a time. A matcher group carrying N hooks is split
+into N single-hook entries on the way in (see "The subtle bug worth keeping" below); two
+single-hook entries sharing a matcher behave identically to one entry with two hooks.
 
 ### The ownership line this deliberately respects
 
@@ -80,16 +83,35 @@ CLAUDE.md"*: ccage still decides nothing about what the policy says.
 
 ---
 
-## The subtle bug worth keeping
+## The subtle bugs worth keeping
 
-The first cut of this logic **matched the absolute hook path** and therefore **silently
-skipped every tilde-form registration** — including the orchestration gate, i.e. the single
-most important thing it exists to propagate. The user's `settings.json` writes
-`bash ~/.claude/hooks/x.sh`; the cages carry the expanded form.
+**Both are the same species: a filter that silently skips the thing it exists to propagate,
+while every check reports success.** That is this seeder's characteristic failure — it has now
+happened twice — so distrust any green result here that you have not dry-run.
 
-It was caught only because the implementation was **dry-run before being believed**. There is
-a regression test for exactly this (`tilde-form registrations are expanded, not silently
-skipped`), and commands are normalised to absolute paths on write.
+**1 — the tilde form.** The first cut **matched the absolute hook path** and therefore
+**silently skipped every tilde-form registration** — including the orchestration gate, i.e. the
+single most important thing it exists to propagate. The user's `settings.json` writes
+`bash ~/.claude/hooks/x.sh`; the cages carry the expanded form. Caught only because the
+implementation was **dry-run before being believed**. Regression test: `tilde-form
+registrations are expanded, not silently skipped`; commands are normalised on write.
+
+**2 — only the first hook in a matcher group.** The second cut judged each entry by its
+**first** hook (`name = script_base(cmds[0])`), so hook #2+ in a group were invisible: never
+named, never checked, never seeded. Measured 2026-07-15 — a new `commit_provenance_guard.sh`
+registered as a *second* hook on the existing `PreToolUse: Bash` group (beside `xpu-guard.sh`)
+reached **zero of 71 cages**, while the companion sync script reported **"already complete:
+37"**. It was telling the truth about `xpu-guard` and nothing at all about the new guard. A
+false all-clear is worse than a red one: nobody re-checks a control that reported success.
+Fixed by splitting each group into single-hook entries at the boundary, so the `[0]` indexing
+downstream is correct *by construction* rather than by luck. Regression tests: `EVERY hook in a
+multi-hook matcher group is seeded, not just the first` · `a second hook is seeded even when the
+first is already present` · `a group mixing a ccage-owned hook with a user hook seeds the user's
+half` — all three proven to FAIL before the fix.
+
+⚠️ **The same bug existed independently in `~/.claude/scripts/sync_cage_hooks.py`**, which is
+the user's backfill tool for existing cages. Two implementations of one idea, one shared blind
+spot. If you change entry-identification here, check there too.
 
 ---
 

@@ -412,27 +412,46 @@ for event, entries in (src.get("hooks") or {}).items():
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        cmds = [h.get("command") or "" for h in (entry.get("hooks") or [])
-                if isinstance(h, dict)]
-        # Ours = registers a script under the user's hooks dir. Anything else
-        # (an inline curl, a third-party integration) is not ccage's to spread.
-        if not any(hooks_dir in expand(c) for c in cmds):
-            continue
-        if any(script_base(c) in CCAGE_OWNED for c in cmds):
-            continue
-        name = script_base(cmds[0]) if cmds else ""
-        if not name or has_cmd(hooks.get(event), name):
-            continue
-        new = json.loads(json.dumps(entry))     # copy before rewriting paths
-        for h in new.get("hooks") or []:
-            if isinstance(h, dict):
-                h["command"] = expand(h.get("command") or "")
-        arr = hooks.get(event)
-        if not isinstance(arr, list):
-            arr = []
-        arr.append(new)
-        hooks[event] = arr
-        changed = True
+        # ONE HOOK AT A TIME, seeded as its own single-hook entry.
+        #
+        # This loop used to judge an entry by its FIRST hook only
+        # (`name = script_base(cmds[0])`), which silently dropped every hook
+        # after the first in a matcher group: the group was identified by hook
+        # #1, and if hook #1 was already in the cage the whole group was
+        # skipped. Measured 2026-07-15 -- registering a second guard on the
+        # existing `PreToolUse: Bash` group (beside an already-seeded one) left
+        # it in ZERO cages while every check reported success. That is the exact
+        # defect this seeder exists to fix, one level up: a control that is real
+        # in the file and absent in effect.
+        #
+        # Splitting also avoids re-seeding hook #1 as a duplicate when hook #2 is
+        # the one that is missing, and lets a group that MIXES a ccage-owned hook
+        # with a user hook seed the user's half instead of being skipped whole.
+        # Two single-hook entries sharing a matcher behave identically to one
+        # entry with two hooks.
+        for hook in (entry.get("hooks") or []):
+            if not isinstance(hook, dict):
+                continue
+            cmd = hook.get("command") or ""
+            # Ours = registers a script under the user's hooks dir. Anything else
+            # (an inline curl, a third-party integration) is not ccage's to spread.
+            if not cmd or hooks_dir not in expand(cmd):
+                continue
+            name = script_base(cmd)
+            # ccage seeds these itself, with their own opt-outs.
+            if not name or name in CCAGE_OWNED:
+                continue
+            if has_cmd(hooks.get(event), name):
+                continue
+            new = json.loads(json.dumps(entry))     # copy, preserving matcher
+            new["hooks"] = [json.loads(json.dumps(hook))]
+            new["hooks"][0]["command"] = expand(cmd)
+            arr = hooks.get(event)
+            if not isinstance(arr, list):
+                arr = []
+            arr.append(new)
+            hooks[event] = arr
+            changed = True
 
 if changed:
     data["hooks"] = hooks
