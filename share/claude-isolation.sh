@@ -295,6 +295,164 @@ if changed:
 PY
 }
 
+# ---- seed the USER's own local hooks into a cage's settings.json (opt-in) ---
+# Gated by CCAGE_SEED_LOCAL_HOOKS. Idempotently merges the hook registrations
+# the user already has in their real ~/.claude/settings.json into this cage's
+# settings.json, so a policy they maintain globally actually applies inside
+# every cage.
+#
+# WHY THIS EXISTS. A hook script under ~/.claude/hooks is inert until some
+# settings.json REGISTERS it, and every cage has its OWN settings.json. ccage
+# seeds only its own session-docs hooks, so a user's local policy hooks reached
+# a cage only if someone hand-edited that cage. Measured on one machine
+# (2026-07-15): the user's per-turn orchestration gate was registered in 34 of
+# 71 cages, 8 cages used within the last month had it nowhere, and EVERY NEW
+# CAGE WAS BORN WITHOUT IT — while the policy file itself claimed it "fires on
+# every turn" in "every single project". The claim was false and nothing could
+# have noticed.
+#
+# OWNERSHIP: ccage owns cage WIRING; the policy CONTENT is the user's. So this
+# copies registrations FROM the user's own settings.json and hardcodes no hook
+# names, exactly as CCAGE_SHARE_DIRS shares commands/agents/skills without
+# owning what is in them. ccage's own session-docs hooks are SKIPPED here --
+# _ccage_seed_session_docs_hooks seeds those and has its own opt-outs
+# (CCAGE_NO_AUTOLOAD / CCAGE_NO_BUDGET_HOOK), which forcing them in would
+# silently override.
+#
+# Like the session-docs seeder this runs every launch, so it self-heals and
+# backfills existing cages, and it references fixed script paths so it does not
+# bash the prompt cache.
+_ccage_seed_local_hooks() {
+    [ -n "${CCAGE_SEED_LOCAL_HOOKS:-}" ] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+
+    local dir="$1"
+    local hooks_dir="${CCAGE_HOOKS_DIR:-$HOME/.claude/hooks}"
+    local src="${CCAGE_LOCAL_HOOKS_SRC:-$HOME/.claude/settings.json}"
+    local settings="$dir/settings.json"
+
+    [ -f "$src" ] || return 0
+    # A cage IS the user's config dir when uncaged; never seed a file from itself.
+    [ "$src" = "$settings" ] && return 0
+
+    python3 - "$settings" "$src" "$hooks_dir" <<'PY' 2>/dev/null || true
+import json, os, sys, tempfile
+
+settings_path, src_path, hooks_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+
+# ccage seeds these itself, with their own opt-out flags. Copying them here
+# would override a deliberate --no-session-docs.
+CCAGE_OWNED = {"resume_autoload.sh", "resume_budget_check.sh", "autonomous_ask_guard.sh"}
+
+
+def expand(cmd):
+    """Expand `~` before matching or writing.
+
+    The user's settings.json may register `bash ~/.claude/hooks/x.sh` while cages
+    carry the absolute form; matching the literal absolute path silently skips
+    every tilde-form hook -- including, on the machine this was written for, the
+    single most important one.
+    """
+    return " ".join(os.path.expanduser(t) for t in cmd.split()) if cmd else ""
+
+
+def script_base(cmd):
+    return os.path.basename(expand(cmd).split()[-1]) if cmd else ""
+
+
+def has_cmd(entries, name):
+    # Dedup on basename, matching _ccage_seed_session_docs_hooks.
+    if not isinstance(entries, list):
+        return False
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        for h in (e.get("hooks") or []):
+            if isinstance(h, dict) and script_base(h.get("command") or "") == name:
+                return True
+    return False
+
+
+def load(path, default):
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except ValueError:
+        return None          # present but unparseable: caller decides
+    except OSError:
+        return default
+    return data if isinstance(data, dict) else default
+
+
+src = load(src_path, {})
+if not src:
+    sys.exit(0)
+
+data = load(settings_path, {})
+if data is None:
+    sys.exit(0)              # never clobber a present-but-broken settings.json
+
+mode = None
+if os.path.exists(settings_path):
+    try:
+        mode = os.stat(settings_path).st_mode & 0o777
+    except OSError:
+        pass
+
+hooks = data.get("hooks")
+if not isinstance(hooks, dict):
+    hooks = {}
+
+changed = False
+for event, entries in (src.get("hooks") or {}).items():
+    if not isinstance(entries, list):
+        continue
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        cmds = [h.get("command") or "" for h in (entry.get("hooks") or [])
+                if isinstance(h, dict)]
+        # Ours = registers a script under the user's hooks dir. Anything else
+        # (an inline curl, a third-party integration) is not ccage's to spread.
+        if not any(hooks_dir in expand(c) for c in cmds):
+            continue
+        if any(script_base(c) in CCAGE_OWNED for c in cmds):
+            continue
+        name = script_base(cmds[0]) if cmds else ""
+        if not name or has_cmd(hooks.get(event), name):
+            continue
+        new = json.loads(json.dumps(entry))     # copy before rewriting paths
+        for h in new.get("hooks") or []:
+            if isinstance(h, dict):
+                h["command"] = expand(h.get("command") or "")
+        arr = hooks.get(event)
+        if not isinstance(arr, list):
+            arr = []
+        arr.append(new)
+        hooks[event] = arr
+        changed = True
+
+if changed:
+    data["hooks"] = hooks
+    d = os.path.dirname(settings_path) or "."
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".settings.", suffix=".ccage.tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, settings_path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+PY
+}
+
 # ---- baseline .claudesignore (only if the project has none) ----
 _ccage_write_signore() {
     local target_dir="$1"
@@ -685,6 +843,7 @@ claude() {
     local -x CLAUDE_CONFIG_DIR="$dir"
     _ccage_bootstrap_dir "$CLAUDE_CONFIG_DIR" "$PWD"
     _ccage_seed_session_docs_hooks "$CLAUDE_CONFIG_DIR"
+    _ccage_seed_local_hooks "$CLAUDE_CONFIG_DIR"
     _ccage_write_signore "$PWD"
 
     # local -x for the same reason as CLAUDE_CONFIG_DIR above: configure the caged
