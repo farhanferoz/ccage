@@ -108,6 +108,22 @@ source_line="for f in \"$rcd\"/*.sh; do [ -r \"\$f\" ] && . \"\$f\"; done; unset
 install_file() {
     local src="$1" dest="$2" mode="${3:-0644}"
     [ -f "$src" ] || { printf 'source file not found: %s\n' "$src" >&2; exit 1; }
+    # Back up an existing, different target before overwriting it — a file
+    # like claude-isolation.sh is sourced by every interactive shell, so a bad
+    # overwrite (syntax error, unwanted downgrade) breaks every new shell, not
+    # just Claude Code. Skipped when the target doesn't exist yet (fresh
+    # install) or is byte-identical to what we're about to install (no-op
+    # reinstall) — otherwise every re-run would litter a fresh backup.
+    if [ -f "$dest" ]; then
+        if cmp -s "$src" "$dest"; then
+            :
+        else
+            local backup
+            backup="$dest.pre-update-$(date +%Y%m%d-%H%M%S)"
+            run cp "$dest" "$backup"
+            printf 'backed up %s -> %s\n' "$dest" "$backup"
+        fi
+    fi
     run mkdir -p "$(dirname "$dest")"
     run cp "$src" "$dest"
     run chmod "$mode" "$dest"

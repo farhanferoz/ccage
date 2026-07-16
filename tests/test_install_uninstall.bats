@@ -85,6 +85,27 @@ setup() {
     [ ! -f "$FAKE_HOME/.bashrc.d/claude-ccusage.sh" ]
 }
 
+@test "install_file: backs up an existing modified target, but not on a fresh or no-op install" {
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    # Fresh install: no target existed beforehand, so no backup should appear.
+    ! ls "$FAKE_HOME/.bashrc.d"/claude-isolation.sh.pre-update-* >/dev/null 2>&1
+
+    # Modify the installed target, then reinstall — must back up the old content.
+    printf '# locally modified\n' >> "$FAKE_HOME/.bashrc.d/claude-isolation.sh"
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    local backup
+    backup=$(ls "$FAKE_HOME/.bashrc.d"/claude-isolation.sh.pre-update-* 2>/dev/null | head -1)
+    [ -n "$backup" ]
+    grep -qx '# locally modified' "$backup"
+
+    # Re-running install again (target now byte-identical to source) must not
+    # add a second backup — no litter on a no-op reinstall.
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    local n
+    n=$(ls "$FAKE_HOME/.bashrc.d"/claude-isolation.sh.pre-update-* 2>/dev/null | wc -l | tr -d '[:space:]')
+    [ "$n" -eq 1 ]
+}
+
 @test "install --dry-run: nothing written" {
     HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --dry-run --prefix "$FAKE_HOME/.local" >/dev/null
     [ ! -e "$FAKE_HOME/.bashrc.d" ]

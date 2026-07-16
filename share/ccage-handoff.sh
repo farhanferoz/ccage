@@ -449,16 +449,27 @@ _ccage_handoff_cost() {
 # ---- clipboard helpers -----------------------------------------------------
 # Try pbcopy → wl-copy → xclip → xsel. First found wins. Silent skip if none.
 # Returns 0 on success (clipboard set), 1 if no tool found.
+#
+# Each copier is wrapped in `timeout 5` when GNU coreutils' `timeout` is on
+# PATH: with WAYLAND_DISPLAY set but the socket unanswering (sandboxed shells,
+# SSH with a stale env), wl-copy blocks in the FOREGROUND before daemonizing,
+# so the pipeline never completes and the handoff call hangs forever (observed
+# live, 23 minutes, 2026-07-16). `timeout` is absent on stock macOS, so the
+# bare (untimed) call is kept there — pbcopy doesn't share this failure mode.
 _ccage_handoff_copy_to_clipboard() {
     local content="$1"
+    local runner=""
+    if command -v timeout >/dev/null 2>&1; then
+        runner="timeout 5"
+    fi
     if command -v pbcopy >/dev/null 2>&1; then
-        printf '%s' "$content" | pbcopy && return 0
+        printf '%s' "$content" | $runner pbcopy && return 0
     elif command -v wl-copy >/dev/null 2>&1; then
-        printf '%s' "$content" | wl-copy && return 0
+        printf '%s' "$content" | $runner wl-copy && return 0
     elif command -v xclip >/dev/null 2>&1; then
-        printf '%s' "$content" | xclip -selection clipboard && return 0
+        printf '%s' "$content" | $runner xclip -selection clipboard && return 0
     elif command -v xsel >/dev/null 2>&1; then
-        printf '%s' "$content" | xsel --clipboard --input && return 0
+        printf '%s' "$content" | $runner xsel --clipboard --input && return 0
     fi
     return 1
 }
