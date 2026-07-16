@@ -17,6 +17,24 @@ setup() {
     # Pin handoff output dir into a temp area so tests never write to $HOME.
     CCAGE_HANDOFF_DIR="$BATS_TEST_TMPDIR/handoffs"
     export CCAGE_HANDOFF_DIR
+
+    # Stub pbcopy so NO test can ever reach a real clipboard tool. pbcopy is
+    # first in _ccage_handoff_copy_to_clipboard's fallback chain, so putting it
+    # on PATH ahead of everything else guarantees it wins even on a machine
+    # that also has a real (possibly hanging) wl-copy/xclip/xsel. This is the
+    # primary defense against the file-mode tests below reaching the network/
+    # display-server clipboard at all — see the comment on the "default file
+    # write" test for why a stub beats the fd-3 trick alone.
+    local stub_bin="$BATS_TEST_TMPDIR/stubbin"
+    mkdir -p "$stub_bin"
+    cat > "$stub_bin/pbcopy" <<'STUB'
+#!/usr/bin/env bash
+cat >/dev/null
+exit 0
+STUB
+    chmod +x "$stub_bin/pbcopy"
+    PATH="$stub_bin:$PATH"
+    export PATH
 }
 
 # ===== pure-function helpers (fast: one jq/shell call each) =====
@@ -166,9 +184,17 @@ setup() {
 }
 
 @test "generate: default file write (dir + slug/prefix filename) and --output path" {
-    # File mode auto-copies to the clipboard; on Wayland `wl-copy` daemonizes and,
-    # if it inherits bats's control fd (fd 3), hangs the whole run at exit. Mute std
-    # fds and close fd 3 (`3>&-`) so the lingering copier can't hold the harness open.
+    # File mode auto-copies to the clipboard. Primary defense: the pbcopy stub
+    # from setup() is first in the fallback chain, so wl-copy/xclip/xsel are
+    # never invoked here at all -- neither of wl-copy's two hang modes can
+    # fire (daemonizing while holding bats's control fd; OR, the worse one,
+    # blocking in the FOREGROUND before it daemonizes at all when
+    # WAYLAND_DISPLAY is set but the socket never answers -- observed live,
+    # 23 minutes, 2026-07-16). That foreground case is exactly what the fd-3
+    # trick below CANNOT fix, since the hang happens before wl-copy backgrounds
+    # itself; the stub is what actually closes the gap. The mute + `3>&-` is
+    # kept only as belt-and-braces for a machine where the stub dir somehow
+    # isn't first on PATH.
     PWD=/home/u/myproj _ccage_handoff_generate "$FIXTURES/minimal.jsonl" >/dev/null 2>&1 </dev/null 3>&-
     [ -d "$CCAGE_HANDOFF_DIR" ]
     local f
@@ -182,6 +208,15 @@ setup() {
     _ccage_handoff_generate "$FIXTURES/minimal.jsonl" --output "$out" >/dev/null 2>&1 </dev/null 3>&-
     [ -f "$out" ]
     grep -q "Handoff: test-min-001" "$out"
+}
+
+@test "generate: file mode completes promptly with the pbcopy stub (no clipboard hang)" {
+    # Directly proves the fix: previously a live wl-copy foreground-hang wedged
+    # this exact code path for 23 minutes. With the pbcopy stub in place the
+    # whole generate-and-copy call must finish in well under that.
+    SECONDS=0
+    PWD=/home/u/promptcheck _ccage_handoff_generate "$FIXTURES/minimal.jsonl" >/dev/null 2>&1 </dev/null 3>&-
+    [ "$SECONDS" -lt 10 ]
 }
 
 # ===== dispatcher integration — bin/ccage handoff =====
