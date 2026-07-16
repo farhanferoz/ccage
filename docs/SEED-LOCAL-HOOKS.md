@@ -291,7 +291,7 @@ too) and *for* `ccage doctor` reporting drift (step 6) — not against it.
    "KEEP IN SYNC" comment — this change may need a doctor-side twin**). The 2026-07-16 drift
    incident is the argument for it: the gap was invisible for a day precisely because nothing
    reported it. ✅ **Done.**
-7. **AT RELEASE, remove the interim second seeder.** Delete the
+7. ✅ **DONE at release (v0.12.0, 2026-07-16): the interim second seeder was removed.** Delete the
    `sync_cage_hooks.py --cage "$config_dir" --apply --quiet` call from
    `~/.bashrc.d/claude-overrides.sh` (`_ccage_pre_exec_hook`) — ccage takes over that job.
    Harmless if forgotten (both seeders are idempotent and dedup on basename), just redundant
