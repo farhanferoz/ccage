@@ -89,10 +89,24 @@ fi
 # moment they are about to be skipped. Best-effort and silent on any failure:
 # a NOTE must never block or garble a session start. Only docs that actually
 # exist on disk are named — a stale pointer earns silence, not a directive.
+#
+# Scope: the `### Plan` section ONLY. That section is where /checkpoint records
+# the GOVERNING doc (exact path), so any .md under it governs by construction —
+# no filename guessing. Scanning the whole RESUME instead (the prior approach)
+# dragged in tangential/stale/foreign `PLAN.md` mentions from Session-block
+# history and fired the dispatcher directive on sessions that weren't plan-
+# governed at all. No `### Plan` section, or none of its refs on disk → this
+# block emits nothing (a session that isn't plan-driven gets no directive).
 if [ -f "$resume" ]; then
     plan_note=""
-    plan_refs="$(grep -oE '[~/A-Za-z0-9._-][A-Za-z0-9._/~-]*\.md' "$resume" 2>/dev/null \
-        | grep -iE '(^|/)plans?/[^/]+\.md$|(^|/)(IMPLEMENTATION_)?PLAN([._-][^/]*)?\.md$|(^|/)MASTER\.md$|-plan(-[a-z0-9]+)*\.md$' 2>/dev/null \
+    # awk carves out the `### Plan` block (up to the next ## / ### heading);
+    # grep then pulls any .md path token from it — filename-agnostic on purpose.
+    plan_refs="$(awk '
+            /^###[[:space:]]+Plan[[:space:]]*$/ { inplan=1; next }
+            inplan && /^##/                     { inplan=0 }
+            inplan
+        ' "$resume" 2>/dev/null \
+        | grep -oE '[~/A-Za-z0-9._-][A-Za-z0-9._/~-]*\.md' 2>/dev/null \
         | sort -u | head -5)"
     for ref in $plan_refs; do
         # shellcheck disable=SC2088  # the "~/" pattern matches literal text from RESUME; no expansion intended
