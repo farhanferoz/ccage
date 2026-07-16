@@ -96,6 +96,43 @@ PY
 }
 
 # ---------------------------------------------------------------------------
+# Local-hook seeding — REPORT ONLY, never writes anything. KEEP IN SYNC with
+# _ccage_seed_local_hooks in share/claude-isolation.sh: same hook-derivation
+# rule (one hook at a time, tilde-expanded, ccage-owned hooks skipped), so the
+# counts below reflect exactly what that seeder would (or wouldn't) add.
+# ---------------------------------------------------------------------------
+_ccage_doctor_local_hooks_status() {
+    local settings="$1" src="$2" hooks_dir="$3"
+    python3 - "$settings" "$src" "$hooks_dir" <<'PY' 2>/dev/null
+import json, os, sys
+settings_path, src_path, hooks_dir = sys.argv[1:4]
+OWNED = {"resume_autoload.sh", "resume_budget_check.sh", "autonomous_ask_guard.sh"}
+def expand(c): return " ".join(os.path.expanduser(t) for t in c.split()) if c else ""
+def base(c): return os.path.basename(expand(c).split()[-1]) if c else ""
+def load(p):
+    try:
+        d = json.load(open(p))
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+def regs(data):
+    out = set()
+    for event, entries in (data.get("hooks") or {}).items():
+        if not isinstance(entries, list):
+            continue
+        for e in entries:
+            for h in ((e.get("hooks") or []) if isinstance(e, dict) else []):
+                cmd = (h.get("command") or "") if isinstance(h, dict) else ""
+                n = base(cmd) if cmd and hooks_dir in expand(cmd) else ""
+                if n and n not in OWNED:
+                    out.add((event, n))
+    return out
+want, have = regs(load(src_path)), regs(load(settings_path))
+print("%d\t%d" % (len(want & have), len(want - have)))
+PY
+}
+
+# ---------------------------------------------------------------------------
 # Hooks-block removal — the inverse of _ccage_doctor_seed, for uninstall.
 # Removes only OUR two hook entries (matched on script basename, mirroring the
 # seed dedup), preserves every other key and hook, prunes emptied lists, and
@@ -254,12 +291,25 @@ _ccage_doctor_main() {
     local trim_list="" tidy_list=""
     local apply=1; [ "$dry_run" = 1 ] && apply=0
 
+    # Report-only status for CCAGE_SEED_LOCAL_HOOKS — never seeds/writes here;
+    # _ccage_seed_local_hooks (share/claude-isolation.sh) is what actually acts.
+    local local_hooks_enabled="${CCAGE_SEED_LOCAL_HOOKS:-}"
+    local local_hooks_src="${CCAGE_LOCAL_HOOKS_SRC:-$HOME/.claude/settings.json}"
+    local lh_present=0 lh_missing=0 lh_present_n lh_missing_n
+
     local d owner result rf pm proj_slug label
     for d in "$root/$prefix"*/; do
         [ -d "$d" ] || continue
         d="${d%/}"
         [ -f "$d/.owning_path" ] || continue   # only real cages
         scanned=$((scanned + 1))
+
+        if [ -n "$local_hooks_enabled" ]; then
+            IFS=$'\t' read -r lh_present_n lh_missing_n \
+                < <(_ccage_doctor_local_hooks_status "$d/settings.json" "$local_hooks_src" "$hooks_dir")
+            lh_present=$((lh_present + ${lh_present_n:-0}))
+            lh_missing=$((lh_missing + ${lh_missing_n:-0}))
+        fi
 
         # 1. backfill (or, with --unseed, remove) the hooks block
         if [ "$unseed" = 1 ]; then
@@ -327,6 +377,13 @@ _ccage_doctor_main() {
         printf '%d cage(s) would be seeded with the session-docs hooks block.\n' "$seeded"
     else
         printf '%d cage(s) seeded with the session-docs hooks block.\n' "$seeded"
+    fi
+
+    if [ -n "$local_hooks_enabled" ]; then
+        printf 'Local hook seeding (CCAGE_SEED_LOCAL_HOOKS): enabled — %d registration(s) present, %d missing across scanned cages.\n' \
+            "$lh_present" "$lh_missing"
+    else
+        printf 'Local hook seeding (CCAGE_SEED_LOCAL_HOOKS): disabled.\n'
     fi
 
     printf '\nRepos with a bloated RESUME (run /checkpoint there to trim):\n'

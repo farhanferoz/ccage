@@ -322,6 +322,10 @@ PY
 # Like the session-docs seeder this runs every launch, so it self-heals and
 # backfills existing cages, and it references fixed script paths so it does not
 # bash the prompt cache.
+#
+# KEEP IN SYNC with _ccage_doctor_local_hooks_status in share/ccage-doctor.sh —
+# that is a REPORT-ONLY twin (never writes) using the same hook-derivation
+# rule, so `ccage doctor` can show present/missing counts without acting.
 _ccage_seed_local_hooks() {
     [ -n "${CCAGE_SEED_LOCAL_HOOKS:-}" ] || return 0
     command -v python3 >/dev/null 2>&1 || return 0
