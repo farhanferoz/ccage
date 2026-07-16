@@ -563,7 +563,8 @@ GUARD="$BATS_TEST_DIRNAME/../share/hooks/autonomous_ask_guard.sh"
 
 @test "ask-guard: blocks (exit 2) with batching guidance when CCAGE_AUTONOMOUS=1" {
     run -2 bash -c "echo '{}' | CCAGE_AUTONOMOUS=1 bash '$GUARD'"
-    [[ "$output" == *"AskUserQuestion is disabled"* ]]
+    [[ "$output" == *"AskUserQuestion must"* ]]
+    [[ "$output" == *"ask them in prose instead"* ]]
     [[ "$output" == *"### Decisions"* ]]
     [[ "$output" == *"reversible default"* ]]
 }

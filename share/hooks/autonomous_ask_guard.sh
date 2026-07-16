@@ -21,8 +21,12 @@ cat > /dev/null 2>&1 || true
 case "${CCAGE_AUTONOMOUS:-}" in
     1|true|yes)
         cat >&2 <<'MSG'
-Autonomous run: AskUserQuestion is disabled — the user is away, and a blocking
-question stalls the entire run. Instead:
+Autonomous run: this session is running unattended, so AskUserQuestion must
+not block it — a blocking question can stall the whole run indefinitely.
+If the user appears to be present (recent genuine user turns in this
+conversation, not just tool output), ask them in prose instead of using this
+tool — a plain question they can read and answer doesn't block anything.
+Otherwise, for the truly unattended case:
 1. Check the ratified plan/design doc first (grep it by keyword) — it usually
    already decides this question.
 2. Otherwise take the reversible default and log the decision + rationale in
