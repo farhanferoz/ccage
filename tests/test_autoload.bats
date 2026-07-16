@@ -219,11 +219,24 @@ memdir() {
 }
 
 # ===== plan-doc pointers (component 1b: read-the-plan directive) =====
+#
+# Detection is SCOPED to the `### Plan` section — the one place /checkpoint
+# records the governing doc's exact path. A plan-doc path anywhere else in
+# RESUME (a Session block, a Threads bullet, tangential history) must NOT fire
+# the directive: the old whole-file scan mis-fired on stale/foreign `PLAN.md`
+# mentions and on sessions that were never plan-governed. NOTE lines carry the
+# resolved ABSOLUTE path, so "not listed" assertions key on the "$REPO/…" form
+# (or the "DISPATCHER mode" signature) — the hook also echoes the raw RESUME
+# body, which contains the relative mention.
 
-@test "plan pointer: existing repo-relative plan doc earns the READ+dispatch NOTE" {
+@test "plan pointer: governing doc under ### Plan earns the READ+dispatch NOTE" {
     mkdir -p "$REPO/plans"
     printf '# the real plan\n' > "$REPO/plans/2026-07-16-feature-plan.md"
-    printf '## State\n- work follows plans/2026-07-16-feature-plan.md\n' > "$REPO/RESUME.md"
+    {
+        printf '## State\n\n'
+        printf '### Plan\n'
+        printf -- '- `plans/2026-07-16-feature-plan.md` — 2/5 done; next wave A,B\n'
+    } > "$REPO/RESUME.md"
     run run_hook
     [ "$status" -eq 0 ]
     [[ "$output" == *"READ each doc before executing"* ]]
@@ -231,19 +244,21 @@ memdir() {
     [[ "$output" == *"$REPO/plans/2026-07-16-feature-plan.md"* ]]
 }
 
-@test "plan pointer: reference to a MISSING plan doc earns silence, not a directive" {
-    printf '## State\n- see plans/long-gone-plan.md\n' > "$REPO/RESUME.md"
+@test "plan pointer: a doc under ### Plan that is MISSING on disk earns silence" {
+    {
+        printf '### Plan\n'
+        printf -- '- plans/long-gone-plan.md — 0/3 done\n'
+    } > "$REPO/RESUME.md"
     run run_hook
     [ "$status" -eq 0 ]
     [[ "$output" != *"DISPATCHER mode"* ]]
-    [[ "$output" != *"long-gone-plan.md -"* ]]
 }
 
-@test "plan pointer: absolute and tilde paths resolve; capped at 5 refs" {
+@test "plan pointer: absolute path under ### Plan resolves; more than 5 refs capped" {
     mkdir -p "$REPO/other"
     printf 'x\n' > "$REPO/other/IMPLEMENTATION_PLAN.md"
     {
-        printf '## State\n'
+        printf '### Plan\n'
         printf -- '- abs: %s/other/IMPLEMENTATION_PLAN.md\n' "$REPO"
         for i in 1 2 3 4 5 6 7; do printf -- '- also plans/missing-%s-plan.md\n' "$i"; done
     } > "$REPO/RESUME.md"
@@ -252,7 +267,7 @@ memdir() {
     [[ "$output" == *"$REPO/other/IMPLEMENTATION_PLAN.md"* ]]
 }
 
-@test "plan pointer: RESUME with no plan references stays exactly as before" {
+@test "plan pointer: RESUME with no ### Plan section stays exactly as before" {
     printf '## State\n- just prose, nothing planny\n' > "$REPO/RESUME.md"
     run run_hook
     [ "$status" -eq 0 ]
@@ -260,14 +275,58 @@ memdir() {
     [[ "$output" == *"just prose"* ]]
 }
 
-@test "plan pointer: programme-plan layout (plan/MASTER.md + strand file) is detected" {
+@test "plan pointer: programme-plan layout under ### Plan (MASTER.md + strand) is detected" {
     mkdir -p "$REPO/plan"
     printf '# index\n' > "$REPO/plan/MASTER.md"
     printf '# strand\n' > "$REPO/plan/strand-a.md"
-    printf '## State\n- programme: plan/MASTER.md, working plan/strand-a.md\n' > "$REPO/RESUME.md"
+    {
+        printf '### Plan\n'
+        printf -- '- programme index: plan/MASTER.md\n'
+        printf -- '- working strand: plan/strand-a.md\n'
+    } > "$REPO/RESUME.md"
     run run_hook
     [ "$status" -eq 0 ]
     [[ "$output" == *"$REPO/plan/MASTER.md"* ]]
     [[ "$output" == *"$REPO/plan/strand-a.md"* ]]
     [[ "$output" == *"DISPATCHER mode"* ]]
+}
+
+# --- over-fire guards: the whole point of scoping to ### Plan ---
+
+@test "plan pointer: a plan doc mentioned OUTSIDE ### Plan (Session block) stays silent" {
+    mkdir -p "$REPO/docs"
+    printf 'x\n' > "$REPO/docs/OLD-PLAN.md"          # exists on disk...
+    {
+        printf '## State\n\n### Now\n- shipping v1\n\n'
+        printf '## Session 2026-07-16\n'
+        printf 'Earlier we followed docs/OLD-PLAN.md, now superseded.\n'  # ...but only in history
+    } > "$REPO/RESUME.md"
+    run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"DISPATCHER mode"* ]]
+    [[ "$output" != *"$REPO/docs/OLD-PLAN.md"* ]]     # abs form = the NOTE listing it
+}
+
+@test "plan pointer: only ### Plan docs listed, not a stray existing PLAN.md elsewhere" {
+    mkdir -p "$REPO/docs"
+    printf 'live\n'  > "$REPO/docs/WEEKLY-GUARD.md"
+    printf 'stale\n' > "$REPO/docs/PLAN.md"           # exists, but not the governing doc
+    {
+        printf '### Plan\n- `docs/WEEKLY-GUARD.md` — 3/3 built; release remains\n\n'
+        printf '## Session\nBuilt on top of the old docs/PLAN.md scaffold.\n'
+    } > "$REPO/RESUME.md"
+    run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"$REPO/docs/WEEKLY-GUARD.md"* ]]
+    [[ "$output" != *"$REPO/docs/PLAN.md"* ]]
+}
+
+@test "plan pointer: bootstrap ### Plan placeholder (no real .md) stays silent" {
+    {
+        printf '### Plan\n'
+        printf -- '- <full path to plan doc> — <N/M tasks done>\n'
+    } > "$REPO/RESUME.md"
+    run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"DISPATCHER mode"* ]]
 }
