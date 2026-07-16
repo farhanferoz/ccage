@@ -79,6 +79,42 @@ if [ -f "$resume" ]; then
     fi
 fi
 
+# ---- 1b. plan-doc pointers: the plan must be READ, not summarized from ----
+# Measured failure (2026-07-16, user-reported, recurring): a resumed session
+# acts on RESUME's summary bullets, never opens the plan doc they point to —
+# tasks silently drop — and executes what's left sequentially, because a
+# bullet list carries no dependency structure. RESUME is deliberately lean
+# (the budget above enforces it), which makes its plan POINTERS load-bearing;
+# this block re-asserts them, with a read-and-dispatch directive, at the exact
+# moment they are about to be skipped. Best-effort and silent on any failure:
+# a NOTE must never block or garble a session start. Only docs that actually
+# exist on disk are named — a stale pointer earns silence, not a directive.
+if [ -f "$resume" ]; then
+    plan_note=""
+    plan_refs="$(grep -oE '[~/A-Za-z0-9._-][A-Za-z0-9._/~-]*\.md' "$resume" 2>/dev/null \
+        | grep -iE '(^|/)plans?/[^/]+\.md$|(^|/)(IMPLEMENTATION_)?PLAN([._-][^/]*)?\.md$|(^|/)MASTER\.md$|-plan(-[a-z0-9]+)*\.md$' 2>/dev/null \
+        | sort -u | head -5)"
+    for ref in $plan_refs; do
+        # shellcheck disable=SC2088  # the "~/" pattern matches literal text from RESUME; no expansion intended
+        case "$ref" in
+            "~/"*) cand="$HOME/${ref#\~/}" ;;
+            /*)    cand="$ref" ;;
+            *)     cand="$base/$ref" ;;
+        esac
+        if [ -f "$cand" ]; then
+            plan_note="${plan_note}  - ${cand}
+"
+        fi
+    done
+    if [ -n "$plan_note" ]; then
+        printf '\nNOTE: RESUME references the plan doc(s) below (verified present on disk).\n'
+        printf 'RESUME is a summary, never the plan: READ each doc before executing any task\n'
+        printf 'it governs. An execution-level plan with independent remaining tasks means\n'
+        printf 'DISPATCHER mode — partition into dependency waves and dispatch concurrently;\n'
+        printf 'never execute the list sequentially inline.\n%s' "$plan_note"
+    fi
+fi
+
 # ---- 1b. post-compaction nudge ----
 # After auto-compaction (or a manual /compact) the conversation is summarized and
 # the RESUME above is only as fresh as the last /checkpoint. A hook can't run the

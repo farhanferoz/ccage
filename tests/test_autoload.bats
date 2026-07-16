@@ -217,3 +217,57 @@ memdir() {
     [ "$status" -eq 0 ]
     [[ "$output" != *"over budget"* ]]
 }
+
+# ===== plan-doc pointers (component 1b: read-the-plan directive) =====
+
+@test "plan pointer: existing repo-relative plan doc earns the READ+dispatch NOTE" {
+    mkdir -p "$REPO/plans"
+    printf '# the real plan\n' > "$REPO/plans/2026-07-16-feature-plan.md"
+    printf '## State\n- work follows plans/2026-07-16-feature-plan.md\n' > "$REPO/RESUME.md"
+    run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"READ each doc before executing"* ]]
+    [[ "$output" == *"DISPATCHER mode"* ]]
+    [[ "$output" == *"$REPO/plans/2026-07-16-feature-plan.md"* ]]
+}
+
+@test "plan pointer: reference to a MISSING plan doc earns silence, not a directive" {
+    printf '## State\n- see plans/long-gone-plan.md\n' > "$REPO/RESUME.md"
+    run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"DISPATCHER mode"* ]]
+    [[ "$output" != *"long-gone-plan.md -"* ]]
+}
+
+@test "plan pointer: absolute and tilde paths resolve; capped at 5 refs" {
+    mkdir -p "$REPO/other"
+    printf 'x\n' > "$REPO/other/IMPLEMENTATION_PLAN.md"
+    {
+        printf '## State\n'
+        printf -- '- abs: %s/other/IMPLEMENTATION_PLAN.md\n' "$REPO"
+        for i in 1 2 3 4 5 6 7; do printf -- '- also plans/missing-%s-plan.md\n' "$i"; done
+    } > "$REPO/RESUME.md"
+    run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"$REPO/other/IMPLEMENTATION_PLAN.md"* ]]
+}
+
+@test "plan pointer: RESUME with no plan references stays exactly as before" {
+    printf '## State\n- just prose, nothing planny\n' > "$REPO/RESUME.md"
+    run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"DISPATCHER"* ]]
+    [[ "$output" == *"just prose"* ]]
+}
+
+@test "plan pointer: programme-plan layout (plan/MASTER.md + strand file) is detected" {
+    mkdir -p "$REPO/plan"
+    printf '# index\n' > "$REPO/plan/MASTER.md"
+    printf '# strand\n' > "$REPO/plan/strand-a.md"
+    printf '## State\n- programme: plan/MASTER.md, working plan/strand-a.md\n' > "$REPO/RESUME.md"
+    run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"$REPO/plan/MASTER.md"* ]]
+    [[ "$output" == *"$REPO/plan/strand-a.md"* ]]
+    [[ "$output" == *"DISPATCHER mode"* ]]
+}
