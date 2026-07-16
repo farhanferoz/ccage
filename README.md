@@ -314,6 +314,7 @@ All off by default. Set any of these before launching `claude`:
 | `CCAGE_SESSION_DOCS=1` | Opt **in**: seed the session-continuity hooks into each cage's `settings.json`. |
 | `CCAGE_NO_AUTOLOAD=1` | Don't seed the `RESUME.md` auto-read hook. |
 | `CCAGE_NO_BUDGET_HOOK=1` | Don't seed the RESUME-size reminder hook. |
+| `CCAGE_SEED_LOCAL_HOOKS=1` | Opt **in**: seed the user's own policy hooks (from `~/.claude/settings.json`) into each cage's `settings.json`. See `docs/FEATURES.md`. |
 | `CCAGE_ROOT=/some/dir` | Parent directory for isolated configs (default `$HOME`). |
 | `CCAGE_PREFIX=.claude-` | Directory name prefix (default `.claude-`). |
 | `CCAGE_PLUGINS_FROM=/dir` | Opt **in**: load every plugin dir under `/dir` (or `/dir` itself if it is one) into all cages via `--plugin-dir`. Default unset. |

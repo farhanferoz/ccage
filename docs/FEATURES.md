@@ -477,6 +477,40 @@ Closes the loop between the structural `ccage handoff` brief and a repo's durabl
 
 ---
 
+## Seeding the user's own local hooks (`CCAGE_SEED_LOCAL_HOOKS`) [shipped]
+
+A hook script under `~/.claude/hooks` is inert until some `settings.json` registers it, and every cage has its own — so a policy hook the user maintains globally (an orchestration gate, a write-set guard, …) reached a cage only if someone hand-edited that cage's `settings.json`. `_ccage_seed_local_hooks` in `share/claude-isolation.sh` closes that gap: on every bootstrap it reads the user's real `~/.claude/settings.json` and merges into the cage's `settings.json` **every hook that registers a script under `~/.claude/hooks`**, judged one hook at a time — a matcher group carrying N hooks is split into N single-hook entries on the way in, so hook #2+ in a group is never invisible to the seeder the way it would be if the group were judged by its first hook alone.
+
+Ownership line: **ccage owns cage wiring, the policy content is the user's.** Registrations are copied from the user's own `settings.json` — no hook name is hardcoded, the same principle as `CCAGE_SHARE_DIRS` sharing `commands`/`agents`/`skills` without owning their content. ccage's own hooks (`resume_autoload.sh`, `resume_budget_check.sh`, `autonomous_ask_guard.sh`) are always skipped — `_ccage_seed_session_docs_hooks` seeds those and they have their own opt-outs (`CCAGE_NO_AUTOLOAD`, `CCAGE_NO_BUDGET_HOOK`); copying them here would silently override a deliberate opt-out. Anything not under the hooks dir (an inline `curl` notification integration, say) is left alone — not ccage's to spread.
+
+Idempotent (dedups on script basename), preserves every unrelated key and every pre-existing hook, tilde-form (`bash ~/.claude/hooks/x.sh`) and absolute-form registrations are treated as the same hook, atomic write (`mkstemp` + `os.replace`, mode preserved), and never clobbers a present-but-unparseable `settings.json`.
+
+### Opt-in
+- `CCAGE_SEED_LOCAL_HOOKS=1` — off by default, mirroring `CCAGE_SESSION_DOCS`: it changes hook behavior in every cage, so it stays opt-in.
+
+### Config
+
+| Var | Default | Effect |
+|---|---|---|
+| `CCAGE_SEED_LOCAL_HOOKS` | unset | Master opt-in. Seed the user's local policy hooks into a cage's `settings.json` on bootstrap. |
+| `CCAGE_LOCAL_HOOKS_SRC` | `~/.claude/settings.json` | Source settings file to read hook registrations from. |
+| `CCAGE_HOOKS_DIR` | `~/.claude/hooks` | Which dir counts as "the user's hooks" (shared with the session-docs seeder above). |
+
+Full design rationale, the two bugs found while building it (tilde-form registrations silently skipped; only the first hook in a matcher group seeded), and the field evidence for why "derive the list, never hardcode it" is load-bearing: [`docs/SEED-LOCAL-HOOKS.md`](SEED-LOCAL-HOOKS.md).
+
+---
+
+## Autonomous `AskUserQuestion` guard [in ccage-auto]
+
+A watched `ccage-auto` launch exports `CCAGE_AUTONOMOUS=1` into the launched session and registers a per-run `PreToolUse` hook (`share/hooks/autonomous_ask_guard.sh`) via a generated `--settings` file passed as `claude --settings <file>` — nothing is ever seeded into a cage's own `settings.json` for this; the registration lives and dies with the run. While the marker is set, the hook blocks (exit 2) any `AskUserQuestion` call and feeds guidance back to the model over stderr: check the ratified plan/design doc first, otherwise take the reversible default and log it in `RESUME.md` under `### Decisions`, and batch genuinely user-only questions for the end of the run — halt mid-run only for irreversible/destructive/outward-facing actions.
+
+**Documented limitation: the guard arms for the WHOLE session, off a single env var, with no user-presence signal.** `CCAGE_AUTONOMOUS=1` is set once at launch and stays set for the life of the process, so if the user comes back and starts typing mid-run, the guard still blocks `AskUserQuestion` exactly as it would for a genuinely unattended run — it has no mechanism to distinguish "the user stepped away" from "the user is right here." The guard's own message accounts for this by telling the model that if the user appears to be present (recent genuine user turns in the conversation, not just tool output), it should ask them in prose instead of calling the blocked tool. There is deliberately no presence-detection logic in the guard itself — its value is staying trivially correct (one flag check, one fixed message), not inferring attendance.
+
+### Opt-out
+- `CCAGE_AUTOCK_NO_ASK_GUARD=1` — skip registering the guard for one `ccage-auto` run. The run is still marked `CCAGE_AUTONOMOUS=1`; only the hook registration is skipped. A missing hook script degrades to a warning, never a failed launch.
+
+---
+
 ## `/keepwarm` — bounded cache keep-warm loop [shipped — Phase 8]
 
 Skill at `share/skills/keepwarm/` (installed to the master skills dir; reaches every
