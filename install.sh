@@ -155,6 +155,13 @@ if [ "$install_cli" = 1 ]; then
     install_file "$REPO_ROOT/share/hooks/autonomous_ask_guard.sh" \
         "${CCAGE_HOOKS_DIR:-$HOME/.claude/hooks}/autonomous_ask_guard.sh" 0755
 
+    # Weekly-limit floor sensor (CCAGE_AUTOCK_WEEKLY_FLOOR) — same fixed-path
+    # treatment as the ask-guard above. Inert until a cage's statusLine is
+    # wrapped by _ccage_seed_statusline_tee (share/claude-isolation.sh), which
+    # only happens when CCAGE_AUTOCK_WEEKLY_FLOOR arms it.
+    install_file "$REPO_ROOT/share/hooks/ccage-statusline-tee.sh" \
+        "${CCAGE_HOOKS_DIR:-$HOME/.claude/hooks}/ccage-statusline-tee.sh" 0755
+
     # ccage-auto (autonomous context manager) is a python3 script. The rest of
     # ccage works without python3, so warn rather than fail.
     if ! command -v python3 >/dev/null 2>&1; then

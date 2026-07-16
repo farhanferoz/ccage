@@ -3,10 +3,10 @@
 # user-written claude-overrides.sh alone — those are user data. Also removes the
 # Phase 7 session-docs assets (hooks, /checkpoint skill, CLAUDE.md anchor), the
 # Phase 8 /keepwarm skill, and the Phase 9 /checkpoint-threshold skill, and
-# unseeds ccage's two hook entries from every
-# cage's settings.json (all other keys survive) so no cage is left executing a
-# deleted hook script on session start. Never touches a repo's RESUME.md /
-# CHANGELOG.md.
+# unseeds ccage's two hook entries and any wrapped statusLine (weekly-limit
+# floor tee) from every cage's settings.json (all other keys survive) so no
+# cage is left executing a deleted hook script on session start. Never touches
+# a repo's RESUME.md / CHANGELOG.md.
 #
 # Usage:
 #   ./uninstall.sh                   # uninstall for the current shell
@@ -78,10 +78,13 @@ if [ -d "$prefix/share/ccage" ]; then
     fi
 fi
 
-# Unseed the session-docs hook entries from every cage's settings.json BEFORE
-# deleting the hook scripts below — otherwise every session start in every cage
-# would execute a missing script (exit 127) forever after. Removes only ccage's
-# two entries (matched on script basename); all other settings keys survive.
+# Unseed the session-docs hook entries and any wrapped statusLine from every
+# cage's settings.json BEFORE deleting the hook scripts below — otherwise
+# every session start in every cage would execute a missing script (exit 127)
+# forever after, and any wrapped statusLine would exec a deleted tee. Removes
+# only ccage's two hook entries (matched on script basename) and unwraps a
+# statusLine.command previously wrapped by the weekly-limit floor tee; all
+# other settings keys survive.
 if command -v python3 >/dev/null 2>&1; then
     # shellcheck source=share/ccage-doctor.sh
     . "$(here)/share/ccage-doctor.sh"
@@ -93,12 +96,13 @@ if command -v python3 >/dev/null 2>&1; then
 else
     printf 'warning: python3 not found — per-cage hook entries NOT removed.\n'
     printf '         run "ccage doctor --unseed" before deleting the CLI, or remove the\n'
-    printf '         resume_autoload/resume_budget_check entries from each cage settings.json.\n'
+    printf '         resume_autoload/resume_budget_check entries and any wrapped statusLine\n'
+    printf '         from each cage settings.json.\n'
 fi
 
 # Session-docs assets (Phase 7): hooks, /checkpoint skill, CLAUDE.md anchor.
 hooks_dir="${CCAGE_HOOKS_DIR:-$HOME/.claude/hooks}"
-for f in "$hooks_dir/resume_autoload.sh" "$hooks_dir/resume_budget_check.sh"; do
+for f in "$hooks_dir/resume_autoload.sh" "$hooks_dir/resume_budget_check.sh" "$hooks_dir/ccage-statusline-tee.sh"; do
     if [ -f "$f" ]; then run rm -f "$f"; printf 'removed %s\n' "$f"; fi
 done
 

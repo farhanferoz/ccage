@@ -241,3 +241,45 @@ PY
     [[ "$output" == *"0 cage(s) had the session-docs hooks block removed."* ]]
     [ "$(jq -r '.statusLine.command' "$cage/settings.json")" = "x" ]
 }
+
+# ---- --unseed also unwraps a weekly-limit floor statusLine ----------------
+
+@test "doctor --unseed unwraps a wrapped statusLine, preserves other keys" {
+    local cage; cage=$(mkcage proj19 "$BATS_TEST_TMPDIR/repo19")
+    local wrapped="bash $HOOKS/ccage-statusline-tee.sh 'my-real-statusline --flag'"
+    jq -n --arg cmd "$wrapped" \
+        '{statusLine: {type: "command", command: $cmd}, effortLevel: "high"}' \
+        > "$cage/settings.json"
+    run "$CCAGE" doctor --unseed
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"unseeded hooks"* ]]
+    [ "$(jq -r '.statusLine.command' "$cage/settings.json")" = "my-real-statusline --flag" ]
+    [ "$(jq -r '.effortLevel' "$cage/settings.json")" = "high" ]
+}
+
+@test "doctor --unseed leaves an unwrapped statusLine alone" {
+    local cage; cage=$(mkcage proj20 "$BATS_TEST_TMPDIR/repo20")
+    printf '{"statusLine":{"type":"command","command":"my-real-statusline"}}\n' > "$cage/settings.json"
+    run "$CCAGE" doctor --unseed
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"0 cage(s) had the session-docs hooks block removed."* ]]
+    [ "$(jq -r '.statusLine.command' "$cage/settings.json")" = "my-real-statusline" ]
+}
+
+# ---- weekly-limit floor report line ----------------------------------------
+
+@test "doctor report shows disabled when CCAGE_AUTOCK_WEEKLY_FLOOR is unset" {
+    unset CCAGE_AUTOCK_WEEKLY_FLOOR
+    mkcage proj21 "$BATS_TEST_TMPDIR/repo21" >/dev/null
+    run "$CCAGE" doctor
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Weekly-limit floor (CCAGE_AUTOCK_WEEKLY_FLOOR): disabled."* ]]
+}
+
+@test "doctor report shows armed with sensor-state count when CCAGE_AUTOCK_WEEKLY_FLOOR is set" {
+    local cage; cage=$(mkcage proj22 "$BATS_TEST_TMPDIR/repo22")
+    printf '{"ts": 0}\n' > "$cage/rate-limits-state.json"
+    CCAGE_AUTOCK_WEEKLY_FLOOR=20 run "$CCAGE" doctor
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Weekly-limit floor (CCAGE_AUTOCK_WEEKLY_FLOOR): armed at 20% remaining — sensor state in 1 of 1"* ]]
+}

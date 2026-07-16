@@ -511,6 +511,54 @@ A watched `ccage-auto` launch exports `CCAGE_AUTONOMOUS=1` into the launched ses
 
 ---
 
+## Weekly-limit floor for `ccage-auto` (`CCAGE_AUTOCK_WEEKLY_FLOOR`) [shipped]
+
+`ccage-auto`'s context watcher manages the *window* — it has no visibility into the account's seven-day usage limit. An unattended autonomous run can burn a week's capacity with nobody watching. This feature adds a floor: when remaining weekly capacity drops to a chosen percentage, the run checkpoints and stands itself down, so it's never the thing that silently exhausts the account. Opt-in, off by default, same posture as `CCAGE_SESSION_DOCS` / `CCAGE_SEED_LOCAL_HOOKS`.
+
+### The sensor
+
+Claude Code passes the server-side rate-limit state (`.rate_limits.{five_hour,seven_day}.{used_percentage,resets_at}`) to every statusline render — the only place local code can read it without touching credentials or an undocumented endpoint. `ccusage` was considered and rejected for this: it estimates *local token spend* from transcripts, and has no way to know the server-side seven-day percentage.
+
+### Three parts
+
+1. **Tee (sensor persistence).** `share/hooks/ccage-statusline-tee.sh` wraps the cage's statusline command. On each render it tees `{five_hour, seven_day, ts}` — `ts` is the tee's own write time, not file mtime, so a copied/restored file can't masquerade as fresh — atomically (`mktemp` + `mv`) into `$CLAUDE_CONFIG_DIR/rate-limits-state.json`, then execs the real statusline with the original stdin. Fail-open at every step: a missing `jq`, a malformed payload, an absent `.rate_limits`, or an unwritable state dir all skip the tee and still run the real statusline — a broken sensor must never break the status bar.
+2. **Seeder.** `_ccage_seed_statusline_tee` (`share/claude-isolation.sh`) rewrites a cage's `statusLine.command` into `bash <tee> '<original>'` when `CCAGE_AUTOCK_WEEKLY_FLOOR` is set, and unwraps it back to the original command when the gate is off — disabling the feature cleans a cage up on its next launch. Runs every launch, after the pre-exec hook, so a `statusLine` a user's own override seeds on that same launch is wrapped immediately. `statusLine` is a UI key, consistent with ccage's UI-only seeding discipline; a cage with no `statusLine` at all is left alone, and a missing tee script means the wrap never happens.
+3. **Watcher.** A stage machine inside `ccage-auto`'s existing checkpoint-watcher poll loop, evaluated before the occupancy machine on every tick.
+
+### Stages
+
+Armed with `--weekly-floor N` or `CCAGE_AUTOCK_WEEKLY_FLOOR=N` (`N` = **remaining** percent — matches how you think about "how much week is left"):
+
+- **Unknown.** Sensor missing, or its `ts` older than the stale window → treated as unknown; no action, logged once (not once per poll).
+- **Warn** (`remaining <= floor + 5`): one advisory nudge — checkpoint soon, this run stands down at the floor.
+- **Floor** (`remaining <= floor`): forces a checkpoint via the existing hard-backstop machinery (interrupt, then a stand-down nudge), and on checkpoint confirmation appends a stand-down note to `RESUME.md` (remaining %, floor, `resets_at` if known), then stops driving the session entirely — no `/clear`, no resume nudge. The session stays open but the run is safe to close until the weekly window resets. An unconfirmed floor nudge re-fires on the normal nudge-timeout cadence, same as the occupancy hard backstop.
+- **Recovery.** Remaining climbing back above `floor + 5` — a weekly-window reset, or the floor being lowered mid-run — cancels any stage, including an unconfirmed floored stand-down.
+
+Five-hour usage is recorded in the state file but never acted on — it recovers within a run's horizon; a later pacing feature may use it.
+
+### Config
+
+| Var / flag | Default | Effect |
+|---|---|---|
+| `CCAGE_AUTOCK_WEEKLY_FLOOR` / `--weekly-floor N` | unset (off) | Arm the floor at `N`% weekly capacity **remaining**. `0` / unset / garbage = off. Out of `(0,100)` → disabled with a warning, never clamped. |
+| state file | `$CLAUDE_CONFIG_DIR/rate-limits-state.json` | Written by the tee on every statusline render; read by the watcher and `ccage-auto --status`. |
+| stale window | 30 min | A sensor reading older than this is treated as unknown, not as stale-but-usable. |
+| warn margin | +5% remaining | Warn stage fires at `floor + 5`; recovery cancels above the same line. |
+
+### Status and diagnostics
+
+`ccage-auto --status` prints a `weekly floor :` line — `off`, or the armed floor with a live sensor readout (remaining %, sensor age in minutes, a `STALE` flag past the stale window, `resets_at` when known, or a note that no sensor state exists yet). `ccage doctor` reports the same posture across every scanned cage: `Weekly-limit floor (CCAGE_AUTOCK_WEEKLY_FLOOR): disabled.` when unset, or `Weekly-limit floor (CCAGE_AUTOCK_WEEKLY_FLOOR): armed at <N>% remaining — sensor state in <X> of <Y> scanned cage(s).` when armed (a plain file-existence count of `rate-limits-state.json` per cage, not a jq parse).
+
+### Opt-out / uninstall
+
+- Leave `CCAGE_AUTOCK_WEEKLY_FLOOR` unset — the seeder unwraps any previously-wrapped statusline on the cage's next launch, and the watcher never evaluates the stage.
+- `ccage doctor --unseed` (and `uninstall.sh`, which calls it) unwraps every cage's wrapped statusline back to its original command before the tee script itself is deleted, so no cage is left pointing at a missing hook script on its next render.
+- `install.sh` deploys the tee to `${CCAGE_HOOKS_DIR:-~/.claude/hooks}/ccage-statusline-tee.sh`, the same fixed-path treatment as the `AskUserQuestion` guard above. A missing tee script degrades the seeder to a no-op, never a failed launch.
+
+Full design rationale (sensor verification, decisions locked, non-goals): [`docs/WEEKLY-LIMIT-GUARD.md`](WEEKLY-LIMIT-GUARD.md).
+
+---
+
 ## `/keepwarm` — bounded cache keep-warm loop [shipped — Phase 8]
 
 Skill at `share/skills/keepwarm/` (installed to the master skills dir; reaches every

@@ -136,14 +136,19 @@ PY
 # Hooks-block removal — the inverse of _ccage_doctor_seed, for uninstall.
 # Removes only OUR two hook entries (matched on script basename, mirroring the
 # seed dedup), preserves every other key and hook, prunes emptied lists, and
-# never clobbers a present-but-unparseable settings.json.
+# never clobbers a present-but-unparseable settings.json. Also unwraps a
+# statusLine previously wrapped by the weekly-limit floor tee — KEEP IN SYNC
+# with _ccage_seed_statusline_tee in share/claude-isolation.sh (same wrap
+# shape: statusLine.type=="command" and shlex.split(command) ==
+# ["bash", <path with basename ccage-statusline-tee.sh>, <original>]).
 # ---------------------------------------------------------------------------
 _ccage_doctor_unseed() {
     local settings="$1" apply="$2"
     python3 - "$settings" "$apply" <<'PY' 2>/dev/null
-import json, os, sys, tempfile
+import json, os, shlex, sys, tempfile
 settings_path, apply = sys.argv[1], sys.argv[2] == "1"
 targets = {"resume_autoload.sh", "resume_budget_check.sh"}
+TEE = "ccage-statusline-tee.sh"
 if not os.path.exists(settings_path):
     print("unchanged"); sys.exit(0)
 try:
@@ -155,36 +160,54 @@ try:
         data = json.load(f)
 except (ValueError, OSError):
     print("unchanged"); sys.exit(0)
-if not isinstance(data, dict) or not isinstance(data.get("hooks"), dict):
+if not isinstance(data, dict):
     print("unchanged"); sys.exit(0)
-hooks = data["hooks"]
-def script_base(cmd):
-    return os.path.basename(cmd.split()[-1]) if cmd else ""
+
+hooks = data.get("hooks")
 changed = False
-for event in ("SessionStart", "PostToolUse"):
-    entries = hooks.get(event)
-    if not isinstance(entries, list):
-        continue
-    kept = []
-    for e in entries:
-        if isinstance(e, dict):
-            inner = e.get("hooks") or []
-            pruned = [h for h in inner
-                      if not (isinstance(h, dict)
-                              and script_base(h.get("command") or "") in targets)]
-            if len(pruned) != len(inner):
-                if not pruned:
-                    continue          # whole entry was ours — drop it
-                e = dict(e); e["hooks"] = pruned
-        kept.append(e)
-    if kept != entries:
-        changed = True
-        if kept:
-            hooks[event] = kept
-        else:
-            del hooks[event]
-if changed and not hooks:
-    del data["hooks"]
+if isinstance(hooks, dict):
+    def script_base(cmd):
+        return os.path.basename(cmd.split()[-1]) if cmd else ""
+    for event in ("SessionStart", "PostToolUse"):
+        entries = hooks.get(event)
+        if not isinstance(entries, list):
+            continue
+        kept = []
+        for e in entries:
+            if isinstance(e, dict):
+                inner = e.get("hooks") or []
+                pruned = [h for h in inner
+                          if not (isinstance(h, dict)
+                                  and script_base(h.get("command") or "") in targets)]
+                if len(pruned) != len(inner):
+                    if not pruned:
+                        continue          # whole entry was ours — drop it
+                    e = dict(e); e["hooks"] = pruned
+            kept.append(e)
+        if kept != entries:
+            changed = True
+            if kept:
+                hooks[event] = kept
+            else:
+                del hooks[event]
+    if changed and not hooks:
+        del data["hooks"]
+
+# Unwrap a wrapped statusLine. A command shlex can't parse, or one that
+# doesn't match the exact wrap shape, is left untouched.
+sl = data.get("statusLine")
+if isinstance(sl, dict) and sl.get("type") == "command":
+    cmd = sl.get("command")
+    if isinstance(cmd, str) and cmd.strip():
+        try:
+            parts = shlex.split(cmd)
+        except ValueError:
+            parts = None
+        if parts is not None and len(parts) == 3 and parts[0] == "bash" \
+                and os.path.basename(parts[1]) == TEE:
+            sl["command"] = parts[2]
+            changed = True
+
 if changed and apply:
     d = os.path.dirname(settings_path) or "."
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".settings.", suffix=".ccage.tmp")
@@ -297,12 +320,19 @@ _ccage_doctor_main() {
     local local_hooks_src="${CCAGE_LOCAL_HOOKS_SRC:-$HOME/.claude/settings.json}"
     local lh_present=0 lh_missing=0 lh_present_n lh_missing_n
 
+    # Report-only status for CCAGE_AUTOCK_WEEKLY_FLOOR — counts cages carrying
+    # sensor state (rate-limits-state.json), written by the statusline tee
+    # (share/hooks/ccage-statusline-tee.sh). Pure `[ -f ]`, no jq, fail-open.
+    local weekly_state_count=0
+
     local d owner result rf pm proj_slug label
     for d in "$root/$prefix"*/; do
         [ -d "$d" ] || continue
         d="${d%/}"
         [ -f "$d/.owning_path" ] || continue   # only real cages
         scanned=$((scanned + 1))
+
+        [ -f "$d/rate-limits-state.json" ] && weekly_state_count=$((weekly_state_count + 1))
 
         if [ -n "$local_hooks_enabled" ]; then
             IFS=$'\t' read -r lh_present_n lh_missing_n \
@@ -384,6 +414,14 @@ _ccage_doctor_main() {
             "$lh_present" "$lh_missing"
     else
         printf 'Local hook seeding (CCAGE_SEED_LOCAL_HOOKS): disabled.\n'
+    fi
+
+    local weekly_floor="${CCAGE_AUTOCK_WEEKLY_FLOOR:-}"
+    if [ -n "$weekly_floor" ]; then
+        printf 'Weekly-limit floor (CCAGE_AUTOCK_WEEKLY_FLOOR): armed at %s%% remaining — sensor state in %d of %d scanned cage(s).\n' \
+            "$weekly_floor" "$weekly_state_count" "$scanned"
+    else
+        printf 'Weekly-limit floor (CCAGE_AUTOCK_WEEKLY_FLOOR): disabled.\n'
     fi
 
     printf '\nRepos with a bloated RESUME (run /checkpoint there to trim):\n'

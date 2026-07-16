@@ -26,7 +26,7 @@ setup() {
     # Unset CLAUDE_CONFIG_DIR: when the suite runs inside a real cage it is set in
     # the environment, and resolve_config_dir's fast path would return it instead
     # of the CCAGE_ROOT-derived dir these tests pin. Tests must own the env.
-    unset CCAGE_SLOT CCAGE_AUTOCK CCAGE_AUTOCK_WINDOW CLAUDE_CONFIG_DIR
+    unset CCAGE_SLOT CCAGE_AUTOCK CCAGE_AUTOCK_WINDOW CLAUDE_CONFIG_DIR CCAGE_AUTOCK_WEEKLY_FLOOR
     # Hermetic even when the suite itself runs inside an autonomous session.
     unset CCAGE_AUTONOMOUS CCAGE_AUTOCK_NO_ASK_GUARD
     CAGE="$CCAGE_ROOT/.claude-repo"
@@ -731,4 +731,41 @@ PY
     ! cap_has "b'ccage circuit-breaker'"                 # observe = alert-only, no pty write
     grep -q '"event": "alert"' "$LEDGER"                 # but the alert IS recorded
     ! grep -q '"event": "nudge"' "$LEDGER"
+}
+
+# ---- Weekly-limit floor (--status) ------------------------------------------
+# See docs/WEEKLY-LIMIT-GUARD.md and tests/test_weekly_floor.py (the Watcher
+# state-machine unit tests). These cover only what --status surfaces.
+
+@test "--status shows 'weekly floor : off' by default" {
+    write_transcript 100000
+    run status
+    [[ "$output" == *"weekly floor : off"* ]]
+}
+
+@test "CCAGE_AUTOCK_WEEKLY_FLOOR env arms the weekly floor" {
+    write_transcript 100000
+    CCAGE_AUTOCK_WEEKLY_FLOOR=20 run status
+    [[ "$output" == *"weekly floor : 20% remaining (armed)"* ]]
+}
+
+@test "--weekly-floor flag arms the weekly floor" {
+    write_transcript 100000
+    run bash -c "cd '$REPO' && '$AUTO' --weekly-floor 20 --status"
+    [[ "$output" == *"weekly floor : 20% remaining (armed)"* ]]
+}
+
+@test "out-of-range weekly floor is disabled with a warning" {
+    write_transcript 100000
+    run bash -c "cd '$REPO' && '$AUTO' --weekly-floor 150 --status 2>&1"
+    [[ "$output" == *"weekly floor 150 out of range (0,100); disabling"* ]]
+    [[ "$output" == *"weekly floor : off"* ]]
+}
+
+@test "--status reads the rate-limits sensor state and shows remaining percent" {
+    write_transcript 100000
+    printf '{"seven_day":{"used_percentage":81.5},"ts":%d}\n' "$(date +%s)" \
+        > "$CAGE/rate-limits-state.json"
+    run bash -c "cd '$REPO' && '$AUTO' --weekly-floor 20 --status"
+    [[ "$output" == *"18.5% remaining"* ]]
 }

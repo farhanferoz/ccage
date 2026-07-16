@@ -157,6 +157,20 @@ setup() {
     [ -x "$FAKE_HOME/.claude/hooks/resume_budget_check.sh" ]
 }
 
+# ---- weekly-limit floor statusline tee -------------------------------------
+
+@test "install: weekly-limit floor statusline tee lands in ~/.claude/hooks (executable)" {
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    [ -x "$FAKE_HOME/.claude/hooks/ccage-statusline-tee.sh" ]
+}
+
+@test "uninstall: removes the weekly-limit floor statusline tee" {
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh"   --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    [ -f "$FAKE_HOME/.claude/hooks/ccage-statusline-tee.sh" ]
+    HOME="$FAKE_HOME" "$REPO_ROOT/uninstall.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    [ ! -e "$FAKE_HOME/.claude/hooks/ccage-statusline-tee.sh" ]
+}
+
 @test "install: /checkpoint skill lands in the master skills dir" {
     HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
     [ -f "$FAKE_HOME/.claude/skills/checkpoint/SKILL.md" ]

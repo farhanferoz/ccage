@@ -42,6 +42,8 @@
 #   --window N                     force context window, tokens  (default: per-model)
 #   --window-map 'sub=N,sub=N'     per-model windows by id substring
 #   --poll N                       poll interval, seconds        (default: 12)
+#   --weekly-floor N               stand down when remaining weekly capacity
+#                                  drops to N percent            (default: off)
 #   --status                       diagnostics only, do not launch
 #
 # Env equivalents (flags win): CCAGE_AUTOCK, CCAGE_AUTOCK_SOFT, CCAGE_AUTOCK_HARD,
@@ -59,8 +61,26 @@
 #   CCAGE_AUTOCK_HARD_NUDGE (override the hard-backstop nudge text; same substitutions),
 #   CCAGE_AUTOCK_NUDGE_TIMEOUT (s before re-nudge if unconfirmed; default 600),
 #   CCAGE_AUTOCK_COOLDOWN (s to ignore thresholds after a reset; default 30),
-#   CCAGE_AUTOCK_NO_ASK_GUARD (1 = don't register the AskUserQuestion guard).
+#   CCAGE_AUTOCK_NO_ASK_GUARD (1 = don't register the AskUserQuestion guard),
+#   CCAGE_AUTOCK_WEEKLY_FLOOR (remaining-% weekly-limit floor; see below).
 #   CCAGE_SLOT is honoured for RESUME naming.
+#
+# Weekly-limit floor (opt-in, off by default). The context watcher manages the
+# WINDOW; this manages the WEEK: an unattended run must not burn the account's
+# seven-day capacity. Armed with --weekly-floor N / CCAGE_AUTOCK_WEEKLY_FLOOR=N
+# (N = REMAINING percent, matching how you think about "how much week is
+# left"). The sensor is the rate-limit state Claude Code passes to every
+# statusline render, persisted by share/hooks/ccage-statusline-tee.sh into
+# $CLAUDE_CONFIG_DIR/rate-limits-state.json (the flag exports the env var so
+# the launched cage seeds that tee — see _ccage_seed_statusline_tee). Stages:
+#   warn  (remaining <= floor+5): one advisory nudge — checkpoint soon.
+#   floor (remaining <= floor):   force a checkpoint via the hard-backstop
+#         machinery, append a stand-down note to RESUME.md, then STOP driving
+#         the session (no /clear, no resume — safe to close). The checkpoint
+#         IS the shutdown preparation; a mid-turn session is never killed.
+# Sensor missing or older than 30 min → unknown → no action (logged once).
+# Five-hour limits are recorded in the state file but not acted on (they
+# recover within a run's horizon).
 #
 # A watched launch exports CCAGE_AUTONOMOUS=1 into the session and registers a
 # per-run PreToolUse hook (share/hooks/autonomous_ask_guard.sh, via a generated
@@ -152,6 +172,14 @@ COOLDOWN = 30.0         # ignore thresholds for this long after a reset
 NUDGE_TIMEOUT = 600.0   # if no checkpoint confirmation, re-nudge / escalate
 MAX_RENUDGE = 1         # soft re-nudges before escalating to the hard path
 
+# Weekly-limit floor. The state file is written by ccage-statusline-tee.sh at
+# the cage's config root on every statusline render; a reading older than the
+# stale window is treated as no reading at all (a closed laptop must not
+# trigger a stand-down off yesterday's number).
+RATE_LIMITS_STATE = "rate-limits-state.json"
+WEEKLY_WARN_MARGIN = 5.0        # warn stage fires at floor + this (remaining %)
+WEEKLY_STALE_S = 30 * 60.0      # sensor readings older than this are unknown
+
 
 def _truthy(v, default):
     if v is None:
@@ -225,6 +253,8 @@ class Config:
         self.hard_interrupt = _truthy(os.environ.get("CCAGE_AUTOCK_HARD_INTERRUPT"), True)
         self.nudge_timeout = _num(os.environ.get("CCAGE_AUTOCK_NUDGE_TIMEOUT"), NUDGE_TIMEOUT)
         self.cooldown = _num(os.environ.get("CCAGE_AUTOCK_COOLDOWN"), COOLDOWN)
+        # Weekly-limit floor, as REMAINING percent. 0 / unset / garbage = off.
+        self.weekly_floor = _num(os.environ.get("CCAGE_AUTOCK_WEEKLY_FLOOR"), 0.0)
         # Autonomous kickoff: type this prompt + Enter once at startup so an
         # unattended session actually begins its task (a prompt passed as a CLI
         # arg only pre-fills the TUI input box; nobody is there to press Enter).
@@ -278,6 +308,8 @@ class Config:
                 self.windows.update(parse_window_map(take())); i += 1
             elif a == "--poll":
                 self.poll = _num(take(), self.poll); i += 1
+            elif a == "--weekly-floor":
+                self.weekly_floor = _num(take(), self.weekly_floor); i += 1
             else:
                 # First token we don't recognise: the rest is claude's.
                 return args[i:]
@@ -304,6 +336,13 @@ class Config:
     def validate(self):
         """Clamp nonsensical thresholds; return human-readable warnings."""
         self.soft, self.hard, warns = clamp_thresholds(self.soft, self.hard)
+        # Weekly floor: 0 is the documented "off"; anything else must be a
+        # sane remaining-percent. Disabling (not clamping) on garbage is the
+        # safe failure — a floor the user never chose must not stop a run.
+        if self.weekly_floor and not (0 < self.weekly_floor < 100):
+            warns.append("weekly floor %.0f out of range (0,100); disabling"
+                         % self.weekly_floor)
+            self.weekly_floor = 0.0
         return warns
 
 
@@ -526,6 +565,32 @@ def resume_mtime(cwd):
     return best
 
 
+def read_weekly_state(config_dir, now=None):
+    """(remaining_pct, resets_at, age_s) from the cage's rate-limits state
+    file, or (None, None, None) when the sensor is missing or malformed.
+
+    Age is measured against the `ts` the tee stamped at write time, not file
+    mtime, so a copied/restored file can't masquerade as fresh. Staleness is
+    the CALLER's judgment — this only reports what the sensor said and when."""
+    path = os.path.join(config_dir, RATE_LIMITS_STATE)
+    try:
+        with open(path) as f:
+            obj = json.load(f)
+    except (OSError, ValueError):
+        return None, None, None
+    if not isinstance(obj, dict):
+        return None, None, None
+    sd = obj.get("seven_day")
+    if not isinstance(sd, dict):
+        return None, None, None
+    used = sd.get("used_percentage")
+    ts = obj.get("ts")
+    if not isinstance(used, (int, float)) or not isinstance(ts, (int, float)):
+        return None, None, None
+    age = (now if now is not None else time.time()) - ts
+    return 100.0 - float(used), sd.get("resets_at"), age
+
+
 # The completion marker written by `/checkpoint --final` (see the checkpoint
 # skill). Deliberately a single fixed name, not slot-scoped: a coarse
 # "the session's work is done, helpers may stand down" signal for this directory.
@@ -684,6 +749,12 @@ class Watcher:
         self.last_sz = -1         # size of that transcript at the last reading
         self.last_tokens = None   # assistant tokens at the last reading
         self.last_pct = None      # last measured occupancy %, reused between turns
+        # Weekly-limit floor. sdir is <config-dir>/projects/<slug>; the state
+        # file the statusline tee writes sits at the config root, so climb two
+        # levels (same derivation as SubagentWatcher.config_root).
+        self.config_root = os.path.dirname(os.path.dirname(sdir))
+        self.wf_stage = "none"        # "none" | "warned" | "floored"
+        self.wf_stale_logged = False  # log the missing/stale sensor once, not per poll
 
     def _log(self, msg):
         try:
@@ -798,6 +869,120 @@ class Watcher:
                 # Un-pausing: re-arm from a clean slate so occupancy re-triggers.
                 self.state = self.NORMAL
 
+    def _weekly_warn_msg(self, remaining):
+        return (
+            "[weekly-limit floor] Warning: remaining weekly capacity is %.0f%%, "
+            "approaching the configured floor of %.0f%%. Reach a clean breakpoint "
+            "and checkpoint soon — when the floor is hit, a checkpoint is forced "
+            "and this autonomous run stands down (the session will then be safe "
+            "to close until the weekly limit resets)."
+            % (remaining, self.cfg.weekly_floor)
+        )
+
+    def _weekly_floor_msg(self, remaining):
+        return (
+            "[weekly-limit floor] Remaining weekly capacity is %.0f%% — at the "
+            "configured floor (%.0f%%). This autonomous run is standing down. "
+            "If a subagent is running, wait for it to return, but start nothing "
+            "new; then immediately invoke the checkpoint skill to save state "
+            "into RESUME.md, print the single token %s on its own line, and "
+            "stop. The session will NOT be cleared or resumed — it is safe to "
+            "close until the weekly limit resets."
+            % (remaining, self.cfg.weekly_floor, self.cfg.sentinel)
+        )
+
+    def _arm_weekly(self, path, remaining):
+        """Stamp the shared nudge fields (safe: once FLOORED the occupancy
+        machine is frozen out, so there is no competing writer) and type the
+        stand-down order. Same file/offset pinning as _arm_nudge, for the same
+        sentinel-across-rotation reason."""
+        self.nudge_at = time.time()
+        self.nudge_path = path
+        self.nudge_offset = os.path.getsize(path)
+        self._type(self._weekly_floor_msg(remaining))
+
+    def _weekly_resume_note(self, remaining, resets):
+        """Append the stand-down record to RESUME.md so the next session (and
+        the user) sees WHY the run stopped, not just that it did."""
+        p = os.path.join(self.cwd, "RESUME%s.md" % slot_suffix())
+        note = (
+            "\n> [ccage-auto] Stood down at the weekly-limit floor on %s — "
+            "%.0f%% of weekly capacity remaining (floor %.0f%%); seven-day "
+            "window resets %s. No further auto-driven turns this run.\n"
+            % (time.strftime("%Y-%m-%d %H:%M"), remaining, self.cfg.weekly_floor,
+               resets or "at an unknown time")
+        )
+        try:
+            with open(p, "a") as f:
+                f.write(note)
+        except OSError as e:
+            self._log("weekly floor: could not append RESUME note: %r" % e)
+
+    def _weekly_tick(self, path):
+        """One weekly-limit floor evaluation. Returns True while the floor
+        machine OWNS the session (floored: forcing the checkpoint, then
+        standing down) — the caller must then skip the occupancy machine, both
+        because a /clear would defeat the stand-down and because the floored
+        stage borrows the shared nudge/confirmation fields."""
+        cfg = self.cfg
+        remaining, resets, age = read_weekly_state(self.config_root)
+        if remaining is None or age > WEEKLY_STALE_S:
+            # Unknown ≠ safe to act: a dead sensor must neither trigger a
+            # stand-down nor cancel one already in progress.
+            if not self.wf_stale_logged:
+                self._log("weekly floor: sensor %s — treating as unknown, no action"
+                          % ("missing/unreadable" if remaining is None
+                             else "stale (%.0f min old)" % (age / 60.0)))
+                self.wf_stale_logged = True
+            return self.wf_stage == "floored"
+        self.wf_stale_logged = False
+        warn_at = cfg.weekly_floor + WEEKLY_WARN_MARGIN
+
+        if remaining > warn_at:
+            # The seven-day window rolled over (or the floor was lowered):
+            # whatever stage we were in — including an unconfirmed floored
+            # stand-down — is moot. Mirrors the occupancy machine's
+            # NUDGED -> pct<soft cancellation.
+            if self.wf_stage != "none":
+                self._log("weekly floor: %.1f%% remaining is back above the "
+                          "warn threshold (%.1f%%) — resetting"
+                          % (remaining, warn_at))
+                self.wf_stage = "none"
+            return False
+
+        if self.wf_stage == "floored":
+            if self._confirmed():
+                self._log("weekly floor: checkpoint confirmed — standing down "
+                          "(%.1f%% remaining, floor %.0f%%)"
+                          % (remaining, cfg.weekly_floor))
+                self._weekly_resume_note(remaining, resets)
+                self.stop = True
+            elif (time.time() - self.nudge_at) > cfg.nudge_timeout:
+                self._log("weekly floor: no checkpoint after %.0fs — re-nudging"
+                          % cfg.nudge_timeout)
+                if cfg.hard_interrupt:
+                    self._interrupt()
+                self._arm_weekly(path, remaining)
+            return True
+
+        if remaining <= cfg.weekly_floor:
+            self._log("weekly floor REACHED: %.1f%% remaining <= floor %.0f%% "
+                      "— forcing checkpoint, then standing down"
+                      % (remaining, cfg.weekly_floor))
+            if cfg.hard_interrupt:
+                self._interrupt()
+            self._arm_weekly(path, remaining)
+            self.wf_stage = "floored"
+            return True
+
+        if self.wf_stage == "none":
+            self._log("weekly floor WARN: %.1f%% remaining <= %.1f%% "
+                      "(floor %.0f%% + %g%% margin)"
+                      % (remaining, warn_at, cfg.weekly_floor, WEEKLY_WARN_MARGIN))
+            self._type(self._weekly_warn_msg(remaining))
+            self.wf_stage = "warned"
+        return False
+
     def _do_clear(self):
         self._interrupt()                # dismiss any menu / ensure clean line
         self._type("/clear", settle=KEY_DELAY)
@@ -843,8 +1028,10 @@ class Watcher:
 
     def run(self):
         cfg = self.cfg
-        self._log("watcher start: soft=%.0f%% hard=%.0f%% poll=%.0fs"
-                  % (cfg.soft, cfg.hard, cfg.poll))
+        self._log("watcher start: soft=%.0f%% hard=%.0f%% poll=%.0fs%s"
+                  % (cfg.soft, cfg.hard, cfg.poll,
+                     " weekly-floor=%.0f%%" % cfg.weekly_floor
+                     if cfg.weekly_floor > 0 else ""))
         # Autonomous kickoff: submit the initial task once the TUI is ready (after
         # any bypass-permissions accept). Without this an unattended session idles
         # at an empty prompt and never produces work to manage.
@@ -910,6 +1097,13 @@ class Watcher:
                 if tokens is not None and tokens != self.last_tokens:
                     self.last_tokens = tokens
                     self.last_pct = 100.0 * tokens / cfg.window_for(model)
+
+            # Weekly-limit floor: evaluated before the occupancy machine, and
+            # while it owns the session (floored) the occupancy machine is
+            # skipped entirely — a /clear would defeat the stand-down, and the
+            # floored stage borrows the shared nudge/confirmation fields.
+            if cfg.weekly_floor > 0 and self._weekly_tick(path):
+                continue
 
             if self.last_pct is None or self.last_tokens is None:
                 continue
@@ -1386,6 +1580,18 @@ def print_status(cfg, cwd, config_dir, sdir):
               % (eff_soft, eff_hard, "  (PAUSED)" if ov.get("paused") else ""))
     else:
         print("  control file : none (using launch thresholds)")
+    if cfg.weekly_floor > 0:
+        remaining, resets, age = read_weekly_state(config_dir)
+        if remaining is None:
+            sensor = "no sensor state (statusline tee not seeded, or no render yet)"
+        else:
+            sensor = "%.1f%% remaining, sensor %.0f min old%s%s" % (
+                remaining, age / 60.0,
+                " (STALE)" if age > WEEKLY_STALE_S else "",
+                ", resets %s" % resets if resets else "")
+        print("  weekly floor : %.0f%% remaining (armed) — %s" % (cfg.weekly_floor, sensor))
+    else:
+        print("  weekly floor : off")
     if not path:
         print("  transcript   : none found")
         return
@@ -1430,6 +1636,11 @@ def main():
     # AskUserQuestion guard for this run only. The disabled pass-through above
     # is untouched: it behaves exactly like launching `claude`.
     os.environ["CCAGE_AUTONOMOUS"] = "1"
+    # A --weekly-floor flag must reach the child shell as the env var: the
+    # ccage wrapper's _ccage_seed_statusline_tee keys on it to seed the sensor
+    # tee, and the /checkpoint-threshold status path may read it back.
+    if cfg.weekly_floor > 0:
+        os.environ["CCAGE_AUTOCK_WEEKLY_FLOOR"] = "%g" % cfg.weekly_floor
     if not _truthy(os.environ.get("CCAGE_AUTOCK_NO_ASK_GUARD"), False):
         guard_settings = write_guard_settings(sdir)
         if guard_settings:
