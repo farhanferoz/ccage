@@ -135,6 +135,15 @@ older lives in `$changelog`.
 ### Open questions
 - <unresolved question that needs an answer>
 
+### Plan
+<!-- Present ONLY when work follows a plan/design doc. Name the doc(s) with
+     remaining scope. RESUME is a summary, never the plan: the next session
+     must READ the doc before executing its tasks, and an execution-level plan
+     with independent remaining tasks puts it in DISPATCHER mode (dependency
+     waves), not sequential inline execution. Keep paths exact — the resume
+     autoloader detects and re-asserts them. -->
+- <full path to plan doc> — <N/M tasks done; next wave: …>
+
 ### Live jobs & tasks
 <!-- /clear wipes these. On resume: re-arm each job by its command and recreate
      Tasks via TaskCreate. List only in-flight + next tasks (point to the plan doc
@@ -197,8 +206,12 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
 2. **Keep carried state verbatim.** Every thread, decision, and open question this
    session did *not* change stays exactly as written.
 3. **Update the structured lines in place** — `### Now / ### Next / ### Threads /
-   ### Decisions / ### Open questions / ### Live jobs & tasks` — for whatever moved
-   this session. Add new decisions and open questions. `### Now` and `### Next` are
+   ### Decisions / ### Open questions / ### Plan / ### Live jobs & tasks` — for
+   whatever moved this session. When a plan doc governs the work, fill
+   **`### Plan`** with its exact path and remaining scope — measured failure
+   (2026-07-16): resumed sessions acted from RESUME's summary bullets without
+   opening the plan, silently dropping tasks; the autoloader turns this line
+   into a read-and-dispatch directive. Add new decisions and open questions. `### Now` and `### Next` are
    the highest-value lines for resumption: make `### Next` one concrete first
    action, not a vague goal. **`### Live jobs & tasks`** records what `/clear`
    destroys, for rebuild-on-resume: run `TaskList` (skip gracefully if the tool is
