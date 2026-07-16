@@ -476,6 +476,112 @@ if changed:
 PY
 }
 
+# ---- wrap the cage's statusline with the rate-limit tee (opt-in) ------------
+# Sensor half of the ccage-auto weekly-limit floor. Gated by
+# CCAGE_AUTOCK_WEEKLY_FLOOR (the same knob that arms the watcher stage in
+# bin/ccage-auto): when set, the cage's statusLine.command is rewritten to run
+# through share/hooks/ccage-statusline-tee.sh, which persists the rate-limit
+# state Claude Code passes to every render into
+# $CLAUDE_CONFIG_DIR/rate-limits-state.json and then execs the original
+# command. statusLine is a UI key ccage may touch (see "UI-only seeding
+# discipline"), and the tee lives at a FIXED path so the wrap is
+# cache-neutral.
+#
+# Runs every launch, AFTER _ccage_pre_exec_hook, so a statusLine the user's
+# overrides seed into a newborn cage on this same launch is wrapped
+# immediately. Self-heals: a user replacing their statusline drops the wrap and
+# the next launch re-wraps the new command. With the gate OFF it UNWRAPS a
+# previously wrapped command (restores the embedded original), so disabling
+# the feature cleans up on the next launch. A cage with no statusLine at all
+# is left alone — nothing to wrap, and inventing a status bar is not ccage's
+# call. Never wraps when the tee script itself is missing.
+#
+# KEEP IN SYNC with the unwrap in _ccage_doctor_unseed (share/ccage-doctor.sh)
+# — uninstall must restore every cage's original statusline before the tee
+# script is deleted.
+_ccage_seed_statusline_tee() {
+    command -v python3 >/dev/null 2>&1 || return 0
+
+    local dir="$1"
+    local floor="${CCAGE_AUTOCK_WEEKLY_FLOOR:-}"
+    local tee="${CCAGE_HOOKS_DIR:-$HOME/.claude/hooks}/ccage-statusline-tee.sh"
+    local settings="$dir/settings.json"
+    [ -f "$settings" ] || return 0
+
+    # Fast paths (this runs on EVERY caged launch): armed + already wrapped →
+    # steady state; disarmed + never wrapped → nothing to undo. Either way,
+    # skip the python fork.
+    if [ -n "$floor" ]; then
+        [ -f "$tee" ] || return 0
+        grep -q 'ccage-statusline-tee.sh' "$settings" 2>/dev/null && return 0
+    else
+        grep -q 'ccage-statusline-tee.sh' "$settings" 2>/dev/null || return 0
+    fi
+
+    python3 - "$settings" "$tee" "${floor:+wrap}" <<'PY' 2>/dev/null || true
+import json, os, shlex, sys, tempfile
+
+settings_path, tee_path = sys.argv[1], sys.argv[2]
+wrap = len(sys.argv) > 3 and sys.argv[3] == "wrap"
+TEE = "ccage-statusline-tee.sh"
+
+try:
+    mode = os.stat(settings_path).st_mode & 0o777
+except OSError:
+    mode = None
+try:
+    with open(settings_path) as f:
+        data = json.load(f)
+except (ValueError, OSError):
+    sys.exit(0)          # never clobber a present-but-broken settings.json
+if not isinstance(data, dict):
+    sys.exit(0)
+
+sl = data.get("statusLine")
+if not isinstance(sl, dict) or sl.get("type") != "command":
+    sys.exit(0)
+cmd = sl.get("command")
+if not isinstance(cmd, str) or not cmd.strip():
+    sys.exit(0)
+
+
+def wrapped_parts(c):
+    """['bash', <tee-path>, <original>] if c is our wrap, else None. A command
+    shlex can't parse is treated as not-ours (the TEE-substring guard below
+    still prevents double-wrapping it)."""
+    try:
+        parts = shlex.split(c)
+    except ValueError:
+        return None
+    if len(parts) == 3 and parts[0] == "bash" and os.path.basename(parts[1]) == TEE:
+        return parts
+    return None
+
+
+parts = wrapped_parts(cmd)
+if wrap and parts is None and TEE not in cmd:
+    sl["command"] = "bash %s %s" % (shlex.quote(tee_path), shlex.quote(cmd))
+elif not wrap and parts is not None:
+    sl["command"] = parts[2]
+else:
+    sys.exit(0)
+
+d = os.path.dirname(settings_path) or "."
+fd, tmp = tempfile.mkstemp(dir=d, prefix=".settings.", suffix=".ccage.tmp")
+try:
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, indent=2)
+    if mode is not None:
+        os.chmod(tmp, mode)
+    os.replace(tmp, settings_path)
+except OSError:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+PY
+}
+
 # ---- baseline .claudesignore (only if the project has none) ----
 _ccage_write_signore() {
     local target_dir="$1"
@@ -881,6 +987,9 @@ claude() {
 
     _ccage_extra_args=()
     _ccage_pre_exec_hook "$PWD" "$CLAUDE_CONFIG_DIR"
+    # After the pre-exec hook on purpose: a statusLine the user's overrides just
+    # seeded into a newborn cage gets wrapped on this same launch.
+    _ccage_seed_statusline_tee "$CLAUDE_CONFIG_DIR"
     _ccage_collect_plugin_dirs   # opt-in: --plugin-dir flags for CCAGE_PLUGINS_FROM
 
     # ${arr[@]+"${arr[@]}"} is the bash-3.2-safe idiom for expanding a possibly-
