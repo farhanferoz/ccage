@@ -354,6 +354,24 @@ WSL works. Native Windows doesn't; PowerShell support would need a separate port
 - ~~**Strict-mode shells (`set -u`).**~~ Fixed: all optional env vars now use `${var:-}` defaults; sourcing under `set -u` no longer crashes. Regression covered by `tests/test_set_u_safety.bats`.
 - **Nested-worktree basename collisions** in two parallel fresh sessions — see the worktree FAQ above. Mitigation: prefer sibling-directory worktrees, or set `CCAGE_SLOT` per session.
 
+## Companion plugins (claude-skills marketplace)
+
+ccage is the **runtime** — per-project isolation and `ccage-auto`'s context loop. The skills that *use* that runtime — for planning, autonomous multi-plan execution, and report writing — live in a separate marketplace, [farhanferoz/claude-skills](https://github.com/farhanferoz/claude-skills). You don't need it for the cache fix, but it's what turns "keep a session alive" into "work through a stack of plans by itself."
+
+- **orchestration** — write an execution-level plan and run it as autonomous dependency-wave dispatch (`writing-plans` + `executing-plans` + `subagent-driven-development`), with guard hooks enforcing single-writer discipline so parallel workers never clobber each other. This is what pairs with `ccage-auto` for hours-long unattended runs. (Its `writing-plans`/`executing-plans`/`subagent-driven-development` are modified forks of [obra/superpowers](https://github.com/obra/superpowers), MIT.)
+- **programme-plan** — keep one plan coherent across weeks, many strands, and many agents writing the same files.
+- **research-report** — turn work into a publication-quality, self-contained report (contract guard + `pdflatex` build + fresh-reader cold-read gate). Needs `pandoc` + a `pdflatex`/texlive install.
+- **session-continuity**, **deep-research-tiered**, **review-suite** — the `/checkpoint`+`/keepwarm` loop (also bundled in ccage), tiered deep research, and tiered local code review.
+
+Add the marketplace once, then install what you want:
+
+```
+/plugin marketplace add farhanferoz/claude-skills
+/plugin install orchestration@claude-skills
+```
+
+To load them in **every** cage without a per-cage install, point `CCAGE_PLUGINS_FROM` at a folder holding the plugin dirs — see [Shared plugins across cages](#shared-plugins-across-cages-ccage_plugins_from).
+
 ## Related
 
 - [`ccusage`](https://www.npmjs.com/package/ccusage) — per-dir usage accounting. ccage's `ccusage-all` wraps it.
