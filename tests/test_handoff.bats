@@ -308,6 +308,69 @@ JSONL
     [ "$longest" -le 150 ]
 }
 
+# The predicate is anchored, so a human who merely QUOTES a marker keeps their
+# prompt. Unanchored `contains("<teammate-message ")` deleted it outright —
+# silent data loss in the one artifact whose job is to recover the human's
+# words. Over-counting is recoverable by reading; deletion is not.
+@test "prompts: quoting a notification marker does not delete a human prompt" {
+    local f="$BATS_TEST_TMPDIR/fp.jsonl"
+    cat > "$f" <<'JSONL'
+{"type":"user","timestamp":"2026-07-20T09:00:00.000Z","message":{"role":"user","content":"why does the filter match <teammate-message > at all? seems fragile"}}
+{"type":"user","timestamp":"2026-07-20T09:01:00.000Z","message":{"role":"user","content":"I pasted this earlier: Another Claude session sent a message: and it broke"}}
+{"type":"user","timestamp":"2026-07-20T09:02:00.000Z","message":{"role":"user","content":"<teammate-message teammate_id=\"x\">{}</teammate-message>"}}
+JSONL
+    local collected
+    collected=$(_ccage_handoff_collect "$f")
+    [ "$(jq '.prompts | length' <<<"$collected")" = 2 ]
+    [ "$(jq '.notifications | length' <<<"$collected")" = 1 ]
+    [ "$(_ccage_handoff_count_prompts "$f")" = 2 ]
+    # Both human prompts survive into the brief, verbatim.
+    run _ccage_handoff_generate "$f" --stdout
+    [[ "$output" == *"seems fragile"* ]]
+    [[ "$output" == *"and it broke"* ]]
+}
+
+# Prompts were the only unbounded section, and were interpolated verbatim. On
+# real sessions that produced a 77 KB brief against a 15 KB target, with 30
+# bogus `## ` sections forged by pasted prompt text.
+@test "prompts: long prompts are capped, budgeted, and cannot forge a heading" {
+    local f="$BATS_TEST_TMPDIR/big.jsonl"
+    : > "$f"
+    local i
+    for i in 1 2 3 4 5 6; do
+        python3 -c "
+import json,sys
+print(json.dumps({'type':'user','timestamp':'2026-07-20T09:0$i:00.000Z',
+                  'message':{'role':'user','content':'P$i ' + 'X'*4000}}))" >> "$f"
+    done
+    printf '%s\n' '{"type":"user","timestamp":"2026-07-20T09:07:00.000Z","message":{"role":"user","content":"intro\n## forged heading\ntail"}}' >> "$f"
+
+    run _ccage_handoff_generate "$f" --stdout
+    [ "$status" -eq 0 ]
+    # Whole brief stays inside the 15 KB target despite 24 KB of raw prompt.
+    [ "$(printf '%s' "$output" | wc -c)" -lt 15360 ]
+    # No 4000-char prompt survives intact.
+    [[ "$output" == *"(prompt truncated)"* ]]
+    # Only the brief's own sections are headings; the forged one is escaped.
+    [[ "$output" == *'\## forged heading'* ]]
+    local heads
+    heads=$(printf '%s\n' "$output" | awk '/^## /{n++} END{print n+0}')
+    [ "$heads" = 4 ]
+}
+
+@test "pricing: an unknown model is flagged as a guess, not asserted as known" {
+    [ "$(_ccage_handoff_model_family claude-vega-9)" = unknown ]
+    [ "$(_ccage_handoff_model_family 'claude-opus-4-8[1m]')" = opus ]
+    # Falls back to the current Opus tier...
+    [ "$(_ccage_handoff_price_input claude-vega-9)" = 5 ]
+    local f="$BATS_TEST_TMPDIR/unk.jsonl"
+    printf '%s\n' '{"type":"assistant","timestamp":"2026-07-20T09:00:00Z","message":{"role":"assistant","model":"claude-vega-9","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1000000,"output_tokens":0}}}' > "$f"
+    run _ccage_handoff_generate "$f" --stdout
+    # ...and says so, instead of claiming "standard rates".
+    [[ "$output" == *"NOT in the rate table"* ]]
+    [[ "$output" != *"claude-vega-9, standard rates"* ]]
+}
+
 # ===== delegated (subagent) work =====
 #
 # The brief used to read only the main transcript, so a fan-out session
@@ -355,24 +418,71 @@ _mk_subagent() {
     [ "$(jq -r '.[0].model' <<<"$agents")" = claude-sonnet-5 ]
     [ "$(jq -r '.[0].ended' <<<"$agents")" = ok ]
     [[ "$(jq -r '.[1].ended' <<<"$agents")" == "api error: "*"weekly limit"* ]]
-    # Priced per agent at its own rate, 1-hour cache-write included.
-    [ "$(jq -r '.[0].cost > 0' <<<"$agents")" = true ]
+
+    # EXACT cost, not `> 0`. Agent 1 is 100 in / 200 out / 1000 cache-write at
+    # the 1-hour TTL / 5000 cache-read on sonnet-5 ($3/$15):
+    #   (100*3 + 200*15 + 1000*6 + 5000*0.3) / 1e6 = $0.0108 -> $0.01
+    # Priced at the unknown-model default (opus, $5/$25) the same tokens come
+    # to $0.018 -> $0.02, so this assertion distinguishes the two. A `> 0`
+    # check passed under both and let per-agent pricing be silently wrong.
+    [ "$(jq -r '.[0].cost' <<<"$agents")" = 0.01 ]
+    [ "$(jq -r '.[0].in' <<<"$agents")" = 100 ]
+    [ "$(jq -r '.[0].out' <<<"$agents")" = 200 ]
+    [ "$(jq -r '.[0].cw' <<<"$agents")" = 1000 ]
+    [ "$(jq -r '.[0].cr' <<<"$agents")" = 5000 ]
 
     run _ccage_handoff_generate "$main" --stdout
     [ "$status" -eq 0 ]
     [[ "$output" == *"## Delegated work"* ]]
     [[ "$output" == *"worker-one"* ]]
-    [[ "$output" == *"of which delegated"* ]]
     [[ "$output" == *"delegated)"* ]]          # turn count carries the split
-    # Files touched attributes the shared path to both toucher and main.
+
+    # Header totals must FOLD IN the subagent. Main alone is 180/120/4500/55000;
+    # with the agent it is 280/320/5500/60000. Asserting the summed figures is
+    # what makes dropping the delegated term a test failure rather than a
+    # silent revert of this feature's entire headline claim.
+    [[ "$output" == *"280 input · 320 output · 5500 cache-write · 60000 cache-read"* ]]
+    # Main $0.06 + delegated $0.01 = $0.07 combined. Pin all three.
+    [[ "$output" == *"Estimated cost so far:** ~\$0.07"* ]]
+    [[ "$output" == *"of which delegated:** ~\$0.01 across 2 subagent(s); main thread ~\$0.06"* ]]
+
+    # The By column must name the agent that touched the path, not a constant.
     [[ "$output" == *"| By |"* ]]
     [[ "$output" == *"/tmp/foo.py"* ]]
+    [[ "$(printf '%s\n' "$output" | grep '/tmp/foo.py')" == *"worker-one"* ]]
 
     # --no-subagents restores the main-transcript-only view.
     run _ccage_handoff_generate "$main" --stdout --no-subagents
     [ "$status" -eq 0 ]
     [[ "$output" != *"## Delegated work"* ]]
     [[ "$output" != *"of which delegated"* ]]
+}
+
+@test "subagents: the agent-list cap is enforced and the elision is reported" {
+    local main="$BATS_TEST_TMPDIR/many/deadbeef.jsonl"
+    mkdir -p "$(dirname "$main")"
+    cp "$FIXTURES/minimal.jsonl" "$main"
+
+    # 20 agents against a cap of 12. Without an assertion here, raising the cap
+    # to 999 was a mutation no test noticed.
+    local i
+    for i in $(seq -w 1 20); do
+        _mk_subagent "$main" "aagent$i-hash$i" \
+            "{\"name\":\"agent$i\",\"customAgentType\":\"task-worker\",\"model\":\"sonnet\"}" \
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-07-20T09:00:00.000Z\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-sonnet-5\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"usage\":{\"input_tokens\":$((10#$i)),\"output_tokens\":1}}}"
+    done
+
+    [ "$(_ccage_handoff_subagents_json "$main" | jq 'length')" = 20 ]
+
+    run _ccage_handoff_generate "$main" --stdout
+    [ "$status" -eq 0 ]
+    # Exactly 12 data rows in the delegated table (table has 2 header rows).
+    # grep -c exits 1 on zero matches, which would abort the test before the
+    # assertion could report the real count — so count with awk instead.
+    local rows
+    rows=$(printf '%s\n' "$output" | awk '/^\| agent[0-9]+ \|/ { n++ } END { print n+0 }')
+    [ "$rows" = 12 ]
+    [[ "$output" == *"8 further agent(s) elided"* ]]
 }
 
 @test "subagents: a session that delegated nothing is unchanged" {

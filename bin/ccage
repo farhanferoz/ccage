@@ -66,8 +66,17 @@ _ccage_source_isolation() {
     done
     for rcd in "$HOME/.bashrc.d" "$HOME/.zshrc.d"; do
         if [ -r "$rcd/claude-overrides.sh" ]; then
+            # Output SUPPRESSED, unlike the isolation lib above. That lib is
+            # ccage's own and verified side-effect-free; this one is the user's
+            # and carries no such guarantee. An `echo` in it landed as the first
+            # line of the brief — ahead of the `# Handoff:` heading — silently
+            # corrupting a file whose whole purpose is to be pasted into a fresh
+            # session. Function definitions still land; noise does not. The
+            # subshell-free form is required (a subshell would discard the
+            # definitions we are here to get), so `|| true` keeps a `set -e`
+            # inside the user's file from killing the command.
             # shellcheck disable=SC1091  # user-supplied, may not exist
-            . "$rcd/claude-overrides.sh"
+            { . "$rcd/claude-overrides.sh"; } >/dev/null 2>&1 || true
             break
         fi
     done

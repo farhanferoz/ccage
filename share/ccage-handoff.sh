@@ -27,27 +27,38 @@
 # Refresh `# updated:` and add a CHANGELOG entry when Anthropic publishes new
 # rates. Verified against the bundled claude-api model table.
 # updated: 2026-07-20
-_ccage_handoff_price_input() {
+# ONE pattern list, resolved to a family. Both price lookups and the
+# is-this-model-known check read it, so a new model cannot be added to pricing
+# while silently staying "unknown" to the caller — the same anti-drift move the
+# rest of this section makes, one level up.
+# Echoes: fable | opus | sonnet | haiku | unknown
+_ccage_handoff_model_family() {
     case "$1" in
-        claude-fable-5*|claude-mythos-5*)     echo 10 ;;
-        claude-opus-4-8*|claude-opus-4-7*|claude-opus-4-6*) echo 5 ;;
+        claude-fable-5*|claude-mythos-5*)                    echo fable ;;
+        claude-opus-4-8*|claude-opus-4-7*|claude-opus-4-6*)  echo opus ;;
         # Sonnet 5 has an introductory $2/$10 rate through 2026-08-31. The list
         # rate is deliberately used: the intro rate expires, and an expired
         # discount silently UNDER-reports cost, which is the worse error here.
-        claude-sonnet-5*|claude-sonnet-4-6*)  echo 3 ;;
-        claude-sonnet-4-5*)                   echo 3 ;;   # unverified; unchanged from the previous table
-        claude-haiku-4-5*)                    echo 1 ;;
-        *)                                    echo 5 ;;   # current Opus tier
+        # sonnet-4-5 is unverified and carried unchanged from the old table.
+        claude-sonnet-5*|claude-sonnet-4-6*|claude-sonnet-4-5*) echo sonnet ;;
+        claude-haiku-4-5*)                                   echo haiku ;;
+        *)                                                   echo unknown ;;
+    esac
+}
+_ccage_handoff_price_input() {
+    case "$(_ccage_handoff_model_family "$1")" in
+        fable)         echo 10 ;;
+        sonnet)        echo 3 ;;
+        haiku)         echo 1 ;;
+        opus|unknown)  echo 5 ;;   # unknown falls back to the current Opus tier
     esac
 }
 _ccage_handoff_price_output() {
-    case "$1" in
-        claude-fable-5*|claude-mythos-5*)     echo 50 ;;
-        claude-opus-4-8*|claude-opus-4-7*|claude-opus-4-6*) echo 25 ;;
-        claude-sonnet-5*|claude-sonnet-4-6*)  echo 15 ;;
-        claude-sonnet-4-5*)                   echo 15 ;;  # unverified; unchanged from the previous table
-        claude-haiku-4-5*)                    echo 5 ;;
-        *)                                    echo 25 ;;  # current Opus tier
+    case "$(_ccage_handoff_model_family "$1")" in
+        fable)         echo 50 ;;
+        sonnet)        echo 15 ;;
+        haiku)         echo 5 ;;
+        opus|unknown)  echo 25 ;;
     esac
 }
 
@@ -147,14 +158,21 @@ _CCAGE_HANDOFF_JQ_PREAMBLE='split("\n") | .[] | select(length > 0) | fromjson? /
 # Matched shapes, all verified against real transcripts:
 #   "Another Claude session sent a message:\n<teammate-message …>{json}"
 #   "<task-notification><task-id>…"
-# The `<teammate-message ` test is the structured one and is kept as the
-# primary; the prose sentence is matched too because it is what precedes it.
+#
+# EVERY test is anchored at the start of the record. An unanchored
+# `contains("<teammate-message ")` also matched a human who merely QUOTED the
+# marker — pasting a transcript excerpt, or asking about this very code — and
+# the prompt was then removed from the brief entirely. That is the wrong
+# failure direction for a state-recovery tool: it trades a cosmetic turn-count
+# inflation for silent loss of the human's own words, in the one artifact whose
+# job is to recover them. Over-counting a notification is recoverable by
+# reading; a deleted prompt is not.
 #
 # jq `def`s must lead a program, so this prefixes rather than pipes.
 _CCAGE_HANDOFF_JQ_DEFS='
 def is_harness_notification:
-    startswith("Another Claude session sent a message:")
-    or contains("<teammate-message ")
+    startswith("<teammate-message ")
+    or startswith("Another Claude session sent a message:\n<teammate-message ")
     or startswith("<task-notification>");
 '
 
@@ -473,6 +491,11 @@ _ccage_handoff_collect() {
 _CCAGE_HANDOFF_MAX_AGENTS=12
 # Width cap for a single command line in the "Commands run" listing.
 _CCAGE_HANDOFF_MAX_CMD_CHARS=140
+# Per-prompt character cap, and a byte budget for the whole prompts section.
+# Every other section is bounded; prompts were not, and on real data they were
+# the only thing that ever blew the 15 KB whole-brief target.
+_CCAGE_HANDOFF_MAX_PROMPT_CHARS=600
+_CCAGE_HANDOFF_PROMPT_BUDGET=9000
 
 _ccage_handoff_subagents_dir() {
     printf '%s\n' "${1%.jsonl}/subagents"
@@ -750,7 +773,21 @@ _ccage_handoff_compose_brief() {
     )
     printf '**Tokens billed so far:** %s input · %s output · %s cache-write · %s cache-read\n' \
         "$((in_tok + d_in))" "$((out_tok + d_out))" "$((cw_tok + d_cw))" "$((cr_tok + d_cr))"
-    printf '**Estimated cost so far:** ~%s (%s, standard rates)\n' "$cost_so_far" "$model"
+    # An unknown model is priced at the current Opus tier. Say so, rather than
+    # printing "standard rates" — which reads as an assertion that ccage knows
+    # this model's price when it does not, so a wrong guess stays invisible.
+    if [ "$(_ccage_handoff_model_family "$model")" = unknown ]; then
+        printf '**Estimated cost so far:** ~%s (%s is NOT in the rate table — priced at current Opus rates, so treat this as a guess)\n' \
+            "$cost_so_far" "$model"
+    elif [ "$(jq -r 'length' <<<"$subagents")" -gt 0 ]; then
+        # A delegating session's total spans tiers, so naming one model beside
+        # it implied the whole figure was priced at that rate. It was not —
+        # each agent is priced at its own model.
+        printf '**Estimated cost so far:** ~%s (main thread on %s; each agent priced at its own model)\n' \
+            "$cost_so_far" "$model"
+    else
+        printf '**Estimated cost so far:** ~%s (%s, standard rates)\n' "$cost_so_far" "$model"
+    fi
     local agent_count
     agent_count=$(jq -r 'length' <<<"$subagents")
     if [ "${agent_count:-0}" -gt 0 ]; then
@@ -772,8 +809,41 @@ _ccage_handoff_compose_brief() {
     fi
 
     if [ "$total_prompts" -gt 0 ]; then
-        jq -r --argjson n "$shown_n" --argjson start "$((total_prompts - shown_n))" '
-            .prompts[$start:] | to_entries | .[] | "\($start + .key + 1). \(.value)\n"
+        # Prompts were capped by COUNT but never by LENGTH, and were
+        # interpolated verbatim. Two consequences, both measured on real
+        # sessions: (a) 2 of 25 briefs blew the 15 KB target, one reaching
+        # 77 KB, almost entirely pasted prompt text; (b) a pasted prompt
+        # carrying its own `## ` headings produced 30 bogus sections
+        # interleaved with the 4 real ones, so the model reading the brief
+        # cannot tell prompt text from the brief's own structure.
+        #
+        # Per-prompt character cap, then a byte budget across the section
+        # (newest kept — they are the ones that matter for resuming), then
+        # line-leading `#` escaped so prompt text cannot forge a heading.
+        # jq's `^` anchors at STRING start only (verified on jq 1.8.1), so the
+        # per-line case is matched via an explicit \n rather than relying on a
+        # (?m) flag whose meaning varies between regex flavours.
+        jq -r --argjson start "$((total_prompts - shown_n))" \
+              --argjson cap "$_CCAGE_HANDOFF_MAX_PROMPT_CHARS" \
+              --argjson budget "$_CCAGE_HANDOFF_PROMPT_BUDGET" '
+            def neutralize:
+                gsub("^(?<h>#{1,6} )"; "\\\(.h)")
+                | gsub("\n(?<h>#{1,6} )"; "\n\\\(.h)");
+            def cap: if length > $cap then .[0:$cap] + "\n…(prompt truncated)" else . end;
+            (.prompts[$start:] | to_entries | map(.key = .key + $start + 1)
+               | map(.value |= (cap | neutralize))) as $items
+            | ($items | reverse
+               | reduce .[] as $e ({keep: [], used: 0, done: false};
+                   if .done then .
+                   elif (.used + ($e.value | length)) > $budget and (.keep | length) > 0
+                   then (.done = true)
+                   else {keep: (.keep + [$e]), used: (.used + ($e.value | length)), done: false}
+                   end)
+               | .keep | reverse) as $kept
+            | ($kept[] | "\(.key). \(.value)\n"),
+              (if ($kept | length) < ($items | length)
+               then "_(\(($items | length) - ($kept | length)) older prompt(s) dropped to keep the brief small)_\n"
+               else empty end)
         ' <<<"$handoff_data"
         if [ "$total_prompts" -gt "$max_prompts" ]; then
             printf '\n_(%d earlier prompt(s) elided — see raw JSONL for full history)_\n' \
@@ -789,9 +859,14 @@ _ccage_handoff_compose_brief() {
         printf '\n## Delegated work\n\n'
         printf '| Agent | Type | Model | Turns | Cost | Files | Ended |\n'
         printf '|---|---|---|---:|---:|---:|---|\n'
+        # Every cell is pipe-escaped: an API-error message containing `|`
+        # (they are free text from the server) would otherwise split the row
+        # into extra columns and corrupt the table. Newlines are already
+        # handled upstream by the split("\n")[0] on `ended`.
         jq -r --argjson n "$_CCAGE_HANDOFF_MAX_AGENTS" '
+            def cell: tostring | gsub("\\|"; "\\|");
             sort_by(-.cost) | .[0:$n] | .[]
-            | "| \(.name) | \(.type) | \(.model) | \(.turns) | $\(.cost) | \(.files | length) | \(.ended) |"
+            | "| \(.name|cell) | \(.type|cell) | \(.model|cell) | \(.turns) | $\(.cost) | \(.files | length) | \(.ended|cell) |"
         ' <<<"$subagents"
         if [ "$agent_count" -gt "$_CCAGE_HANDOFF_MAX_AGENTS" ]; then
             printf '\n_(%d further agent(s) elided — costliest %d shown)_\n' \
@@ -1119,6 +1194,18 @@ _ccage_handoff_main() {
     local pass_args=()
 
     while [ $# -gt 0 ]; do
+        # A value-taking flag given as the LAST argument used to `shift 2` with
+        # only one argument left. That shift fails, nothing is consumed, and the
+        # loop spins forever at 100% CPU — a typo (`ccage handoff --config-dir`)
+        # hung the terminal rather than printing usage.
+        case "$1" in
+            --project|--config-dir|--output|--max-prompts)
+                if [ $# -lt 2 ]; then
+                    printf 'ccage handoff: %s needs a value\n' "$1" >&2
+                    return 2
+                fi
+                ;;
+        esac
         case "$1" in
             --project)     project="$2"; shift 2 ;;
             --config-dir)  config_dir_flag="$2"; shift 2 ;;
