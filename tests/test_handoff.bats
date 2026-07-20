@@ -251,6 +251,40 @@ STUB
     [[ "$stderr" == *"unknown"* ]] || [[ "$stderr" == *"usage"* ]]
 }
 
+# A teammate idle notification and a background-task completion are injected by
+# the harness as type=="user" records with plain-string content, no isMeta and
+# no toolUseResult — indistinguishable from a typed prompt by structure alone,
+# so they passed every filter. Measured on one real fan-out session: 7 of 8
+# extracted "prompts" were notifications, and they were 5650 of the brief's
+# 9430 bytes. They are bucketed rather than dropped: the delegated-work section
+# reads them as terminal-state evidence.
+@test "prompts: harness notifications are bucketed, not counted as user prompts" {
+    local f="$FIXTURES/notifications.jsonl"
+
+    # 4 candidate user records; exactly 1 is human.
+    run _ccage_handoff_count_prompts "$f"
+    [ "$output" = 1 ]
+
+    run _ccage_handoff_prompts_json "$f"
+    [ "$(printf '%s' "$output" | jq 'length')" = 1 ]
+    [[ "$output" == *"Resume the task from RESUME.md"* ]]
+    [[ "$output" != *"idle_notification"* ]]
+
+    # The production collector agrees, and keeps the notifications addressable.
+    local collected
+    collected=$(_ccage_handoff_collect "$f")
+    [ "$(printf '%s' "$collected" | jq '.prompts | length')" = 1 ]
+    [ "$(printf '%s' "$collected" | jq '.notifications | length')" = 3 ]
+    # Array-content notifications (not just plain strings) are caught too.
+    [ "$(printf '%s' "$collected" | jq '[.notifications[] | select(contains("F6-moe-comparison"))] | length')" = 1 ]
+
+    # And the brief itself no longer inflates the turn count.
+    run _ccage_handoff_generate "$f" --stdout
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"1 user"* ]]
+    [[ "$output" != *"idle_notification"* ]]
+}
+
 # ===== cage resolution (no CLAUDE_CONFIG_DIR) =====
 #
 # `ccage handoff` runs from a plain shell, where CLAUDE_CONFIG_DIR is unset by

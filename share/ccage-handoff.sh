@@ -135,6 +135,29 @@ _ccage_handoff_locate() {
 # (preserves partial-write resilience). Memory stays constant per record.
 _CCAGE_HANDOFF_JQ_PREAMBLE='split("\n") | .[] | select(length > 0) | fromjson? // empty'
 
+# Harness-injected notifications masquerading as user prompts.
+#
+# A teammate's idle notification and a background-task completion arrive as
+# `type: "user"` records with plain-string content, no isMeta and no
+# toolUseResult — structurally identical to something the human typed, so every
+# structural filter passes them. Only the payload distinguishes them. Measured
+# on one fan-out session: 5 of 8 extracted "prompts" were idle notifications,
+# 5650 of the brief's 9430 bytes, and `Turns: N user` was inflated to match.
+#
+# Matched shapes, all verified against real transcripts:
+#   "Another Claude session sent a message:\n<teammate-message …>{json}"
+#   "<task-notification><task-id>…"
+# The `<teammate-message ` test is the structured one and is kept as the
+# primary; the prose sentence is matched too because it is what precedes it.
+#
+# jq `def`s must lead a program, so this prefixes rather than pipes.
+_CCAGE_HANDOFF_JQ_DEFS='
+def is_harness_notification:
+    startswith("Another Claude session sent a message:")
+    or contains("<teammate-message ")
+    or startswith("<task-notification>");
+'
+
 # ---- token totals -----------------------------------------------------------
 # Echoes one line: "input=N output=N cache_write=N cache_read=N"
 _ccage_handoff_token_totals() {
@@ -190,7 +213,7 @@ _ccage_handoff_last_model() {
 # contain partial writes.
 _ccage_handoff_count_prompts() {
     local jsonl="$1"
-    jq -Rrs '
+    jq -Rrs "$_CCAGE_HANDOFF_JQ_DEFS"'
         split("\n")
         | map(select(length > 0) | fromjson?)
         | map(select(
@@ -212,6 +235,7 @@ _ccage_handoff_count_prompts() {
             and (startswith("<system-reminder>") | not)
             and (startswith("<command-message>") | not)
             and (startswith("<command-args>") | not)
+            and (is_harness_notification | not)
         ))
         | length
     ' "$jsonl" 2>/dev/null || echo 0
@@ -234,7 +258,7 @@ _ccage_handoff_prompts_json() {
     # Map every user record that is NOT meta and NOT a tool result.
     # Content can be a string (most common) or an array of {type,text} blocks.
     # For array content, concatenate all type=="text" elements.
-    jq -Rs '
+    jq -Rs "$_CCAGE_HANDOFF_JQ_DEFS"'
         split("\n")
         | map(select(length > 0) | fromjson?)
         | map(
@@ -254,12 +278,15 @@ _ccage_handoff_prompts_json() {
         # `<system-reminder>`, etc.). These appear in real Claude Code transcripts
         # whenever a user invokes a slash command — the visible "prompt" is the
         # auto-emitted command-info block, not human intent.
+        # Harness-injected notifications (teammate idle, background task done)
+        # are not human intent either — see _CCAGE_HANDOFF_JQ_DEFS.
         | map(select(
             (startswith("<command-name>") | not)
             and (startswith("<local-command-stdout>") | not)
             and (startswith("<system-reminder>") | not)
             and (startswith("<command-message>") | not)
             and (startswith("<command-args>") | not)
+            and (is_harness_notification | not)
         ))
     ' "$jsonl" 2>/dev/null
 }
@@ -335,14 +362,14 @@ _ccage_handoff_last_assistant_text() {
 _ccage_handoff_collect() {
     local jsonl="$1"
     [ -f "$jsonl" ] || {
-        printf '%s\n' '{"session_id":null,"first_ts":null,"last_ts":null,"last_model":null,"assistant_count":0,"in":0,"out":0,"cw":0,"cw5":0,"cw1":0,"cr":0,"prompts":[],"files":{},"bash_commands":[],"last_text":null}'
+        printf '%s\n' '{"session_id":null,"first_ts":null,"last_ts":null,"last_model":null,"assistant_count":0,"in":0,"out":0,"cw":0,"cw5":0,"cw1":0,"cr":0,"prompts":[],"notifications":[],"files":{},"bash_commands":[],"last_text":null}'
         return 0
     }
-    jq -cRn '
+    jq -cRn "$_CCAGE_HANDOFF_JQ_DEFS"'
         reduce (inputs | fromjson? // empty) as $r (
             { session_id: null, first_ts: null, last_ts: null, last_model: null,
               assistant_count: 0, in: 0, out: 0, cw: 0, cw5: 0, cw1: 0, cr: 0,
-              prompts: [], files: {}, bash_commands: [], last_text: null };
+              prompts: [], notifications: [], files: {}, bash_commands: [], last_text: null };
             # session id: first non-null
             ( if .session_id == null and ($r.sessionId // null) != null
               then .session_id = $r.sessionId else . end )
@@ -385,7 +412,10 @@ _ccage_handoff_collect() {
                       else . end
                     )
                 else . end )
-            # user prompts: filter meta + tool-result + synthetic slash-command echoes
+            # user prompts: filter meta + tool-result + synthetic slash-command
+            # echoes, and split harness notifications out into their own bucket
+            # rather than dropping them — they are terminal-state evidence for
+            # the delegated-work section.
             | ( if $r.type == "user"
                   and ($r.isMeta // false) == false
                   and ($r.toolUseResult // null) == null then
@@ -400,7 +430,11 @@ _ccage_handoff_collect() {
                         and (($text | startswith("<system-reminder>")) | not)
                         and (($text | startswith("<command-message>")) | not)
                         and (($text | startswith("<command-args>")) | not)
-                      then .prompts += [$text] else . end )
+                      then
+                        ( if ($text | is_harness_notification)
+                            then .notifications += [$text]
+                            else .prompts += [$text] end )
+                      else . end )
                 else . end )
         )
     ' "$jsonl" 2>/dev/null
