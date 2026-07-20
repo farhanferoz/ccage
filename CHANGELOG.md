@@ -2,7 +2,7 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.14.0] — 2026-07-20
 
 ### Fixed — `ccage handoff` needed a manual `CLAUDE_CONFIG_DIR=` prefix to find any session
 - **`ccage handoff` run from a plain shell looked in `~/.claude`, the one config dir that holds no cage sessions.** The `claude()` wrapper exports `CLAUDE_CONFIG_DIR` with `local -x` precisely so it never leaks into the shell, and `bin/ccage` never sourced the wrapper — so the CLI had no idea how cages are keyed and defaulted to the master dir. Every invocation needed a manual `CLAUDE_CONFIG_DIR=…` prefix, which is only possible if you already know the answer. `bin/ccage` now sources `claude-isolation.sh` (installed alongside the CLI's other libs) plus a user's `claude-overrides.sh` companion — the latter matters because that file is where `_CCAGE_OVERRIDE_ACTIVE=1` is set, so skipping it would silently ignore a user's `_ccage_config_dir_override`.
