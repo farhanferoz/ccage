@@ -525,7 +525,14 @@ _mk_cage() {
     mkdir -p "$proj"
     _mk_cage "$CCAGE_ROOT/.cage-e2e-proj" "$proj" >/dev/null
 
-    run env -u CLAUDE_CONFIG_DIR "$REPO_ROOT/bin/ccage" handoff --project "$proj" --stdout
+    # A function, not `env -u`: BSD and GNU env differ on flag support and the
+    # local dev loop is Linux-only, so this repo does not get to find that out
+    # from a red macOS CI leg.
+    _ccage_no_config_dir() {
+        unset CLAUDE_CONFIG_DIR
+        "$REPO_ROOT/bin/ccage" "$@"
+    }
+    run _ccage_no_config_dir handoff --project "$proj" --stdout
     [ "$status" -eq 0 ]
     [[ "$output" == *"session-001"* ]]
 }
