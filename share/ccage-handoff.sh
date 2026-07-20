@@ -842,7 +842,7 @@ _ccage_handoff_compose_brief() {
                | .keep | reverse) as $kept
             | ($kept[] | "\(.key). \(.value)\n"),
               (if ($kept | length) < ($items | length)
-               then "_(\(($items | length) - ($kept | length)) older prompt(s) dropped to keep the brief small)_\n"
+               then "_(\(($items | length) - ($kept | length)) of the last \($items | length) prompt(s) dropped for size)_\n"
                else empty end)
         ' <<<"$handoff_data"
         if [ "$total_prompts" -gt "$max_prompts" ]; then
