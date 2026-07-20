@@ -15,12 +15,16 @@ description: >-
 # /checkpoint-threshold
 
 `ccage-auto` watches this session's context occupancy and, at a **soft**
-threshold (default 35%), nudges you to `/checkpoint`; at a **hard** threshold
-(default 55%) it forces one as a backstop before auto-compact. Those percentages
-are fixed when `ccage-auto` launches. This skill changes them — or pauses the
-whole mechanism — **while the session is running**, by writing a small control
-file (`.ccage-autock.conf`) in the project dir that the watcher re-reads on its
-next poll (~12 s). No restart, no lost context.
+threshold (default 40%), nudges you to `/checkpoint`; if that goes
+unconfirmed it **re-nudges** once at `hard − 5%` (default 55%) or after a
+timeout, whichever comes first; at a **hard** threshold (default `soft + 20%`,
+capped at 100%, so 60% by default) it forces a checkpoint as a backstop before
+auto-compact. Naming `hard` explicitly always overrides that `soft + 20`
+default. Those percentages are fixed when `ccage-auto` launches. This skill
+changes them — or pauses the whole mechanism — **while the session is
+running**, by writing a small control file (`.ccage-autock.conf`) in the
+project dir that the watcher re-reads on its next poll (~12 s). No restart, no
+lost context.
 
 It does this by shelling out to `ccage-auto` itself, so all validation lives in
 one place.
@@ -55,8 +59,12 @@ ccage-auto --set soft=50
 - If `ccage-auto` is **not found** (not installed / not on `PATH`), say so plainly
   and stop — there is nothing to retune.
 - `--set` echoes the resulting thresholds and clamps a bad pair (out-of-range
-  values snap back to defaults; `soft ≥ hard` raises `hard`). Relay any clamp
-  message it prints — don't hide it.
+  values snap back to defaults; `soft ≥ hard` raises `hard`). Setting `soft`
+  alone re-derives `hard` (`soft + 20`, capped at 100) unless `hard` was named
+  explicitly, at launch or in an earlier `--set` — that stays sticky. Relay any
+  clamp/derivation warning it prints — don't hide it, especially the one for a
+  derived `hard` hitting the 100% cap (a backstop at a full window is too late
+  to help).
 
 ## 3. Confirm — cheaply
 
@@ -64,7 +72,12 @@ ccage-auto --set soft=50
 already prints the resulting thresholds on stdout — **that echo is your
 confirmation. Do NOT also run `--status`.** Just relay what it printed, e.g.:
 
-> Auto-checkpoint now nudges at **50%** (backstop 55%).
+> Auto-checkpoint now nudges at **50%**.
+
+A soft-only `--set` only echoes `soft=`, never a derived `hard` (it isn't
+persisted — it stays dynamic, re-deriving from soft on every read) — don't
+invent a backstop number the command didn't print. If the user asks what the
+backstop actually is now, that's a `--status` question (step 3, "effective").
 
 **Only for a bare `status` request** (or if the user asks how full they are) run:
 
@@ -75,7 +88,7 @@ ccage-auto --status
 and report the **effective** soft/hard (and `PAUSED` if so) plus the current
 **occupancy**, e.g.:
 
-> Nudge at **50%**, backstop 55%. Currently at 22% — plenty of room.
+> Nudge at **50%**, backstop 70%. Currently at 22% — plenty of room.
 
 (Why: `--set` is ~0.3 s but `--status` reads the transcript and resolves the
 cage dir, so it's slower — skip it when the mutation already told you the

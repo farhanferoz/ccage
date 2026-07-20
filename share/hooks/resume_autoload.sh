@@ -42,6 +42,19 @@ else
 fi
 src="$(printf '%s' "$hook_input" | sed -n 's/.*"source"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
 
+# ---- instrumentation: record every SessionStart source ----
+# Added 2026-07-20 while chasing "a --set threshold silently un-set itself
+# minutes later, same transcript throughout" (Task 6, failure mode 4). Cheap,
+# best-effort, append-only, never blocks a session start. Without this the
+# only way to reconstruct what actually fired is cross-referencing the
+# ccage-auto log against transcript birth times after the fact — this makes
+# the next one a one-line grep instead of an investigation.
+log_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+if [ -d "$log_dir" ]; then
+    printf '%s  src=%s  base=%s  pid=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${src:-<empty>}" "$base" "$$" \
+        >> "$log_dir/resume-autoload.log" 2>/dev/null
+fi
+
 # ---- slot-aware RESUME filename (component G) ----
 # Mirror the wrapper's CCAGE_SLOT validation: an unsafe slot is ignored and we
 # fall back to the plain file, exactly as _ccage_config_dir_for does.
@@ -64,8 +77,90 @@ resume="$base/RESUME${slot}.md"
 # (source=startup) or resuming (source=resume, `claude -r`) means the user is
 # working again, so state left over from a previous run would falsely quit or
 # mis-tune today's helpers. Clear both on startup and resume only.
+#
+# BUT both files are scoped to the PROJECT DIRECTORY, not to any one session —
+# and `startup` fires for EVERY new session that starts in that directory, not
+# just a restart of the one ccage-auto is actually watching. Confirmed live
+# 2026-07-20 (see plans/wave2-task6-findings.md): an unrelated second session
+# starting in the same repo wiped a control file a running `--set soft=45` had
+# just written, ~2 minutes earlier, while the watched session's own transcript
+# never restarted. So only clear when no OTHER `ccage-auto` watcher is
+# currently alive for this directory — that is the one thing that actually
+# depends on these files; a sibling session starting up must not step on it.
+#
+# First cut of this fix (superseded, see the same findings doc) scanned every
+# process on the machine with `pgrep -f ccage-auto` + `lsof -a -p <pid> -d cwd`
+# per match: measured 42x slower on a marker-file-present path (34ms -> 1.4s,
+# dominated by lsof at ~110ms per match) AND unsafe — pgrep's substring match
+# caught transient shells that merely *mentioned* "ccage-auto" in their
+# command line (e.g. while profiling this very hook), with cwd == the project
+# dir, so they satisfied the check and blocked a delete that should have
+# happened. That's not a harmless false positive: a stale `.ccage-session-done`
+# surviving a startup that should have cleared it makes /keepwarm and
+# ccage-auto believe finished work is still finished when it isn't.
+#
+# Now: ccage-auto writes its own pid (+ a start-time token) to
+# .ccage-autock.pid when it starts watching this directory, and exports
+# CCAGE_AUTOCK_WATCHER_PID into the launched session's environment so this
+# hook can tell "the pidfile names MY OWN launcher" apart from "some other,
+# still-running session's watcher" with a plain string compare — no process
+# enumeration, no substring matching, no /proc, no lsof/pgrep. A deliberate
+# restart under a fresh ccage-auto still clears stale state (its own pidfile
+# write makes CCAGE_AUTOCK_WATCHER_PID match), exactly as before. A missing or
+# unreadable pidfile falls back to the original unconditional clear.
 if [ "$src" = "startup" ] || [ "$src" = "resume" ]; then
-    rm -f "$base/.ccage-session-done" "$base/.ccage-autock.conf" 2>/dev/null
+    if [ -f "$base/.ccage-session-done" ] || [ -f "$base/.ccage-autock.conf" ]; then
+        watcher_elsewhere=0
+        pidfile="$base/.ccage-autock.pid"
+        if [ -f "$pidfile" ]; then
+            wpid="$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' "$pidfile" | head -1)"
+            wstart="$(sed -n 's/^start=\([0-9][0-9]*\)$/\1/p' "$pidfile" | head -1)"
+            if [ -n "$wpid" ] && [ "$wpid" != "${CCAGE_AUTOCK_WATCHER_PID:-}" ] \
+               && kill -0 "$wpid" 2>/dev/null; then
+                # Live, and not this session's own launcher. Guard against pid
+                # reuse (ccage-auto exited without cleaning up, e.g. SIGKILL,
+                # and an unrelated process later got the same pid): compare
+                # the recorded start time against the CURRENT process at that
+                # pid, via `ps -o etime=` (elapsed running time, not the
+                # locale-dependent `lstart=` string) — cheap (~3ms measured)
+                # and only ever runs in this already-rare branch. NOT
+                # `etimes` (plural, seconds directly): that is a Linux/procps
+                # extension, confirmed absent from the BSD/Darwin ps keyword
+                # table — using it would silently no-op this whole guard on
+                # macOS (empty output -> skipped -> watcher_elsewhere stays
+                # 0 -> the guard this fix exists for never fires there). Parse
+                # etime's `[[DD-]hh:]mm:ss` with awk instead (portable to
+                # both gawk and BSD/nawk). No start token recorded (ps
+                # unavailable at write time)? trust the pid alone rather than
+                # block the delete on a check we can't perform.
+                if [ -n "$wstart" ]; then
+                    now_etime_secs="$(ps -o etime= -p "$wpid" 2>/dev/null | awk '
+                        {
+                            s = $0
+                            gsub(/^[ \t]+|[ \t]+$/, "", s)
+                            days = 0
+                            if (split(s, dparts, "-") == 2) { days = dparts[1] + 0; s = dparts[2] }
+                            n = split(s, t, ":")
+                            if (n == 2)      { h = 0; m = t[1]; sec = t[2] }
+                            else if (n == 3) { h = t[1]; m = t[2]; sec = t[3] }
+                            else             { exit 1 }
+                            printf "%d\n", days*86400 + h*3600 + m*60 + sec
+                        }')"
+                    if [ -n "$now_etime_secs" ]; then
+                        now_start=$(( $(date +%s) - now_etime_secs ))
+                        diff=$(( now_start - wstart ))
+                        [ "$diff" -lt 0 ] && diff=$(( -diff ))
+                        [ "$diff" -le 2 ] && watcher_elsewhere=1
+                    fi
+                else
+                    watcher_elsewhere=1
+                fi
+            fi
+        fi
+        if [ "$watcher_elsewhere" -eq 0 ]; then
+            rm -f "$base/.ccage-session-done" "$base/.ccage-autock.conf" 2>/dev/null
+        fi
+    fi
 fi
 
 # ---- 1. inject RESUME into context ----
