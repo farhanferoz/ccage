@@ -525,6 +525,27 @@ conf() { ( cd "$REPO" && "$AUTO" "$@" ); }
 
 # --- Control-plane dispatch (Task 6: recognised anywhere in argv) -----------
 
+@test "launch flags are recognised after an unknown flag (the ccage-auto-yolo alias shape)" {
+    # `ccage-auto-yolo` is an alias for `ccage-auto --dangerously-skip-permissions`,
+    # so a user's own flags always arrive AFTER one ccage-auto does not own.
+    # Parsing used to stop at that first unknown token: the session launched at
+    # the DEFAULT soft and `--soft 45 --status` was handed to claude, which
+    # rejected it -- a silent wrong threshold plus a launch error.
+    run bash -c "cd '$REPO' && '$AUTO' --dangerously-skip-permissions --soft 45 --status"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"soft / hard  : 45% / 65%"* ]]
+    [[ "$output" == *"re-nudge     : 60%"* ]]
+}
+
+@test "a launch flag after a literal -- still belongs to claude, not ccage-auto" {
+    # The escape hatch that makes the scan above safe: everything past `--` is
+    # claude's, however ccage-auto-shaped it looks.
+    run bash -c "cd '$REPO' && '$AUTO' --status -- --soft 99"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"soft / hard  : 40% / 60%"* ]]
+    [[ "$output" != *"99%"* ]]
+}
+
 @test "--set found after other flags (the ccage-auto-yolo alias shape) still writes the control file and exits" {
     run bash -c "cd '$REPO' && '$AUTO' --dangerously-skip-permissions --set soft=40"
     [ "$status" -eq 0 ]

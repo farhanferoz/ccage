@@ -325,6 +325,28 @@ end. Do not add any, and do not suggest it.
    one you are in, and its **Last activity** should predate this session. If the
    id matches, you picked the live transcript — step back one.
 
+   **Then check whether that session already checkpointed, before merging
+   anything.** Recovery exists for a session that ended *without* one; merging a
+   brief whose state is already in `$resume` costs a paid turn and risks
+   re-stating settled work as if it were new. Compare `$resume`'s mtime against
+   the brief's **Last activity**:
+
+   ```bash
+   # epoch mtime of $resume; compare against the brief's "Last activity"
+   ls -l "$resume" >/dev/null 2>&1 && python3 -c \
+     "import os,sys;print(int(os.path.getmtime(sys.argv[1])))" "$resume"
+   ```
+
+   If `$resume` is **newer** than the recovered session's last activity, that
+   session's state was already saved — say so plainly, name the session id, and
+   **stop without editing `$resume`**. Corroborate with the brief itself: a
+   session that checkpointed shows `$resume` in its `## Files touched` table.
+   This is the common case under `ccage-auto`, where every `/clear` rotates to a
+   new transcript, so the previous transcript is usually the pre-clear segment
+   of a run that *did* checkpoint. Only proceed to step 4 when the recovered
+   session genuinely ended without saving, or the user named it explicitly and
+   wants it merged anyway.
+
 4. **Merge into `$resume` exactly as §3 does** — in place, into the same `###
    Now / ### Next / ### Threads / ### Decisions / ### Open questions / ### Plan`
    sections, keeping every carried line verbatim. **Never overwrite `$resume`**:
