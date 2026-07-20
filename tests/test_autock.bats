@@ -72,10 +72,40 @@ status() { ( cd "$REPO" && "$AUTO" --status ); }
     [[ "$output" == *"50.0% of window"* ]]
 }
 
-@test "default thresholds are 35%% soft / 55%% hard" {
+@test "default thresholds are 40%% soft / 60%% hard, re-nudge at 55%%" {
     write_transcript 100000
     run status
-    [[ "$output" == *"soft / hard  : 35% / 55%"* ]]
+    [[ "$output" == *"soft / hard  : 40% / 60%"* ]]
+    [[ "$output" == *"re-nudge     : 55%"* ]]
+}
+
+@test "derivation table: soft=40 -> hard=60, renudge=55 (explicit --soft, default hard)" {
+    write_transcript 100000
+    run bash -c "cd '$REPO' && '$AUTO' --soft 40 --status"
+    [[ "$output" == *"soft / hard  : 40% / 60%"* ]]
+    [[ "$output" == *"re-nudge     : 55%"* ]]
+}
+
+@test "derivation table: soft=45 -> hard=65, renudge=60" {
+    write_transcript 100000
+    run bash -c "cd '$REPO' && '$AUTO' --soft 45 --status"
+    [[ "$output" == *"soft / hard  : 45% / 65%"* ]]
+    [[ "$output" == *"re-nudge     : 60%"* ]]
+}
+
+@test "derivation table: soft=85 -> hard capped at 100, renudge=95, warns on the cap" {
+    write_transcript 100000
+    run bash -c "cd '$REPO' && '$AUTO' --soft 85 --status 2>&1"
+    [[ "$output" == *"soft / hard  : 85% / 100%"* ]]
+    [[ "$output" == *"re-nudge     : 95%"* ]]
+    [[ "$output" == *"derived hard backstop hit the 100% cap"* ]]
+}
+
+@test "derivation table: explicit --hard 70 with --soft 40 stays 70 (explicit wins)" {
+    write_transcript 100000
+    run bash -c "cd '$REPO' && '$AUTO' --soft 40 --hard 70 --status"
+    [[ "$output" == *"soft / hard  : 40% / 70%"* ]]
+    [[ "$output" == *"re-nudge     : 65%"* ]]
 }
 
 @test "--soft/--hard override the thresholds" {
@@ -150,7 +180,9 @@ status() { ( cd "$REPO" && "$AUTO" --status ); }
 @test "out-of-range thresholds fall back to defaults" {
     write_transcript 100000
     run bash -c "cd '$REPO' && '$AUTO' --soft 0 --hard 150 --status 2>&1"
-    [[ "$output" == *"soft / hard  : 35% / 55%"* ]]
+    [[ "$output" == *"soft=0 out of range (0,100); using 40"* ]]
+    [[ "$output" == *"hard=150 out of range (0,100]; deriving from soft instead"* ]]
+    [[ "$output" == *"soft / hard  : 40% / 60%"* ]]
 }
 
 @test "picks the newest transcript when /clear has rotated the file" {
@@ -332,6 +364,23 @@ drive() {
     grep -q "HARD threshold" "$CAGE/ccage-autock.log"
 }
 
+@test "re-nudge is occupancy-anchored (hard - 5), fires without an Escape interrupt" {
+    # soft=10, hard=30 -> re-nudge=25. Pin occupancy at 28% (above soft and the
+    # re-nudge line, below hard) so the soft nudge fires, then the SAME
+    # occupancy crosses the re-nudge line on the next poll -- well before the
+    # 600s timeout fallback could ever fire in a 6s test. Never reaches hard,
+    # so this isolates the occupancy trigger from both the timeout fallback
+    # and the hard escalation (neither of which types this message or skips
+    # the Escape interrupt).
+    export FAKE_TOKENS=280000 FAKE_DEADLINE=6
+    drive hard "--soft 10 --hard 30 --poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE
+    [ "$status" -eq 0 ]
+    grep -q "reached the re-nudge line (25%)" "$CAGE/ccage-autock.log"
+    ! grep -q "HARD threshold" "$CAGE/ccage-autock.log"   # never escalated -- occupancy stayed under hard
+    ! cap_has "b'\x1b'"                                    # re-nudge never interrupts
+}
+
 @test "NUDGED state cancels rather than re-nudges when occupancy drops below soft mid-cycle" {
     # A manual /clear rotates the transcript to a fresh, low-occupancy file
     # while the watcher is mid-nudge (soft crossed, not yet confirmed). It must
@@ -401,6 +450,40 @@ PY
 
 conf() { ( cd "$REPO" && "$AUTO" "$@" ); }
 
+# --- Control-plane dispatch (Task 6: recognised anywhere in argv) -----------
+
+@test "--set found after other flags (the ccage-auto-yolo alias shape) still writes the control file and exits" {
+    run bash -c "cd '$REPO' && '$AUTO' --dangerously-skip-permissions --set soft=40"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"control file updated — soft=40%"* ]]
+    grep -q '^soft=40$' "$REPO/.ccage-autock.conf"
+}
+
+@test "--pause/--reset found after other flags also dispatch, not just --set" {
+    run bash -c "cd '$REPO' && '$AUTO' --dangerously-skip-permissions --pause"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"PAUSED"* ]]
+    grep -q '^paused=1$' "$REPO/.ccage-autock.conf"
+
+    run bash -c "cd '$REPO' && '$AUTO' --dangerously-skip-permissions --reset"
+    [ "$status" -eq 0 ]
+    [ ! -f "$REPO/.ccage-autock.conf" ]
+}
+
+@test "a control token after a literal -- belongs to claude, not ccage-auto" {
+    # -- is the documented hard boundary: anything after it is claude's
+    # verbatim, even if it happens to spell --set.
+    run bash -c "cd '$REPO' && CCAGE_AUTOCK_EXEC='printf %s \"\$*\"' '$AUTO' -- --set soft=40 </dev/null"
+    [ "$status" -eq 0 ]
+    [ ! -f "$REPO/.ccage-autock.conf" ]
+    [[ "$output" == *"--set soft=40"* ]]
+}
+
+@test "a typo'd ccage-auto-shaped flag warns before being forwarded to claude" {
+    run bash -c "cd '$REPO' && CCAGE_AUTOCK_EXEC='exit 0' '$AUTO' --hardd 70 </dev/null"
+    [[ "$output" == *"'--hardd' looks like a ccage-auto flag but wasn't recognised"* ]]
+}
+
 @test "--set soft writes the control file and --status shows it" {
     write_transcript 100000
     run conf --set soft=50
@@ -409,7 +492,10 @@ conf() { ( cd "$REPO" && "$AUTO" "$@" ); }
     grep -q '^soft=50$' "$REPO/.ccage-autock.conf"
     run status
     [[ "$output" == *"overrides    : soft=50%"* ]]
-    [[ "$output" == *"effective    : 50% / 55%"* ]]
+    # No hard/CCAGE_AUTOCK_HARD was ever named, so hard re-derives from the
+    # new soft (min(soft + 20, 100)) instead of falling back to the old flat
+    # launch default: 50 + 20 = 70, re-nudge 70 - 5 = 65.
+    [[ "$output" == *"effective    : 50% / 70% (re-nudge 65%)"* ]]
 }
 
 @test "--set soft+hard writes both thresholds" {
@@ -424,6 +510,123 @@ conf() { ( cd "$REPO" && "$AUTO" "$@" ); }
     [[ "$output" == *"soft (80%) >= hard (40%); raising hard to 90%"* ]]
     grep -q '^soft=80$' "$REPO/.ccage-autock.conf"
     grep -q '^hard=90$' "$REPO/.ccage-autock.conf"
+}
+
+@test "--set soft=85 (no hard) warns that the derived hard hit the 100% cap" {
+    write_transcript 100000
+    run bash -c "cd '$REPO' && '$AUTO' --set soft=85 2>&1"
+    [[ "$output" == *"derived hard backstop hit the 100% cap"* ]]
+    grep -q '^soft=85$' "$REPO/.ccage-autock.conf"
+    ! grep -q '^hard=' "$REPO/.ccage-autock.conf"   # derived, not persisted -- stays dynamic
+    run status
+    [[ "$output" == *"effective    : 85% / 100% (re-nudge 95%)"* ]]
+}
+
+@test "a live --set soft=N with no hard re-derives hard from the new soft (launch hard was default)" {
+    write_transcript 100000
+    run conf --set soft=50
+    run status
+    [[ "$output" == *"effective    : 50% / 70% (re-nudge 65%)"* ]]
+}
+
+@test "print_status: an explicit launch --hard stays sticky when the control file only overrides soft" {
+    write_transcript 100000
+    printf 'soft=50\n' > "$REPO/.ccage-autock.conf"
+    # CCAGE_AUTOCK_HARD makes THIS --status invocation's own cfg.hard_explicit
+    # True, standing in for "the running watcher was launched with an explicit
+    # hard" -- effective hard must stay 55 (explicit), not re-derive to 70 from
+    # the control file's soft=50.
+    run bash -c "cd '$REPO' && CCAGE_AUTOCK_HARD=55 '$AUTO' --status"
+    [[ "$output" == *"overrides    : soft=50%"* ]]
+    [[ "$output" == *"effective    : 50% / 55% (re-nudge 50%)"* ]]
+}
+
+@test "Watcher._refresh_control: a live soft-only override re-derives hard when the launch hard was NOT explicit, but stays sticky when it WAS (unit)" {
+    run python3 - "$AUTO" "$REPO" "$SDIR" <<'PY'
+import importlib.util, importlib.machinery, os, sys, threading
+loader = importlib.machinery.SourceFileLoader("ccageauto", sys.argv[1])
+spec = importlib.util.spec_from_loader("ccageauto", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+cwd, sdir = sys.argv[2], sys.argv[3]
+
+# Case 1: launch hard was NOT explicit (soft-only launch) -> a live soft-only
+# override re-derives hard from the new soft.
+cfg = m.Config(["--soft", "40"]); cfg.validate()
+assert (cfg.soft, cfg.hard, cfg.hard_explicit) == (40.0, 60.0, False), (cfg.soft, cfg.hard, cfg.hard_explicit)
+r, w = os.pipe()
+wat = m.Watcher(cfg, w, threading.Lock(), cwd, sdir, open(os.devnull, "w"))
+m.write_control_file(cwd, {"soft": 50.0})
+wat.conf_mtime = -1; wat._refresh_control()
+assert (wat.cfg.soft, wat.cfg.hard, wat.cfg.renudge) == (50.0, 70.0, 65.0), \
+    (wat.cfg.soft, wat.cfg.hard, wat.cfg.renudge)
+os.remove(m.control_path(cwd))
+
+# Case 2: launch hard WAS explicit -> the same soft-only override leaves hard
+# untouched.
+cfg2 = m.Config(["--soft", "35", "--hard", "55"]); cfg2.validate()
+assert (cfg2.soft, cfg2.hard, cfg2.hard_explicit) == (35.0, 55.0, True), (cfg2.soft, cfg2.hard, cfg2.hard_explicit)
+wat2 = m.Watcher(cfg2, w, threading.Lock(), cwd, sdir, open(os.devnull, "w"))
+m.write_control_file(cwd, {"soft": 50.0})
+wat2.conf_mtime = -1; wat2._refresh_control()
+assert (wat2.cfg.soft, wat2.cfg.hard) == (50.0, 55.0), (wat2.cfg.soft, wat2.cfg.hard)
+os.remove(m.control_path(cwd))
+print("UNIT_OK")
+PY
+    [ "$status" -eq 0 ]
+    [[ "$output" == *UNIT_OK* ]]
+}
+
+@test "_process_start_epoch uses ps -o etime= (portable) and correctly parses a BSD-shaped elapsed string, not etimes= (Linux/procps-only, absent on BSD/Darwin) (unit)" {
+    # Regression for a real macOS defect: ps -o etimes= is a Linux/procps
+    # extension, confirmed absent from the BSD/Darwin ps keyword table (only
+    # `etime`, singular, elapsed-time-as-a-string, is common to both). Using
+    # etimes= there produces empty output that fails SILENTLY -- no error, no
+    # start token, the pid-reuse guard just never engages. This test does not
+    # depend on the host's real ps output (which is Linux-shaped on CI and
+    # would not by itself catch a regression back to etimes=): it mocks
+    # subprocess.run to return a captured BSD-format `[[DD-]hh:]mm:ss` string
+    # ("1-02:00:15" = 1 day, 2h, 0m, 15s = 93615s) regardless of platform, and
+    # asserts both (a) the exact argv passed to ps names etime=, not etimes=,
+    # and (b) that string parses to the correct elapsed seconds.
+    run python3 - "$AUTO" <<'PY'
+import importlib.util, importlib.machinery, subprocess, sys, time
+loader = importlib.machinery.SourceFileLoader("ccageauto", sys.argv[1])
+spec = importlib.util.spec_from_loader("ccageauto", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+
+calls = []
+class FakeResult:
+    stdout = "1-02:00:15\n"
+def fake_run(args, **kwargs):
+    calls.append(args)
+    return FakeResult()
+
+real_run = subprocess.run
+subprocess.run = fake_run
+try:
+    before = time.time()
+    epoch = m._process_start_epoch(12345)
+finally:
+    subprocess.run = real_run
+
+assert calls, "ps was never invoked"
+assert calls[0][:3] == ["ps", "-o", "etime="], \
+    "must request etime=, not etimes= (Linux/procps-only): %r" % (calls[0],)
+assert epoch is not None
+assert abs((before - epoch) - 93615) < 2, (before, epoch)
+
+# Direct parser tests, independent of the ps invocation.
+assert m._parse_etime("00:05") == 5
+assert m._parse_etime("01:30") == 90
+assert m._parse_etime("02:00:15") == 7215
+assert m._parse_etime("1-02:00:15") == 93615
+assert m._parse_etime("10-00:00:00") == 864000
+assert m._parse_etime("garbage") is None
+assert m._parse_etime("") is None
+print("UNIT_OK")
+PY
+    [ "$status" -eq 0 ]
+    [[ "$output" == *UNIT_OK* ]]
 }
 
 @test "--pause then --resume toggles the paused flag" {

@@ -29,16 +29,21 @@
 #   ccage-auto [auto-flags] [-- ] [claude args...]
 #   ccage-auto --status            # print resolved paths + current occupancy, exit
 #
-# Control-plane subcommands (mutate the live control file for cwd, then exit — the
-# /checkpoint-threshold skill uses these to retune a *running* watcher):
+# Control-plane subcommands (mutate the live control file for cwd, then exit
+# without launching — the /checkpoint-threshold skill uses these to retune an
+# ALREADY-RUNNING watcher). Recognised anywhere in argv, not just first — a
+# user alias can prepend other flags (e.g. `ccage-auto-yolo` expanding to
+# `--dangerously-skip-permissions --set soft=40`); whatever precedes the
+# control token is dropped, since nothing is being launched:
 #   ccage-auto --set soft=50 [hard=65]   # change thresholds mid-session
 #   ccage-auto --pause / --resume        # suspend / re-enable auto-checkpointing
 #   ccage-auto --reset                   # drop overrides, revert to launch values
 #
 # Auto-flags (consumed from the front; everything else is passed to claude):
 #   --autock / --no-autock         force the watcher on/off (default: on)
-#   --soft N                       soft threshold, percent       (default: 35)
-#   --hard N                       hard threshold, percent       (default: 55)
+#   --soft N                       soft threshold, percent       (default: 40)
+#   --hard N                       hard threshold, percent       (default: soft + 20,
+#                                  capped at 100; an explicit --hard always wins)
 #   --window N                     force context window, tokens  (default: per-model)
 #   --window-map 'sub=N,sub=N'     per-model windows by id substring
 #   --poll N                       poll interval, seconds        (default: 12)
@@ -59,7 +64,8 @@
 #   CCAGE_AUTOCK_READY_MARKER (string marking the TUI as rendered; default ❯),
 #   CCAGE_AUTOCK_NUDGE (override the soft-nudge text; {pct}/{sentinel} substituted),
 #   CCAGE_AUTOCK_HARD_NUDGE (override the hard-backstop nudge text; same substitutions),
-#   CCAGE_AUTOCK_NUDGE_TIMEOUT (s before re-nudge if unconfirmed; default 600),
+#   CCAGE_AUTOCK_NUDGE_TIMEOUT (s before re-nudge if unconfirmed; default 600 — a
+#     fallback alongside the re-nudge line at hard - 5%, whichever fires first),
 #   CCAGE_AUTOCK_COOLDOWN (s to ignore thresholds after a reset; default 30),
 #   CCAGE_AUTOCK_NO_ASK_GUARD (1 = don't register the AskUserQuestion guard),
 #   CCAGE_AUTOCK_WEEKLY_FLOOR (remaining-% weekly-limit floor; see below).
@@ -107,7 +113,6 @@ import re
 import select
 import shlex
 import signal
-import struct
 import subprocess
 import sys
 import termios
@@ -169,8 +174,22 @@ DEFAULT_WINDOW = WINDOW_1M    # fallback when the model is unknown / ambiguous
 KEY_DELAY = 0.25        # pause between typing a line and submitting it
 CLEAR_SETTLE = 3.0      # wait after /clear for the SessionStart hook + reload
 COOLDOWN = 30.0         # ignore thresholds for this long after a reset
-NUDGE_TIMEOUT = 600.0   # if no checkpoint confirmation, re-nudge / escalate
+NUDGE_TIMEOUT = 600.0   # if no checkpoint confirmation, re-nudge / escalate (a
+                        # fallback alongside the occupancy-anchored re-nudge —
+                        # whichever fires first)
 MAX_RENUDGE = 1         # soft re-nudges before escalating to the hard path
+
+# Threshold derivation (decided contract, three rounds of clarification — do
+# not re-derive): soft defaults to DEFAULT_SOFT; hard defaults to
+# min(soft + HARD_MARGIN, 100) whenever it isn't explicitly named (an explicit
+# --hard always wins); the re-nudge line sits at hard - RENUDGE_MARGIN.
+# COLLISION_MARGIN is unrelated to that default — it's the emergency escape
+# valve for an explicitly-conflicting soft/hard pair (soft >= hard), unchanged
+# from before this contract existed.
+DEFAULT_SOFT = 40.0
+HARD_MARGIN = 20.0
+RENUDGE_MARGIN = 5.0
+COLLISION_MARGIN = 10.0
 
 # Weekly-limit floor. The state file is written by ccage-statusline-tee.sh at
 # the cage's config root on every statusline render; a reading older than the
@@ -244,8 +263,14 @@ def write_guard_settings(sdir):
 class Config:
     def __init__(self, args):
         self.enabled = _truthy(os.environ.get("CCAGE_AUTOCK"), True)
-        self.soft = _num(os.environ.get("CCAGE_AUTOCK_SOFT"), 35.0)
-        self.hard = _num(os.environ.get("CCAGE_AUTOCK_HARD"), 55.0)
+        self.soft = _num(os.environ.get("CCAGE_AUTOCK_SOFT"), DEFAULT_SOFT)
+        # hard has no flat default: None means "derive from soft" (validate()
+        # -> clamp_thresholds does the min(soft + HARD_MARGIN, 100) math).
+        # hard_explicit tracks whether the user actually named a value, here or
+        # via --hard below, so "explicit --hard wins" can be honoured even
+        # after soft changes later (e.g. a live --set that only touches soft).
+        self.hard = _num(os.environ.get("CCAGE_AUTOCK_HARD"), None)
+        self.hard_explicit = self.hard is not None
         self.window = int(_num(os.environ.get("CCAGE_AUTOCK_WINDOW"), 0)) or None
         self.windows = parse_window_map(os.environ.get("CCAGE_AUTOCK_WINDOWS"))
         self.poll = _num(os.environ.get("CCAGE_AUTOCK_POLL"), 12.0)
@@ -299,19 +324,41 @@ class Config:
             elif a == "--status":
                 self.status_only = True
             elif a == "--soft":
-                self.soft = _num(take(), self.soft); i += 1
+                self.soft = _num(take(), self.soft)
+                i += 1
             elif a == "--hard":
-                self.hard = _num(take(), self.hard); i += 1
+                v = _num(take(), None)
+                if v is not None:
+                    self.hard = v
+                    self.hard_explicit = True
+                i += 1
             elif a == "--window":
-                self.window = int(_num(take(), self.window or 0)) or None; i += 1
+                self.window = int(_num(take(), self.window or 0)) or None
+                i += 1
             elif a == "--window-map":
-                self.windows.update(parse_window_map(take())); i += 1
+                self.windows.update(parse_window_map(take()))
+                i += 1
             elif a == "--poll":
-                self.poll = _num(take(), self.poll); i += 1
+                self.poll = _num(take(), self.poll)
+                i += 1
             elif a == "--weekly-floor":
-                self.weekly_floor = _num(take(), self.weekly_floor); i += 1
+                self.weekly_floor = _num(take(), self.weekly_floor)
+                i += 1
             else:
-                # First token we don't recognise: the rest is claude's.
+                # First token we don't recognise: the rest is claude's. But a
+                # ccage-auto-shaped flag that's merely misspelled (--hardd,
+                # --softish, a --set that reached here instead of being
+                # intercepted in main()) would otherwise vanish silently into
+                # claude's argv — warn so the mistake is visible. Prefix match
+                # (--set*/--soft*/--hard*), not a word-boundary regex: the
+                # typo shape we care about is "extra trailing characters",
+                # which a \b anchor would miss (no boundary between two word
+                # characters).
+                if a.startswith(("--set", "--soft", "--hard")):
+                    sys.stderr.write(
+                        "[ccage-auto] warning: '%s' looks like a ccage-auto "
+                        "flag but wasn't recognised — forwarding it to claude "
+                        "verbatim; check the spelling\n" % a)
                 return args[i:]
             i += 1
         return []
@@ -334,8 +381,9 @@ class Config:
         return DEFAULT_WINDOW
 
     def validate(self):
-        """Clamp nonsensical thresholds; return human-readable warnings."""
-        self.soft, self.hard, warns = clamp_thresholds(self.soft, self.hard)
+        """Clamp/derive thresholds; return human-readable warnings."""
+        self.soft, self.hard, self.renudge, warns = clamp_thresholds(
+            self.soft, self.hard if self.hard_explicit else None)
         # Weekly floor: 0 is the documented "off"; anything else must be a
         # sane remaining-percent. Disabling (not clamping) on garbage is the
         # safe failure — a floor the user never chose must not stop a run.
@@ -347,23 +395,43 @@ class Config:
 
 
 def clamp_thresholds(soft, hard):
-    """Clamp a (soft, hard) threshold pair to sane values; return
-    (soft, hard, warnings). Shared by Config.validate (launch flags/env), the
-    `--set` control command, and the watcher's live control-file re-read so the
-    exact same rules — ranges plus soft < hard — apply everywhere."""
+    """Clamp/derive a (soft, hard) threshold pair; return
+    (soft, hard, renudge, warnings).
+
+    `soft=None` means "use DEFAULT_SOFT". `hard=None` means "not explicitly
+    named — derive it from soft": `min(soft + HARD_MARGIN, 100)`, per the
+    decided contract (explicit --hard always wins over that default). The
+    re-nudge line is `hard - RENUDGE_MARGIN`, floored at soft so a very tight
+    soft/hard pair can never push it below soft.
+
+    Shared by Config.validate (launch flags/env), the `--set` control
+    command, and the watcher's live control-file re-read, so the exact same
+    rules apply everywhere — change it once, all three paths follow.
+    """
     warns = []
+    if soft is None:
+        soft = DEFAULT_SOFT
     if not (0 < soft < 100):
-        warns.append("soft=%.0f out of range (0,100); using 35" % soft)
-        soft = 35.0
-    if not (0 < hard <= 100):
-        warns.append("hard=%.0f out of range (0,100]; using 55" % hard)
-        hard = 55.0
+        warns.append("soft=%.0f out of range (0,100); using %.0f" % (soft, DEFAULT_SOFT))
+        soft = DEFAULT_SOFT
+    if hard is not None and not (0 < hard <= 100):
+        warns.append("hard=%.0f out of range (0,100]; deriving from soft instead" % hard)
+        hard = None
+    if hard is None:
+        hard = min(100.0, soft + HARD_MARGIN)
+        if hard >= 100.0:
+            warns.append(
+                "derived hard backstop hit the 100%% cap (soft %.0f%% + %.0f%%) "
+                "— a backstop at a full window is too late to be useful; set "
+                "--hard explicitly if that's not what you want"
+                % (soft, HARD_MARGIN))
     if soft >= hard:
-        new_hard = min(100.0, soft + 10)   # cap at 100, never <= soft
+        new_hard = min(100.0, soft + COLLISION_MARGIN)   # cap at 100, never <= soft
         warns.append("soft (%.0f%%) >= hard (%.0f%%); raising hard to %.0f%%"
                      % (soft, hard, new_hard))
         hard = new_hard
-    return soft, hard, warns
+    renudge = max(soft, hard - RENUDGE_MARGIN)
+    return soft, hard, renudge, warns
 
 
 # ----------------------------------------------------------------------------
@@ -606,6 +674,95 @@ def session_done_mtime(cwd):
         return 0.0
 
 
+# Liveness record for the ccage-auto watcher process itself: written when a
+# watched launch starts, removed when it exits. resume_autoload.sh reads this
+# (pid + start-time token) to decide whether SOME watcher is still depending
+# on the marker files below before deleting them on a sibling session's
+# startup — see WATCHER_PIDFILE's docstring context and
+# plans/wave2-task6-findings.md for the incident that motivated this. Cheap
+# and unambiguous by construction: a specific pid to `kill -0`, not a
+# substring match over every process on the machine.
+WATCHER_PIDFILE = ".ccage-autock.pid"
+
+
+def _parse_etime(s):
+    """Parse ps's `[[DD-]hh:]mm:ss` elapsed-time format (the `etime` keyword)
+    into total seconds, or None if it doesn't match. `etimes` (plural,
+    seconds directly) is a Linux/procps extension — verified absent from the
+    BSD/Darwin ps keyword table, so it cannot be used here; `etime` is the
+    keyword present on both. Written defensively (reject anything that
+    doesn't parse) rather than assuming byte-for-byte identical output across
+    ps implementations."""
+    s = s.strip()
+    days = 0
+    if "-" in s:
+        d, _, s = s.partition("-")
+        try:
+            days = int(d)
+        except ValueError:
+            return None
+    parts = s.split(":")
+    try:
+        parts = [int(p) for p in parts]
+    except ValueError:
+        return None
+    if len(parts) == 2:
+        h, m, sec = 0, parts[0], parts[1]
+    elif len(parts) == 3:
+        h, m, sec = parts
+    else:
+        return None
+    return days * 86400 + h * 3600 + m * 60 + sec
+
+
+def _process_start_epoch(pid):
+    """Best-effort absolute start time (epoch seconds) for `pid`, derived from
+    `ps -o etime=` (elapsed running time, `[[DD-]hh:]mm:ss`) rather than
+    `ps -o lstart=` (a locale/OS-dependent date string, fragile to compare
+    across machines) or `ps -o etimes=` (elapsed seconds directly — NOT
+    portable: confirmed absent from the BSD/Darwin ps keyword table, GNU/
+    procps only). `etime` is present on both GNU and BSD ps; no /proc. None
+    if ps is unavailable, the pid can't be queried, or the output doesn't
+    parse."""
+    try:
+        out = subprocess.run(["ps", "-o", "etime=", "-p", str(pid)],
+                              capture_output=True, text=True, timeout=3).stdout.strip()
+        elapsed = _parse_etime(out)
+        if elapsed is None:
+            return None
+    except Exception:
+        return None
+    return time.time() - elapsed
+
+
+def watcher_pidfile_path(cwd):
+    return os.path.join(cwd, WATCHER_PIDFILE)
+
+
+def write_watcher_pidfile(cwd, pid):
+    """Record `pid` (this ccage-auto process) as the live watcher for cwd,
+    with a start-time token alongside it so a later reader can detect pid
+    reuse (see resume_autoload.sh). Best-effort: a failure here just means
+    the hook falls back to its own conservative default instead of blocking
+    anything on a file that was never written."""
+    start = _process_start_epoch(pid)
+    try:
+        with open(watcher_pidfile_path(cwd), "w") as f:
+            f.write("pid=%d\n" % pid)
+            if start is not None:
+                f.write("start=%d\n" % int(start))
+        _git_exclude(cwd, WATCHER_PIDFILE)
+    except OSError:
+        pass
+
+
+def remove_watcher_pidfile(cwd):
+    try:
+        os.remove(watcher_pidfile_path(cwd))
+    except OSError:
+        pass
+
+
 # The live control file, written by the /checkpoint-threshold skill (or by
 # `ccage-auto --set/--pause/--resume/--reset`). A running watcher re-reads it
 # every poll, so the soft/hard thresholds and a pause switch can be changed
@@ -731,6 +888,12 @@ class Watcher:
         # not to the built-in defaults.
         self.base_soft = cfg.soft
         self.base_hard = cfg.hard
+        # Whether base_hard was explicitly named at launch (--hard /
+        # CCAGE_AUTOCK_HARD) vs. derived from base_soft. A live control-file
+        # override that touches only soft, with no explicit hard anywhere,
+        # should keep re-deriving hard from the new soft — but an explicit
+        # launch --hard stays sticky until something explicitly overrides it.
+        self.base_hard_explicit = cfg.hard_explicit
         self.paused = False        # set by a `paused=1` control file
         self.conf_mtime = -1.0     # last-seen mtime of the control file
         # A `.ccage-session-done` marker newer than this counts as "this run's
@@ -846,7 +1009,12 @@ class Watcher:
     def _refresh_control(self):
         """Re-read the live control file (mtime-gated) and apply soft/hard/paused
         over the launch baseline. An absent file or a dropped key reverts to the
-        launch value. Clamped with the same rules as the launch flags."""
+        launch value. Clamped with the same rules as the launch flags.
+
+        hard is explicit whenever the control file names it directly; failing
+        that, it's explicit only if the LAUNCH hard was (base_hard_explicit) —
+        so a live `--set soft=N` with no hard anywhere keeps re-deriving hard
+        from the new soft, exactly like a fresh launch would."""
         try:
             mt = os.path.getmtime(control_path(self.cwd))
         except OSError:
@@ -855,14 +1023,19 @@ class Watcher:
             return
         self.conf_mtime = mt
         ov = read_control_file(self.cwd) if mt else {}
-        soft, hard, _ = clamp_thresholds(ov.get("soft", self.base_soft),
-                                         ov.get("hard", self.base_hard))
+        if "hard" in ov:
+            hard_in = ov["hard"]
+        else:
+            hard_in = self.base_hard if self.base_hard_explicit else None
+        soft, hard, renudge, _ = clamp_thresholds(ov.get("soft", self.base_soft), hard_in)
         paused = bool(ov.get("paused", False))
-        if (soft != self.cfg.soft or hard != self.cfg.hard or paused != self.paused):
-            self._log("control update: soft=%.0f%% hard=%.0f%% paused=%s"
-                      % (soft, hard, paused))
+        if (soft != self.cfg.soft or hard != self.cfg.hard
+                or renudge != self.cfg.renudge or paused != self.paused):
+            self._log("control update: soft=%.0f%% hard=%.0f%% renudge=%.0f%% paused=%s"
+                      % (soft, hard, renudge, paused))
         self.cfg.soft = soft
         self.cfg.hard = hard
+        self.cfg.renudge = renudge
         if paused != self.paused:
             self.paused = paused
             if not paused:
@@ -1149,17 +1322,25 @@ class Watcher:
                         self._interrupt()
                     self.hard_fired = True
                     self._arm_nudge(path, pct, hard=True)
-                elif (time.time() - self.nudge_at) > cfg.nudge_timeout:
-                    if self.renudges < MAX_RENUDGE:
-                        self.renudges += 1
-                        self._log("no checkpoint after %.0fs — re-nudging" % cfg.nudge_timeout)
-                        self._arm_nudge(path, pct)
+                elif self.renudges < MAX_RENUDGE and (
+                        pct >= cfg.renudge or (time.time() - self.nudge_at) > cfg.nudge_timeout):
+                    # Occupancy-anchored re-nudge (hard - RENUDGE_MARGIN), with the
+                    # timer kept as a fallback for a session that stalls below that
+                    # line — whichever fires first. Same soft-style message either
+                    # way; only the trigger moved.
+                    if pct >= cfg.renudge:
+                        self._log("occupancy %.1f%% reached the re-nudge line (%.0f%%) "
+                                  "— re-nudging" % (pct, cfg.renudge))
                     else:
-                        self._log("re-nudge exhausted — interrupting + nudging")
-                        if cfg.hard_interrupt:
-                            self._interrupt()
-                        self._arm_nudge(path, pct, hard=True)
-                        self.renudges = 0
+                        self._log("no checkpoint after %.0fs — re-nudging" % cfg.nudge_timeout)
+                    self.renudges += 1
+                    self._arm_nudge(path, pct)
+                elif (time.time() - self.nudge_at) > cfg.nudge_timeout:
+                    self._log("re-nudge exhausted — interrupting + nudging")
+                    if cfg.hard_interrupt:
+                        self._interrupt()
+                    self._arm_nudge(path, pct, hard=True)
+                    self.renudges = 0
 
 
 # ----------------------------------------------------------------------------
@@ -1361,6 +1542,10 @@ def run_proxy(cfg, cwd, sdir, logpath):
     if cfg.enabled:
         t = threading.Thread(target=watcher.run, daemon=True)
         t.start()
+        # This process (not the pty child) is now the live watcher for cwd —
+        # record it so resume_autoload.sh can tell a sibling session's own
+        # startup apart from "nothing is watching this directory anymore".
+        write_watcher_pidfile(cwd, os.getpid())
 
     # Circuit breaker: a second daemon thread evaluating subagent transcripts.
     # Alerts always; injects a Tier-A nudge only when CCB_MAX_TIER>=nudge on a
@@ -1463,6 +1648,8 @@ def run_proxy(cfg, cwd, sdir, logpath):
             ccb_watcher.stop = True
         if raw and old_attr is not None:
             termios.tcsetattr(0, termios.TCSADRAIN, old_attr)
+        if cfg.enabled:
+            remove_watcher_pidfile(cwd)
         try:
             logf.close()
         except Exception:
@@ -1475,6 +1662,30 @@ def run_proxy(cfg, cwd, sdir, logpath):
 # ----------------------------------------------------------------------------
 # main
 # ----------------------------------------------------------------------------
+
+# The four control-plane subcommands /checkpoint-threshold (and a human) use
+# to talk to an already-running watcher.
+CONTROL_ACTIONS = ("--set", "--pause", "--resume", "--reset")
+
+
+def _find_control_action(argv):
+    """Index of the first control-plane token in argv, scanning only up to a
+    literal `--` — everything after that is unambiguously claude's, even if it
+    happens to spell one of these tokens. None if absent.
+
+    Not just argv[0]: `ccage-auto-yolo` (a user alias) expands to `ccage-auto
+    --dangerously-skip-permissions --set soft=40` — the control token isn't
+    first, but the intent is unambiguous (nothing else in this argv, or in
+    claude's own flag set, spells --set/--pause/--resume/--reset), so it must
+    still be recognised and dispatched to control_command rather than silently
+    forwarded into claude's argv."""
+    for idx, a in enumerate(argv):
+        if a == "--":
+            return None
+        if a in CONTROL_ACTIONS:
+            return idx
+    return None
+
 
 def control_command(argv):
     """Handle the control-plane subcommands (--set/--pause/--resume/--reset) that
@@ -1528,12 +1739,18 @@ def control_command(argv):
     if not updates:
         sys.stderr.write("[ccage-auto] --set: nothing to set (usage: --set soft=50 [hard=65])\n")
         return 2
-    # Validate against the *merged* view so a lone `soft` is checked against the
-    # existing/launch `hard` too, and the user sees any clamp message now.
+    # Validate against the *merged* view (existing control-file overrides plus
+    # this call's updates) so a lone `soft` is derived/checked against the
+    # right `hard` too, and the user sees any clamp/derivation warning now.
+    # merged["hard"] absent means "not named anywhere" -> clamp_thresholds
+    # derives it from merged's soft (min(soft + HARD_MARGIN, 100)); this has no
+    # visibility into a launch-time --hard that was never written to the
+    # control file, matching --set's existing scope (it only ever reasons
+    # about the control file's own contents, never the running process).
     merged = dict(read_control_file(cwd))
     merged.update(updates)
-    if "soft" in merged and "hard" in merged:
-        s, h, warns = clamp_thresholds(merged["soft"], merged["hard"])
+    if "soft" in merged or "hard" in merged:
+        s, h, _, warns = clamp_thresholds(merged.get("soft"), merged.get("hard"))
         for w in warns:
             sys.stderr.write("[ccage-auto] %s\n" % w)
         if "soft" in updates:
@@ -1563,10 +1780,12 @@ def print_status(cfg, cwd, config_dir, sdir):
     print("  launch       :", launch_command(cfg))
     print("  ready marker :", "%s (ceiling %.0fs)" % (cfg.ready_marker.decode("utf-8"), cfg.init_delay))
     print("  soft / hard  : %.0f%% / %.0f%% (launch)" % (cfg.soft, cfg.hard))
+    print("  re-nudge     : %.0f%% (occupancy-anchored at hard − %g%%; "
+          "%.0fs timeout is the fallback)" % (cfg.renudge, RENUDGE_MARGIN, cfg.nudge_timeout))
     ov = read_control_file(cwd)
     if ov:
-        eff_soft, eff_hard, _ = clamp_thresholds(ov.get("soft", cfg.soft),
-                                                 ov.get("hard", cfg.hard))
+        hard_in = ov["hard"] if "hard" in ov else (cfg.hard if cfg.hard_explicit else None)
+        eff_soft, eff_hard, eff_renudge, _ = clamp_thresholds(ov.get("soft", cfg.soft), hard_in)
         parts = []
         if "soft" in ov:
             parts.append("soft=%g%%" % ov["soft"])
@@ -1576,8 +1795,8 @@ def print_status(cfg, cwd, config_dir, sdir):
             parts.append("paused=%s" % ov["paused"])
         print("  control file :", control_path(cwd))
         print("  overrides    :", ", ".join(parts))
-        print("  effective    : %.0f%% / %.0f%%%s"
-              % (eff_soft, eff_hard, "  (PAUSED)" if ov.get("paused") else ""))
+        print("  effective    : %.0f%% / %.0f%% (re-nudge %.0f%%)%s"
+              % (eff_soft, eff_hard, eff_renudge, "  (PAUSED)" if ov.get("paused") else ""))
     else:
         print("  control file : none (using launch thresholds)")
     if cfg.weekly_floor > 0:
@@ -1608,10 +1827,18 @@ def print_status(cfg, cwd, config_dir, sdir):
 
 def main():
     argv = sys.argv[1:]
-    # Control-plane subcommands (used by /checkpoint-threshold): mutate the live
-    # control file for cwd and exit without launching a session.
-    if argv and argv[0] in ("--set", "--pause", "--resume", "--reset"):
-        return control_command(argv)
+    # Control-plane subcommands (used by /checkpoint-threshold, and by a human
+    # directly): mutate the live control file for cwd and exit without
+    # launching a session. Found anywhere in argv, not just argv[0] — a user
+    # alias like `ccage-auto-yolo` can prepend other flags
+    # (`--dangerously-skip-permissions --set soft=40`), and the control token
+    # must still win rather than being silently forwarded into claude's argv
+    # by Config._parse's "first unrecognised token -> the rest is claude's"
+    # fallback. Whatever preceded it (launch-only flags with nothing to do
+    # once we're not launching) is simply not relevant here and is dropped.
+    idx = _find_control_action(argv)
+    if idx is not None:
+        return control_command(argv[idx:])
 
     cfg = Config(argv)
     for w in cfg.validate():
@@ -1636,6 +1863,14 @@ def main():
     # AskUserQuestion guard for this run only. The disabled pass-through above
     # is untouched: it behaves exactly like launching `claude`.
     os.environ["CCAGE_AUTONOMOUS"] = "1"
+    # This process's own pid, inherited into the launched session's environment
+    # so resume_autoload.sh can recognise "the watcher named in the pidfile IS
+    # my own launcher" with a plain string compare — zero subprocess calls —
+    # instead of walking process ancestry. A deliberate restart under a fresh
+    # ccage-auto still needs to clear stale marker files from a PREVIOUS run in
+    # this directory; this is what tells the hook apart from "some other,
+    # still-running session's watcher".
+    os.environ["CCAGE_AUTOCK_WATCHER_PID"] = str(os.getpid())
     # A --weekly-floor flag must reach the child shell as the env var: the
     # ccage wrapper's _ccage_seed_statusline_tee keys on it to seed the sensor
     # tee, and the /checkpoint-threshold status path may read it back.

@@ -330,3 +330,168 @@ memdir() {
     [ "$status" -eq 0 ]
     [[ "$output" != *"DISPATCHER mode"* ]]
 }
+
+# ===== watcher-alive guard on the startup/resume clear (Task 6, failure ====
+# ===== mode 4 + the pgrep/lsof false-positive it was replaced with)     ====
+#
+# .ccage-session-done / .ccage-autock.conf are scoped to the PROJECT
+# DIRECTORY, not to one session — any new session starting there fires its
+# own `startup` hook, which must not wipe a file a DIFFERENT, still-running
+# session's ccage-auto watcher depends on. The watcher records itself in
+# .ccage-autock.pid (pid + a `ps -o etime=`-derived start-time token); the
+# hook reads that ONE specific pid instead of scanning every process on the
+# machine, so there is nothing left to substring-match against.
+
+# Parses ps's `[[DD-]hh:]mm:ss` elapsed-time format (stdin) into seconds on
+# stdout. Mirrors the awk block embedded in resume_autoload.sh exactly, so
+# this test file's OWN fixtures compute start times the same portable way
+# the hook does — `etimes=` (bare seconds) is Linux/procps-only and would
+# silently misbehave on the macOS CI leg this suite also runs on.
+parse_etime() {
+    awk '
+        {
+            s = $0
+            gsub(/^[ \t]+|[ \t]+$/, "", s)
+            days = 0
+            if (split(s, dparts, "-") == 2) { days = dparts[1] + 0; s = dparts[2] }
+            n = split(s, t, ":")
+            if (n == 2)      { h = 0; m = t[1]; sec = t[2] }
+            else if (n == 3) { h = t[1]; m = t[2]; sec = t[3] }
+            else             { exit 1 }
+            printf "%d\n", days*86400 + h*3600 + m*60 + sec
+        }'
+}
+
+pidfile_for() {  # pidfile_for PID -- write a liveness record for a real, live pid
+    local pid="$1" elapsed start
+    elapsed="$(ps -o etime= -p "$pid" 2>/dev/null | parse_etime)"
+    start=$(( $(date +%s) - ${elapsed:-0} ))
+    printf 'pid=%d\nstart=%d\n' "$pid" "$start" > "$REPO/.ccage-autock.pid"
+}
+
+@test "watcher pidfile absent: falls back to the original unconditional clear" {
+    : > "$REPO/.ccage-session-done"
+    : > "$REPO/.ccage-autock.conf"
+    run run_hook_src startup
+    [ "$status" -eq 0 ]
+    [ ! -e "$REPO/.ccage-session-done" ]
+    [ ! -e "$REPO/.ccage-autock.conf" ]
+}
+
+@test "watcher pidfile names a LIVE, unrelated pid: startup/resume must NOT clear" {
+    : > "$REPO/.ccage-session-done"
+    : > "$REPO/.ccage-autock.conf"
+    pidfile_for "$$"          # this test's own shell -- alive, but not our launcher
+    run run_hook_src startup
+    [ "$status" -eq 0 ]
+    [ -e "$REPO/.ccage-session-done" ]
+    [ -e "$REPO/.ccage-autock.conf" ]
+}
+
+@test "watcher pidfile names THIS session's own launcher (CCAGE_AUTOCK_WATCHER_PID match): still clears" {
+    : > "$REPO/.ccage-session-done"
+    pidfile_for "$$"
+    CCAGE_AUTOCK_WATCHER_PID="$$" run run_hook_src startup
+    [ "$status" -eq 0 ]
+    [ ! -e "$REPO/.ccage-session-done" ]
+}
+
+@test "watcher pidfile names a dead pid: falls back to clearing" {
+    : > "$REPO/.ccage-session-done"
+    printf 'pid=999999\nstart=1\n' > "$REPO/.ccage-autock.pid"   # not a real pid
+    run run_hook_src startup
+    [ "$status" -eq 0 ]
+    [ ! -e "$REPO/.ccage-session-done" ]
+}
+
+@test "pid-reuse guard: a live pid whose recorded start time doesn't match is treated as dead" {
+    : > "$REPO/.ccage-session-done"
+    # Same live pid as the 'unrelated watcher' test, but a start time that
+    # can't be this shell's real one -- simulates ccage-auto exiting without
+    # cleanup and an unrelated process later inheriting the same pid.
+    printf 'pid=%d\nstart=1\n' "$$" > "$REPO/.ccage-autock.pid"
+    run run_hook_src startup
+    [ "$status" -eq 0 ]
+    [ ! -e "$REPO/.ccage-session-done" ]
+}
+
+@test "a process merely MENTIONING ccage-auto in its argv, cwd == project dir, does not block the clear" {
+    # Regression for the pgrep -f 'ccage-auto' substring-match false positive:
+    # a transient shell whose command line contains the word "ccage-auto"
+    # (e.g. someone grepping for it) with cwd equal to the project dir used to
+    # satisfy the old check and skip the delete. The pidfile mechanism has no
+    # process-enumeration step left to fool -- confirm the marker still clears
+    # even with such a process alive and correctly placed, and no pidfile.
+    : > "$REPO/.ccage-session-done"
+    ( cd "$REPO" && exec -a "grep-for-ccage-auto-mentions" sleep 5 ) &
+    local noise_pid=$!
+    sleep 0.2
+    run run_hook_src startup
+    kill "$noise_pid" 2>/dev/null
+    [ "$status" -eq 0 ]
+    [ ! -e "$REPO/.ccage-session-done" ]
+}
+
+@test "watcher-alive guard: hook stays fast (well under the old pgrep+lsof latency) with a marker present" {
+    : > "$REPO/.ccage-session-done"
+    local start end elapsed_ms
+    start=$(date +%s%N)
+    run run_hook_src startup
+    end=$(date +%s%N)
+    elapsed_ms=$(( (end - start) / 1000000 ))
+    [ "$status" -eq 0 ]
+    # Measured before this fix: ~1420ms with a marker present (pgrep + lsof
+    # per match). Measured after: ~15-20ms. Generous CI-safe ceiling, still
+    # an order of magnitude below the old behaviour -- catches a regression
+    # back to process-scanning, not machine noise.
+    [ "$elapsed_ms" -lt 300 ]
+}
+
+@test "pid-reuse guard parses ps -o etime= (a BSD-shaped elapsed string), and a regression to etimes= makes it fail" {
+    # Real macOS defect: ps -o etimes= is a Linux/procps extension, confirmed
+    # absent from the BSD/Darwin ps keyword table -- only etime (singular,
+    # [[DD-]hh:]mm:ss) is common to both. On a host where etimes= silently
+    # produces nothing, the old code's guard just never engaged (no error,
+    # the pid-reuse check always skipped). This test stubs `ps` to answer a
+    # canned BSD-format string ONLY for an exact `etime=` argument -- NOT for
+    # `etimes=`, which is a different string despite the substring overlap --
+    # so it exercises the hook's own embedded awk parser rather than
+    # reimplementing it, and would fail on THIS Linux CI leg too if the
+    # script reverted to etimes= (the stub would stop intercepting, the real
+    # host ps would answer with actual seconds instead of the synthetic
+    # 93615, the comparison would miss, and the marker would wrongly clear).
+    : > "$REPO/.ccage-session-done"
+    local real_ps stub_bin
+    real_ps="$(command -v ps)"
+    stub_bin="$BATS_TEST_TMPDIR/psstub"
+    mkdir -p "$stub_bin"
+    cat > "$stub_bin/ps" <<STUB
+#!/usr/bin/env bash
+match_etime=0
+match_pid=0
+next_is_pid=0
+for a in "\$@"; do
+    if [ "\$next_is_pid" = "1" ]; then
+        [ "\$a" = "$$" ] && match_pid=1
+        next_is_pid=0
+        continue
+    fi
+    [ "\$a" = "etime=" ] && match_etime=1
+    [ "\$a" = "-p" ] && next_is_pid=1
+done
+if [ "\$match_etime" = "1" ] && [ "\$match_pid" = "1" ]; then
+    echo "1-02:00:15"
+    exit 0
+fi
+exec "$real_ps" "\$@"
+STUB
+    chmod +x "$stub_bin/ps"
+
+    # Matches the stub's canned "1-02:00:15" (1d 2h 0m 15s = 93615s).
+    local wstart=$(( $(date +%s) - 93615 ))
+    printf 'pid=%d\nstart=%d\n' "$$" "$wstart" > "$REPO/.ccage-autock.pid"
+
+    PATH="$stub_bin:$PATH" run run_hook_src startup
+    [ "$status" -eq 0 ]
+    [ -e "$REPO/.ccage-session-done" ]   # start times agree -> "watcher elsewhere" -> preserved
+}

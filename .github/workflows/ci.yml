@@ -31,7 +31,19 @@ jobs:
 
       - name: shellcheck
         if: matrix.os == 'ubuntu-latest' && matrix.shell == 'bash'
-        run: shellcheck share/*.sh share/hooks/*.sh share/skills/checkpoint/*.sh share/skills/keepwarm/*.sh install.sh uninstall.sh
+        run: shellcheck bin/ccage share/*.sh share/hooks/*.sh share/skills/checkpoint/*.sh share/skills/keepwarm/*.sh install.sh uninstall.sh
+        shell: bash
+
+      # `shell: bash` resolves via PATH, so a green macOS leg does not by itself
+      # prove bash 3.2 compatibility — the runner may put a newer Homebrew bash
+      # first. ccage targets stock macOS bash 3.2, so make the version that
+      # actually ran visible in the log rather than assuming it.
+      - name: report bash version
+        if: matrix.shell == 'bash'
+        run: |
+          command -v bash
+          bash --version | head -1
+          printf 'stock /bin/bash: '; /bin/bash --version | head -1
         shell: bash
 
       - name: source smoke test (bash)
@@ -48,7 +60,23 @@ jobs:
           typeset -f claude >/dev/null
         shell: 'zsh -e {0}'
 
+      # Run the suite under the bash the TARGET platform ships, not whatever
+      # PATH happens to offer. ccage supports stock macOS bash 3.2, and a
+      # Homebrew bash 5 earlier on the runner's PATH would make a green leg
+      # meaningless for exactly the compatibility this leg exists to prove.
+      # bats is `#!/usr/bin/env bash` and bats-core supports 3.2+, so putting
+      # /bin/bash first is enough to run everything — suite and code under
+      # test — on it. Whatever /bin/bash actually is gets printed above and
+      # again here, so nothing about its version is assumed.
       - name: bats tests
         if: matrix.shell == 'bash'
-        run: ./tests/bats/bin/bats tests/
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            mkdir -p "$RUNNER_TEMP/stockbash"
+            ln -sf /bin/bash "$RUNNER_TEMP/stockbash/bash"
+            PATH="$RUNNER_TEMP/stockbash:$PATH"
+            export PATH
+          fi
+          printf 'suite running under: '; bash --version | head -1
+          ./tests/bats/bin/bats tests/
         shell: bash

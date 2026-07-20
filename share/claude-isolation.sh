@@ -632,19 +632,35 @@ SIGNORE
 # pass-through without prompting.
 # ============================================================================
 
-# Pricing — 200K tier, cache-write = 1.25× input. Refresh `# updated:` below
-# when Anthropic publishes new rates and add a CHANGELOG entry.
+# Pricing — rates per million tokens. Refresh `# updated:` below when Anthropic
+# publishes new rates and add a CHANGELOG entry.
 # Kept inline rather than in a separate ccage-pricing.sh so the wrapper has
 # zero external sourcing dependency (the rc loader handles only one file).
-# Duplicated in share/ccage-handoff.sh — keep both in sync.
-# updated: 2026-05-16
-_ccage_resume_price_cache_write() {
+# Mirrors the table in share/ccage-handoff.sh — keep both in sync.
+#
+# Cache-write is DERIVED from the input rate rather than typed out separately;
+# hand-maintained derived rates are what let the previous table drift to 3× the
+# real price. The multiplier is 2× (1-hour TTL), not 1.25× (5-minute): ccage
+# sessions cache at the 1-hour TTL — measured on a real transcript, 836,023
+# cache-creation tokens in `ephemeral_1h_input_tokens` and zero in the 5-minute
+# bucket. Using 1.25× here under-stated the rewrite this prompt exists to warn
+# about.
+#
+# Globs so a suffixed id (e.g. `claude-opus-4-8[1m]`) matches its family.
+# updated: 2026-07-20
+_ccage_resume_price_input() {
     case "$1" in
-        claude-opus-4-7|claude-opus-4-6)     echo 18.75 ;;
-        claude-sonnet-4-6|claude-sonnet-4-5) echo 3.75 ;;
-        claude-haiku-4-5)                    echo 1.00 ;;
-        *)                                   echo 18.75 ;;  # conservative default
+        claude-fable-5*|claude-mythos-5*)     echo 10 ;;
+        claude-opus-4-8*|claude-opus-4-7*|claude-opus-4-6*) echo 5 ;;
+        claude-sonnet-5*|claude-sonnet-4-6*)  echo 3 ;;
+        claude-sonnet-4-5*)                   echo 3 ;;   # unverified; unchanged
+        claude-haiku-4-5*)                    echo 1 ;;
+        *)                                    echo 5 ;;   # current Opus tier
     esac
+}
+
+_ccage_resume_price_cache_write() {
+    awk -v i="$(_ccage_resume_price_input "$1")" 'BEGIN { printf "%g\n", i * 2.00 }'
 }
 
 # Pure decision function — tested directly. r/R/<enter> → resume,

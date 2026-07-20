@@ -52,11 +52,22 @@ setup() {
 
 # ===== pricing lookup =====
 
+# Rates corrected 2026-07-20. Two independent errors were compounding here: the
+# input rates were ~3x too high (opus $15 against an actual $5), and cache-write
+# used the 5-minute 1.25x multiplier when ccage sessions cache at the 1-hour 2x
+# TTL (measured: 836,023 tokens in `ephemeral_1h_input_tokens`, zero in the
+# 5-minute bucket). Net effect on this prompt was a ~1.9x over-estimate.
 @test "pricing: per-model cache-write rates; unknown defaults to opus" {
-    run _ccage_resume_price_cache_write claude-opus-4-7;   [ "$output" = "18.75" ]
-    run _ccage_resume_price_cache_write claude-sonnet-4-6; [ "$output" = "3.75" ]
-    run _ccage_resume_price_cache_write claude-haiku-4-5;  [ "$output" = "1.00" ]
-    run _ccage_resume_price_cache_write some-future-model; [ "$output" = "18.75" ]  # conservative
+    run _ccage_resume_price_cache_write claude-opus-4-8;   [ "$output" = "10" ]
+    run _ccage_resume_price_cache_write claude-opus-4-7;   [ "$output" = "10" ]
+    run _ccage_resume_price_cache_write claude-sonnet-5;   [ "$output" = "6" ]
+    run _ccage_resume_price_cache_write claude-sonnet-4-6; [ "$output" = "6" ]
+    run _ccage_resume_price_cache_write claude-haiku-4-5;  [ "$output" = "2" ]
+    run _ccage_resume_price_cache_write claude-fable-5;    [ "$output" = "20" ]
+    # Suffixed id matches its family instead of falling to the default.
+    run _ccage_resume_price_cache_write 'claude-opus-4-8[1m]'; [ "$output" = "10" ]
+    # Unknown model falls back to the CURRENT opus tier.
+    run _ccage_resume_price_cache_write some-future-model; [ "$output" = "10" ]
 }
 
 # ===== cost estimation against fixtures =====

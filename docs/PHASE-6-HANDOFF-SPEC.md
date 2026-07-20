@@ -35,6 +35,8 @@ ccage handoff --output FILE            # explicit path; default derived from $CC
 ccage handoff --project <abs-path>     # other project's session
 ccage handoff --max-prompts N          # cap user-prompt section (default 20)
 ccage handoff --stdout                 # write to stdout instead of file
+ccage handoff --config-dir DIR         # read sessions from cage DIR      (added 2026-07-20)
+ccage handoff --no-subagents           # skip delegated work              (added 2026-07-20)
 ```
 
 **Default output directory:** `${CCAGE_HANDOFF_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ccage/handoffs}`. Global flat layout — one directory across all projects. Filenames include project slug to disambiguate: `<project-slug>-<session-prefix>-<YYYYMMDD-HHMMSS>.md`.
@@ -44,7 +46,14 @@ No `--json` flag. YAGNI; add when a consumer exists.
 ### Lookup
 
 1. Project slug derived from `$PWD` (or `--project`) by `${path//\//-}`. Matches Claude Code's internal naming — verified empirically against `~/.claude/projects/`.
-2. Session directory: `$CLAUDE_CONFIG_DIR/projects/<slug>/`.
+2. Session directory: `<cage>/projects/<slug>/`. **Amended 2026-07-20** — this
+   spec assumed `$CLAUDE_CONFIG_DIR` would be set, but `ccage` runs from a plain
+   shell and the `claude()` wrapper exports it with `local -x` so it never leaks
+   out. The cage is resolved: `--config-dir` → `$CLAUDE_CONFIG_DIR` →
+   `_ccage_config_dir_for` (sourced from `claude-isolation.sh`, so `CCAGE_ROOT`/
+   `CCAGE_PREFIX`/`CCAGE_SLOT`/`_ccage_config_dir_override` all apply) → a scan
+   of every cage for an `.owning_path` naming the project, newest session
+   winning when several cages own one path.
 3. No `<session-id>` arg → most-recent by mtime (`ls -t "$DIR"/*.jsonl | head -1`).
 4. Prefix `<session-id>` → match by leading chars; multiple matches → exit 2 with candidate list.
 
@@ -203,6 +212,17 @@ claude-opus-4-7    input=15     cache_write=18.75
 claude-sonnet-4-6  input=3      cache_write=3.75
 claude-haiku-4-5   input=0.80   cache_write=1.00
 ```
+
+**Amended 2026-07-20 — the numbers above are wrong and the shape that produced
+them was the cause.** Opus is $5/$25, not $15/$75; Haiku 4.5 is $1/$5. Keeping a
+separate hand-maintained column per cache tier is what let them drift apart, so
+the implementation now keeps ONE input/output table per file and *derives* every
+cache rate from it: cache-write 1.25× input at the 5-minute TTL and **2× at the
+1-hour TTL** (this spec's flat 1.25× was the third error — long sessions cache at
+the 1-hour tier), cache-read 0.1× input. The per-TTL token split is read from
+`usage.cache_creation.{ephemeral_5m,ephemeral_1h}_input_tokens` rather than
+assumed. The live table lives in `share/ccage-handoff.sh`; the standalone
+`share/ccage-pricing.sh` this section describes was never split out.
 
 Computed cost displayed using model from last assistant record's `.message.model`. If unknown, show both Opus and Sonnet estimates.
 
