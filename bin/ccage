@@ -75,8 +75,19 @@ _ccage_source_isolation() {
             # subshell-free form is required (a subshell would discard the
             # definitions we are here to get), so `|| true` keeps a `set -e`
             # inside the user's file from killing the command.
+            #
+            # `|| true` guards the sourcing COMMAND only. `set -e`/`set -u` run
+            # inside the file PERSIST in this shell afterwards and abort ccage at
+            # the next non-zero command — cage resolution is a ladder whose
+            # earlier rungs are expected to fail. Found on the macOS CI leg,
+            # where resolution takes one rung more than on Linux and the whole
+            # command exited non-zero with no output. Snapshot and restore.
+            _ccage_rc_opts="$-"
             # shellcheck disable=SC1091  # user-supplied, may not exist
             { . "$rcd/claude-overrides.sh"; } >/dev/null 2>&1 || true
+            case "$_ccage_rc_opts" in *e*) ;; *) set +e ;; esac
+            case "$_ccage_rc_opts" in *u*) ;; *) set +u ;; esac
+            unset _ccage_rc_opts
             break
         fi
     done

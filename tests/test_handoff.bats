@@ -432,7 +432,7 @@ print(json.dumps({'type':'user','timestamp':'2026-07-20T09:00:00.000Z',
     [[ "$row" == *'\|'* ]]
     # ...so the row still has exactly the 7 cells its header declares. Counting
     # unescaped delimiters is the check that actually fails when `cell` is gone.
-    [ "$(printf '%s' "$row" | grep -o '[^\]|' | wc -l)" = 7 ]
+    [ "$(printf '%s' "$row" | grep -o '[^\]|' | grep -c .)" = 7 ]
 }
 
 # The heading counted what the COUNT cap admitted, but the byte budget trims
@@ -474,16 +474,24 @@ print(json.dumps({'type':'user','timestamp':'2026-07-20T09:00:00.000Z',
     [[ "$row" == *'\|'* ]]
     # 5 cells declared by the header, so 5 unescaped delimiters after the path's
     # own pipes are escaped. Counting is what fails if `cell` is not applied.
-    [ "$(printf '%s' "$row" | grep -o '[^\]|' | wc -l)" = 5 ]
+    [ "$(printf '%s' "$row" | grep -o '[^\]|' | grep -c .)" = 5 ]
 }
 
 @test "handoff: a value-taking flag given last exits 2 instead of spinning" {
     # These four used to `shift 2` with one argument left: the shift fails,
     # nothing is consumed, and the loop spins at 100% CPU. The guard was shipped
     # without a test; without one, a regression re-hangs the terminal.
+    # `timeout` is GNU coreutils and is ABSENT on stock macOS, where an
+    # unguarded `timeout 10 …` fails with 127 rather than running the command —
+    # so the bound is applied only where it exists. Same pattern as the product
+    # code's clipboard guard. Without it the assertion tested nothing on macOS.
+    local bound=()
+    if command -v timeout >/dev/null 2>&1; then
+        bound=(timeout 10)
+    fi
     local flag
     for flag in --project --config-dir --output --max-prompts; do
-        run timeout 10 bash -c \
+        run ${bound[@]+"${bound[@]}"} bash -c \
             "source '$REPO_ROOT/share/ccage-handoff.sh'; _ccage_handoff_main handoff $flag"
         [ "$status" -eq 2 ]
         [[ "$output" == *"$flag needs a value"* ]]
