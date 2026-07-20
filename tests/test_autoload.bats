@@ -337,10 +337,13 @@ memdir() {
 # .ccage-session-done / .ccage-autock.conf are scoped to the PROJECT
 # DIRECTORY, not to one session — any new session starting there fires its
 # own `startup` hook, which must not wipe a file a DIFFERENT, still-running
-# session's ccage-auto watcher depends on. The watcher records itself in
-# .ccage-autock.pid (pid + a `ps -o etime=`-derived start-time token); the
-# hook reads that ONE specific pid instead of scanning every process on the
-# machine, so there is nothing left to substring-match against.
+# session's ccage-auto watcher depends on. Each watcher records itself in its
+# OWN .ccage-autock.pid.<pid> (pid + a `ps -o etime=`-derived start-time
+# token); the hook reads those specific pids instead of scanning every process
+# on the machine, so there is nothing left to substring-match against — and
+# because no watcher ever writes or removes a sibling's file, a second watcher
+# in the same directory can neither overwrite nor delete the first's ownership
+# (the regressions below).
 
 # Parses ps's `[[DD-]hh:]mm:ss` elapsed-time format (stdin) into seconds on
 # stdout. Mirrors the awk block embedded in resume_autoload.sh exactly, so
@@ -366,7 +369,7 @@ pidfile_for() {  # pidfile_for PID -- write a liveness record for a real, live p
     local pid="$1" elapsed start
     elapsed="$(ps -o etime= -p "$pid" 2>/dev/null | parse_etime)"
     start=$(( $(date +%s) - ${elapsed:-0} ))
-    printf 'pid=%d\nstart=%d\n' "$pid" "$start" > "$REPO/.ccage-autock.pid"
+    printf 'pid=%d\nstart=%d\n' "$pid" "$start" > "$REPO/.ccage-autock.pid.$pid"
 }
 
 @test "watcher pidfile absent: falls back to the original unconditional clear" {
@@ -398,7 +401,7 @@ pidfile_for() {  # pidfile_for PID -- write a liveness record for a real, live p
 
 @test "watcher pidfile names a dead pid: falls back to clearing" {
     : > "$REPO/.ccage-session-done"
-    printf 'pid=999999\nstart=1\n' > "$REPO/.ccage-autock.pid"   # not a real pid
+    printf 'pid=999999\nstart=1\n' > "$REPO/.ccage-autock.pid.999999"   # not a real pid
     run run_hook_src startup
     [ "$status" -eq 0 ]
     [ ! -e "$REPO/.ccage-session-done" ]
@@ -409,10 +412,69 @@ pidfile_for() {  # pidfile_for PID -- write a liveness record for a real, live p
     # Same live pid as the 'unrelated watcher' test, but a start time that
     # can't be this shell's real one -- simulates ccage-auto exiting without
     # cleanup and an unrelated process later inheriting the same pid.
-    printf 'pid=%d\nstart=1\n' "$$" > "$REPO/.ccage-autock.pid"
+    printf 'pid=%d\nstart=1\n' "$$" > "$REPO/.ccage-autock.pid.$$"
     run run_hook_src startup
     [ "$status" -eq 0 ]
     [ ! -e "$REPO/.ccage-session-done" ]
+}
+
+# --- two watchers in one directory (W1) --------------------------------------
+#
+# The shared single pidfile reopened the very bug this guard exists to close.
+# Both sequences below ended with a LIVE watcher's conf/done state deleted;
+# per-watcher files make each one structurally impossible.
+
+@test "W1-A: a sibling watcher's clean exit does not delete a live watcher's ownership" {
+    : > "$REPO/.ccage-session-done"
+    : > "$REPO/.ccage-autock.conf"
+    # A (live, this shell) is watching; B starts in the same directory and then
+    # exits normally. B's teardown removes its OWN record only -- with one
+    # shared file it overwrote A's and then deleted it, leaving A invisible.
+    ( cd "$REPO" && exec -a "sibling-watcher-B" sleep 5 ) &
+    local b_pid=$!
+    pidfile_for "$$"
+    pidfile_for "$b_pid"
+    [ -f "$REPO/.ccage-autock.pid.$$" ]          # B's start did not clobber A's
+    kill "$b_pid" 2>/dev/null
+    rm -f "$REPO/.ccage-autock.pid.$b_pid"       # B's teardown: its own file
+    run run_hook_src startup
+    [ "$status" -eq 0 ]
+    [ -e "$REPO/.ccage-session-done" ]
+    [ -e "$REPO/.ccage-autock.conf" ]
+    [ -e "$REPO/.ccage-autock.pid.$$" ]          # ...and A still owns the dir
+}
+
+@test "W1-A2: a SIGKILLed sibling's stale record does not hide the live watcher" {
+    : > "$REPO/.ccage-session-done"
+    : > "$REPO/.ccage-autock.conf"
+    # B is killed without cleanup, so its record survives naming a dead pid.
+    # With one shared file that record was all the hook could see -> kill -0
+    # failed -> live A's state was cleared. Now a dead record is skipped and
+    # the scan continues to A's.
+    ( cd "$REPO" && exec -a "sibling-watcher-B" sleep 5 ) &
+    local b_pid=$!
+    pidfile_for "$b_pid"
+    pidfile_for "$$"
+    kill -9 "$b_pid" 2>/dev/null
+    wait "$b_pid" 2>/dev/null || true
+    # Glob order is lexical, so also plant a dead record guaranteed to be
+    # visited BEFORE A's: a dead entry must not end the scan early.
+    printf 'pid=999999\nstart=1\n' > "$REPO/.ccage-autock.pid.0999999"
+    run run_hook_src startup
+    [ "$status" -eq 0 ]
+    [ -e "$REPO/.ccage-session-done" ]
+    [ -e "$REPO/.ccage-autock.conf" ]
+}
+
+@test "a legacy unsuffixed pidfile (watcher started before the upgrade) still blocks the clear" {
+    : > "$REPO/.ccage-session-done"
+    local elapsed start
+    elapsed="$(ps -o etime= -p "$$" 2>/dev/null | parse_etime)"
+    start=$(( $(date +%s) - ${elapsed:-0} ))
+    printf 'pid=%d\nstart=%d\n' "$$" "$start" > "$REPO/.ccage-autock.pid"
+    run run_hook_src startup
+    [ "$status" -eq 0 ]
+    [ -e "$REPO/.ccage-session-done" ]
 }
 
 @test "a process merely MENTIONING ccage-auto in its argv, cwd == project dir, does not block the clear" {
@@ -489,7 +551,7 @@ STUB
 
     # Matches the stub's canned "1-02:00:15" (1d 2h 0m 15s = 93615s).
     local wstart=$(( $(date +%s) - 93615 ))
-    printf 'pid=%d\nstart=%d\n' "$$" "$wstart" > "$REPO/.ccage-autock.pid"
+    printf 'pid=%d\nstart=%d\n' "$$" "$wstart" > "$REPO/.ccage-autock.pid.$$"
 
     PATH="$stub_bin:$PATH" run run_hook_src startup
     [ "$status" -eq 0 ]

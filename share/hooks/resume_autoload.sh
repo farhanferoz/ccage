@@ -100,63 +100,73 @@ resume="$base/RESUME${slot}.md"
 # ccage-auto believe finished work is still finished when it isn't.
 #
 # Now: ccage-auto writes its own pid (+ a start-time token) to
-# .ccage-autock.pid when it starts watching this directory, and exports
+# .ccage-autock.pid.<pid> when it starts watching this directory, and exports
 # CCAGE_AUTOCK_WATCHER_PID into the launched session's environment so this
 # hook can tell "the pidfile names MY OWN launcher" apart from "some other,
 # still-running session's watcher" with a plain string compare — no process
 # enumeration, no substring matching, no /proc, no lsof/pgrep. A deliberate
 # restart under a fresh ccage-auto still clears stale state (its own pidfile
-# write makes CCAGE_AUTOCK_WATCHER_PID match), exactly as before. A missing or
-# unreadable pidfile falls back to the original unconditional clear.
+# write makes CCAGE_AUTOCK_WATCHER_PID match), exactly as before. No pidfile at
+# all falls back to the original unconditional clear.
+#
+# ONE FILE PER WATCHER, and ANY live one blocks: two ccage-auto watchers in a
+# single directory is an observed condition, and with a single shared record
+# the second watcher's normal teardown deleted the first's ownership — after
+# which this hook cleared conf/done state a live watcher was still using (the
+# original "--set silently reverted" symptom). Each watcher now only ever
+# writes and removes its own file, so a sibling exiting (or being SIGKILLed,
+# leaving a dead record behind) cannot unrepresent a live one. The legacy
+# unsuffixed name is still read, so a watcher started before an upgrade keeps
+# its protection.
 if [ "$src" = "startup" ] || [ "$src" = "resume" ]; then
     if [ -f "$base/.ccage-session-done" ] || [ -f "$base/.ccage-autock.conf" ]; then
         watcher_elsewhere=0
-        pidfile="$base/.ccage-autock.pid"
-        if [ -f "$pidfile" ]; then
+        for pidfile in "$base"/.ccage-autock.pid "$base"/.ccage-autock.pid.*; do
+            # Unmatched glob stays literal in POSIX sh — the -f test drops it.
+            [ -f "$pidfile" ] || continue
             wpid="$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' "$pidfile" | head -1)"
             wstart="$(sed -n 's/^start=\([0-9][0-9]*\)$/\1/p' "$pidfile" | head -1)"
-            if [ -n "$wpid" ] && [ "$wpid" != "${CCAGE_AUTOCK_WATCHER_PID:-}" ] \
-               && kill -0 "$wpid" 2>/dev/null; then
-                # Live, and not this session's own launcher. Guard against pid
-                # reuse (ccage-auto exited without cleaning up, e.g. SIGKILL,
-                # and an unrelated process later got the same pid): compare
-                # the recorded start time against the CURRENT process at that
-                # pid, via `ps -o etime=` (elapsed running time, not the
-                # locale-dependent `lstart=` string) — cheap (~3ms measured)
-                # and only ever runs in this already-rare branch. NOT
-                # `etimes` (plural, seconds directly): that is a Linux/procps
-                # extension, confirmed absent from the BSD/Darwin ps keyword
-                # table — using it would silently no-op this whole guard on
-                # macOS (empty output -> skipped -> watcher_elsewhere stays
-                # 0 -> the guard this fix exists for never fires there). Parse
-                # etime's `[[DD-]hh:]mm:ss` with awk instead (portable to
-                # both gawk and BSD/nawk). No start token recorded (ps
-                # unavailable at write time)? trust the pid alone rather than
-                # block the delete on a check we can't perform.
-                if [ -n "$wstart" ]; then
-                    now_etime_secs="$(ps -o etime= -p "$wpid" 2>/dev/null | awk '
-                        {
-                            s = $0
-                            gsub(/^[ \t]+|[ \t]+$/, "", s)
-                            days = 0
-                            if (split(s, dparts, "-") == 2) { days = dparts[1] + 0; s = dparts[2] }
-                            n = split(s, t, ":")
-                            if (n == 2)      { h = 0; m = t[1]; sec = t[2] }
-                            else if (n == 3) { h = t[1]; m = t[2]; sec = t[3] }
-                            else             { exit 1 }
-                            printf "%d\n", days*86400 + h*3600 + m*60 + sec
-                        }')"
-                    if [ -n "$now_etime_secs" ]; then
-                        now_start=$(( $(date +%s) - now_etime_secs ))
-                        diff=$(( now_start - wstart ))
-                        [ "$diff" -lt 0 ] && diff=$(( -diff ))
-                        [ "$diff" -le 2 ] && watcher_elsewhere=1
-                    fi
-                else
-                    watcher_elsewhere=1
-                fi
+            [ -n "$wpid" ] || continue
+            [ "$wpid" != "${CCAGE_AUTOCK_WATCHER_PID:-}" ] || continue
+            kill -0 "$wpid" 2>/dev/null || continue
+            # Live, and not this session's own launcher. Guard against pid
+            # reuse (ccage-auto exited without cleaning up, e.g. SIGKILL,
+            # and an unrelated process later got the same pid): compare
+            # the recorded start time against the CURRENT process at that
+            # pid, via `ps -o etime=` (elapsed running time, not the
+            # locale-dependent `lstart=` string) — cheap (~3ms measured)
+            # and only ever runs in this already-rare branch. NOT
+            # `etimes` (plural, seconds directly): that is a Linux/procps
+            # extension, confirmed absent from the BSD/Darwin ps keyword
+            # table — using it would silently no-op this whole guard on
+            # macOS (empty output -> skipped -> watcher_elsewhere stays
+            # 0 -> the guard this fix exists for never fires there). Parse
+            # etime's `[[DD-]hh:]mm:ss` with awk instead (portable to
+            # both gawk and BSD/nawk). No start token recorded (ps
+            # unavailable at write time)? trust the pid alone rather than
+            # block the delete on a check we can't perform.
+            if [ -n "$wstart" ]; then
+                now_etime_secs="$(ps -o etime= -p "$wpid" 2>/dev/null | awk '
+                    {
+                        s = $0
+                        gsub(/^[ \t]+|[ \t]+$/, "", s)
+                        days = 0
+                        if (split(s, dparts, "-") == 2) { days = dparts[1] + 0; s = dparts[2] }
+                        n = split(s, t, ":")
+                        if (n == 2)      { h = 0; m = t[1]; sec = t[2] }
+                        else if (n == 3) { h = t[1]; m = t[2]; sec = t[3] }
+                        else             { exit 1 }
+                        printf "%d\n", days*86400 + h*3600 + m*60 + sec
+                    }')"
+                [ -n "$now_etime_secs" ] || continue
+                now_start=$(( $(date +%s) - now_etime_secs ))
+                diff=$(( now_start - wstart ))
+                [ "$diff" -lt 0 ] && diff=$(( -diff ))
+                [ "$diff" -le 2 ] || continue
             fi
-        fi
+            watcher_elsewhere=1
+            break
+        done
         if [ "$watcher_elsewhere" -eq 0 ]; then
             rm -f "$base/.ccage-session-done" "$base/.ccage-autock.conf" 2>/dev/null
         fi

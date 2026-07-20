@@ -433,6 +433,46 @@ PY
     [[ "$output" == *UNIT_OK* ]]
 }
 
+@test "watcher pidfiles are per-pid: teardown removes only its own, dead ones are swept" {
+    # W1: one shared .ccage-autock.pid was last-writer-wins and was removed
+    # unconditionally, so a second watcher starting (and then exiting) in the
+    # same directory erased a LIVE watcher's ownership — after which the next
+    # session's SessionStart hook deleted the conf/done state that watcher was
+    # still using. Each watcher now writes and removes ONLY its own record.
+    git init -q "$REPO" >/dev/null 2>&1 || skip "git unavailable"
+    run python3 - "$AUTO" "$REPO" <<'PY'
+import importlib.util, importlib.machinery, os, subprocess, sys
+loader = importlib.machinery.SourceFileLoader("ccageauto", sys.argv[1])
+spec = importlib.util.spec_from_loader("ccageauto", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+d = sys.argv[2]
+rec = lambda pid: os.path.join(d, ".ccage-autock.pid.%d" % pid)
+me = os.getpid()
+sib = subprocess.Popen(["sleep", "30"])          # a real, live sibling watcher
+
+m.write_watcher_pidfile(d, me)
+m.write_watcher_pidfile(d, sib.pid)              # must not clobber mine
+assert os.path.isfile(rec(me)), "sibling's write clobbered this watcher's record"
+assert os.path.isfile(rec(sib.pid))
+assert open(rec(me)).read().startswith("pid=%d\n" % me)
+
+m.remove_watcher_pidfile(d, me)                  # my teardown
+assert not os.path.exists(rec(me))
+assert os.path.isfile(rec(sib.pid)), "teardown removed a LIVE sibling's record"
+
+sib.kill(); sib.wait()                           # SIGKILL: no teardown of its own
+m.write_watcher_pidfile(d, me)
+assert os.path.isfile(rec(me))
+assert not os.path.exists(rec(sib.pid)), "dead sibling's record was not swept"
+left = sorted(n for n in os.listdir(d) if n.startswith(".ccage-autock.pid"))
+assert left == [os.path.basename(rec(me))], "unexpected pidfile litter: %r" % left
+print("UNIT_OK")
+PY
+    [ "$status" -eq 0 ]
+    [[ "$output" == *UNIT_OK* ]]
+    grep -q '^\.ccage-autock\.pid\*$' "$REPO/.git/info/exclude"
+}
+
 @test "a --final completion marker stands the watcher down before any /clear" {
     # The model marks the session done mid-run (writes .ccage-session-done). The
     # watcher must stop its state machine on the next poll — nudge already fired,
