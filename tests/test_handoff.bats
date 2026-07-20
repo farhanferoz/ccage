@@ -285,6 +285,29 @@ STUB
     [[ "$output" != *"idle_notification"* ]]
 }
 
+# A heredoc or multi-line python block arrived with its newlines intact, so the
+# listing turned each of its LINES into a separate bullet — wrong, and the
+# single largest section of a real brief (8.3 KB of 17 KB, against a 15 KB
+# target for the whole file).
+@test "commands: multi-line commands flatten to one capped bullet" {
+    local f="$BATS_TEST_TMPDIR/cmds.jsonl"
+    cat > "$f" <<JSONL
+{"type":"assistant","timestamp":"2026-07-20T09:00:00.000Z","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"python3 - <<'PY'\nimport sys\nprint(1)\nPY"}},{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"$(printf 'echo %.0sX' $(seq 1 200))"}}],"usage":{"input_tokens":1,"output_tokens":1}}}
+JSONL
+
+    run _ccage_handoff_generate "$f" --stdout
+    [ "$status" -eq 0 ]
+    # One bullet for the heredoc, newlines joined rather than split into three.
+    [ "$(printf '%s\n' "$output" | grep -c '^- `')" = 2 ]
+    [[ "$output" == *'python3 - <<'"'"'PY'"'"' ; import sys ; print(1) ; PY'* ]]
+    # The over-long one is truncated with an ellipsis marker.
+    [[ "$output" == *" …\`"* ]]
+    # No bullet exceeds the cap plus the markdown wrapper and ellipsis.
+    local longest
+    longest=$(printf '%s\n' "$output" | grep '^- `' | awk '{ print length($0) }' | sort -rn | head -1)
+    [ "$longest" -le 150 ]
+}
+
 # ===== delegated (subagent) work =====
 #
 # The brief used to read only the main transcript, so a fan-out session

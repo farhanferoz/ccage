@@ -440,6 +440,8 @@ Closes the loop between the structural `ccage handoff` brief and a repo's durabl
 
 `share/skills/checkpoint/SKILL.md` (+ deterministic `checkpoint-init.sh`). Writes the session state **into `RESUME.md`** (slot-aware: `RESUME.<slot>.md` when `CCAGE_SLOT` is set), merging it with any threads carried in, and rolls older detail down into `CHANGELOG.md` so `RESUME.md` stays lean. `/checkpoint --tidy` additionally runs memory hygiene (regroup `MEMORY.md`, prune dead index links / orphan notes). `checkpoint-init.sh` is idempotent and adds `RESUME.md` / `CHANGELOG.md` to `.git/info/exclude` so continuity files never get committed.
 
+`/checkpoint --from-session [<id-prefix>]` covers the case the rest of the loop cannot: a session that ended **without** a checkpoint. Transcripts are retained in full on disk, so it runs `ccage handoff --stdout` against the previous session (the newest transcript is the live one, so it takes the next-newest unless given an id), reads the ~10 KB brief, and merges it into `RESUME.md` in place. Actions and outcomes reconstruct well; *rationale* does not, and the skill is required to say so rather than infer a plausible "why". Manual and opt-in by design — nothing runs at session start or end.
+
 ### Auto-read hook (SessionStart)
 
 `share/hooks/resume_autoload.sh`, registered on `SessionStart` for `startup|resume|clear|compact`. A SessionStart hook's stdout is injected into the model's context, so after `/clear` the prior `RESUME.md` is reloaded automatically — that is the whole point of the `clear` source. The hook is slot-aware (mirrors the wrapper's `CCAGE_SLOT` validation), always exits 0, and emits at most two one-line health NOTEs: *RESUME over budget → run `/checkpoint`* and *memory dir messy → run `/checkpoint --tidy`*.

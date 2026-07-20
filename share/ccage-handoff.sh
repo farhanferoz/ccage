@@ -471,6 +471,8 @@ _ccage_handoff_collect() {
 # --from-session), so the agent list is capped rather than allowed to grow with
 # the fan-out. Target for the whole brief is under 15 KB.
 _CCAGE_HANDOFF_MAX_AGENTS=12
+# Width cap for a single command line in the "Commands run" listing.
+_CCAGE_HANDOFF_MAX_CMD_CHARS=140
 
 _ccage_handoff_subagents_dir() {
     printf '%s\n' "${1%.jsonl}/subagents"
@@ -830,9 +832,19 @@ _ccage_handoff_compose_brief() {
     fi
 
     # Commands section — dedup + trivial-filter (same as the standalone helper).
+    #
+    # Flattened to ONE line per command and capped in width. A heredoc or a
+    # multi-line python block used to arrive with its newlines intact, so the
+    # awk pipeline below turned each of its LINES into a separate bullet — the
+    # listing was both wrong and the single largest section of the brief (8.3 KB
+    # of a 17 KB brief, against a 15 KB target for the whole thing).
     printf '\n## Commands run\n\n'
     local commands
-    commands=$(jq -r '.bash_commands[]?' <<<"$handoff_data" | awk '
+    commands=$(jq -r --argjson w "$_CCAGE_HANDOFF_MAX_CMD_CHARS" '
+        .bash_commands[]?
+        | (split("\n") | map(select(length > 0)) | join(" ; "))
+        | if length > $w then .[0:$w] + " …" else . end
+    ' <<<"$handoff_data" | awk '
         {
             trimmed = $0
             gsub(/^[ \t]+|[ \t]+$/, "", trimmed)

@@ -10,7 +10,9 @@ description: >-
   has none. Flags: --final marks the session genuinely done (writes the
   .ccage-session-done marker so /keepwarm and ccage-auto stand down); --tidy also
   tidies this cage's memory dir; --merge-slots collapses parallel
-  RESUME.<slot>.md files into the plain trunk.
+  RESUME.<slot>.md files into the plain trunk; --from-session recovers a PREVIOUS
+  session that ended without a checkpoint, by compressing its on-disk transcript
+  with `ccage handoff` and merging the brief in.
 effort: medium
 ---
 
@@ -95,6 +97,11 @@ same-directory case.
   `--close`. Run it when the user wraps up, asks to tidy, or the SessionStart
   health check printed `NOTE: memory needs tidying`. Cheap when memory is already
   clean (§4 bails early).
+- **`--from-session [<id-prefix>]`** — recovery: a *previous* session ended
+  without a checkpoint, and you want its state back. Compress that session's
+  on-disk transcript with `ccage handoff` and merge the brief into `$resume`
+  (§3.1). Manual and opt-in — nothing about this runs automatically. Combine with
+  nothing else; it is a merge like any other checkpoint.
 - **`--merge-slots`** — fan-in: collapse every parallel `RESUME.<slot>.md` back
   into the plain `RESUME.md` trunk (§5), so a future slotless session reads the
   union. Run when the parallel slotted sessions are done. This mode does **not**
@@ -270,6 +277,80 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
 Use the same six-part structure as a `session-handoff` brief for the per-session
 narrative if helpful — but `/checkpoint` differs in that it writes a persistent,
 merged, budget-trimmed file rather than a one-shot chat message.
+
+---
+
+## 3.1 `--from-session` — recover a session that ended without `/checkpoint`
+
+A session that crashed, hit a limit, or was closed without checkpointing left no
+`RESUME` update — but its **transcript is still on disk**, in full. `ccage
+handoff` compresses one offline with zero API calls (measured: 8.2 MB of
+transcript → 9.4 KB of brief, 0.16 s), and this mode turns that brief into a
+merged `RESUME`.
+
+The split of responsibility is the point: **`ccage handoff` reads and
+compresses; this skill applies judgment.** That is what keeps recovery cheap —
+you only ever read ~10 KB, never the raw transcript.
+
+**Manual and opt-in.** There is deliberately no automation at session start or
+end. Do not add any, and do not suggest it.
+
+### Flow
+
+1. **Find the session to recover — not the live one.** The newest transcript for
+   this project is the session you are sitting in; take the **next**-newest.
+
+   ```bash
+   # Same slug rule as §4: every non-alphanumeric becomes "-", via tr (a bracket
+   # character class silently no-ops under macOS bash 3.2).
+   slug=$(printf '%s' "$PWD" | LC_ALL=C tr -c 'A-Za-z0-9' '-')
+   ls -t "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$slug"/*.jsonl | head -5
+   ```
+
+   Take the second entry. If the user named a session
+   (`/checkpoint --from-session <id-prefix>`), use theirs instead and skip the
+   guesswork.
+
+2. **Generate the brief** (read-only; writes nothing):
+
+   ```bash
+   ccage handoff <session-id-prefix> --stdout
+   ```
+
+   Add `--no-subagents` only if the delegated-work section is not relevant —
+   normally you want it, because on a fan-out session that is where most of the
+   work and nearly all of the spend actually happened.
+
+3. **Sanity-check before merging.** The brief's session id must differ from the
+   one you are in, and its **Last activity** should predate this session. If the
+   id matches, you picked the live transcript — step back one.
+
+4. **Merge into `$resume` exactly as §3 does** — in place, into the same `###
+   Now / ### Next / ### Threads / ### Decisions / ### Open questions / ### Plan`
+   sections, keeping every carried line verbatim. **Never overwrite `$resume`**:
+   the recovered session is additional history, not a replacement for state that
+   accumulated since. Prepend a `## Session <YYYY-MM-DD>` block for the recovered
+   day if none exists; edit it in place if one does.
+
+5. **Report honestly what was and was not recovered.** Set the expectation
+   explicitly in your reply, because the gap is structural rather than a quality
+   issue:
+
+   - **Reconstructs well:** what was done — files touched and by whom, commands
+     run, prompts given, which agents ran and how they ended, tokens and cost.
+   - **Does not reconstruct:** *why*. A transcript records actions, not
+     reasoning. Decisions, rejected alternatives, and the constraints behind them
+     are gone unless a prompt happens to state them. Anything you write into
+     `### Decisions` from a recovered brief must be marked as inferred.
+   - Say which session id you recovered and roughly what window it covers.
+
+Do **not** invent rationale to fill `### Decisions` — an inferred "why" that
+reads as settled is worse than an acknowledged gap, because the next session
+will build on it.
+
+`ccage handoff` on its own remains a plain read-only report: it prints (or
+writes) the brief and touches no continuity file. Use it when you want to look
+at a dead session without merging anything.
 
 ---
 
