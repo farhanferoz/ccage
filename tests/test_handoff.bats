@@ -250,3 +250,74 @@ STUB
     [ "$status" -eq 2 ]
     [[ "$stderr" == *"unknown"* ]] || [[ "$stderr" == *"usage"* ]]
 }
+
+# Pricing regression guard. The 2026-05-16 table drifted badly: opus read
+# $15/$75 against an actual $5/$25, every model released after that date fell
+# through to the opus default (costing a Sonnet 5 session at 5x), and all
+# cache-write was charged at the 5-minute 1.25x rate even though these sessions
+# cache at the 1-hour 2x TTL. Each assertion below pins one of those.
+@test "pricing: current rates, family globbing, derived cache rates, TTL split" {
+    # Corrected input/output table.
+    [ "$(_ccage_handoff_price_input claude-opus-4-8)" = 5 ]
+    [ "$(_ccage_handoff_price_output claude-opus-4-8)" = 25 ]
+    [ "$(_ccage_handoff_price_input claude-sonnet-5)" = 3 ]
+    [ "$(_ccage_handoff_price_output claude-sonnet-5)" = 15 ]
+    [ "$(_ccage_handoff_price_input claude-haiku-4-5)" = 1 ]
+    [ "$(_ccage_handoff_price_output claude-haiku-4-5)" = 5 ]
+    [ "$(_ccage_handoff_price_input claude-fable-5)" = 10 ]
+    [ "$(_ccage_handoff_price_output claude-fable-5)" = 50 ]
+
+    # A suffixed id (how a 1M-context session reports itself) must match its
+    # family rather than falling through to the default.
+    [ "$(_ccage_handoff_price_input 'claude-opus-4-8[1m]')" = 5 ]
+
+    # Unknown/future model falls back to the CURRENT opus tier.
+    [ "$(_ccage_handoff_price_input some-unreleased-model)" = 5 ]
+    [ "$(_ccage_handoff_price_output some-unreleased-model)" = 25 ]
+
+    # Cache rates are derived from input, never hand-maintained.
+    [ "$(_ccage_handoff_price_cache_write claude-opus-4-8)" = 6.25 ]
+    [ "$(_ccage_handoff_price_cache_write_1h claude-opus-4-8)" = 10 ]
+    [ "$(_ccage_handoff_price_cache_read claude-opus-4-8)" = 0.5 ]
+
+    # 1M tokens in each single bucket, priced independently.
+    run _ccage_handoff_cost 0 0 1000000 0 0 claude-opus-4-8
+    [ "$output" = '$6.25' ]
+    run _ccage_handoff_cost 0 0 0 1000000 0 claude-opus-4-8
+    [ "$output" = '$10.00' ]   # 1-hour TTL is 1.6x the 5-minute rate
+
+    # All five components together: 5 + 25 + 6.25 + 10 + 0.5.
+    run _ccage_handoff_cost 1000000 1000000 1000000 1000000 1000000 claude-opus-4-8
+    [ "$output" = '$46.75' ]
+
+    # Sonnet 5 must not be costed at opus rates (the headline regression).
+    run _ccage_handoff_cost 1000000 0 0 0 0 claude-sonnet-5
+    [ "$output" = '$3.00' ]
+}
+
+# An older transcript carries only `cache_creation_input_tokens` with no per-TTL
+# breakdown. Those tokens must still be billed — attributed to the cheaper
+# 5-minute bucket rather than silently dropped or invented as a premium.
+@test "collect: cache-write TTL split, with fallback for pre-split transcripts" {
+    local split="$BATS_TEST_TMPDIR/split.jsonl"
+    printf '%s\n' '{"type":"assistant","sessionId":"s1","timestamp":"2026-07-20T10:00:00Z","message":{"model":"claude-opus-4-8","usage":{"cache_creation_input_tokens":300,"cache_creation":{"ephemeral_5m_input_tokens":100,"ephemeral_1h_input_tokens":200}}}}' > "$split"
+    run _ccage_handoff_collect "$split"
+    [[ "$output" == *'"cw5":100'* ]]
+    [[ "$output" == *'"cw1":200'* ]]
+
+    # Pre-split transcript: exactly 1M cache-creation tokens, no breakdown.
+    # Sized so the resulting dollar figure is unambiguous rather than rounding
+    # to $0.00 and proving nothing.
+    local unsplit="$BATS_TEST_TMPDIR/unsplit.jsonl"
+    printf '%s\n' '{"type":"assistant","sessionId":"s2","timestamp":"2026-07-20T10:00:00Z","message":{"model":"claude-opus-4-8","usage":{"cache_creation_input_tokens":1000000}}}' > "$unsplit"
+    run _ccage_handoff_collect "$unsplit"
+    [[ "$output" == *'"cw":1000000'* ]]
+    [[ "$output" == *'"cw5":0'* ]]
+    [[ "$output" == *'"cw1":0'* ]]
+
+    # The fallback lives in the generate path: those 1M tokens must be billed at
+    # the 5-minute rate ($6.25), NOT dropped ($0.00) and NOT charged the 1-hour
+    # premium ($10.00). All three outcomes are distinguishable here.
+    run _ccage_handoff_generate "$unsplit" --stdout
+    [[ "$output" == *'~$6.25'* ]]
+}

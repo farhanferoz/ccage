@@ -6,41 +6,70 @@
 #
 # Public entry: _ccage_handoff_main "$@"
 
-# ---- pricing table (200K tier; rates per million tokens) --------------------
-# Cache-write = 1.25× input. Cache-read = 0.1× input. Refresh `# updated:` and
-# add to CHANGELOG when Anthropic publishes new rates.
-# updated: 2026-05-16
+# ---- pricing (rates per million tokens) -------------------------------------
+# ONE hand-maintained table: input and output. Every cache rate is DERIVED from
+# input, never typed out separately:
+#
+#   cache-write (5-minute TTL) = 1.25 × input
+#   cache-write (1-hour TTL)   = 2.00 × input
+#   cache-read                 = 0.10 × input
+#
+# Four parallel hand-maintained tables is how the previous version drifted: by
+# 2026-07-20 its opus row said $15/$75 against an actual $5/$25 (3× over), and
+# every model released after 2026-05-16 fell through to the opus default — so a
+# Sonnet 5 session was costed at 5× reality. Deriving removes that failure mode:
+# correct the input rate and the cache rates follow.
+#
+# Patterns are globs so a suffixed id (e.g. `claude-opus-4-8[1m]`, which is how
+# a 1M-context session reports itself) matches its family instead of falling to
+# the default.
+#
+# Refresh `# updated:` and add a CHANGELOG entry when Anthropic publishes new
+# rates. Verified against the bundled claude-api model table.
+# updated: 2026-07-20
 _ccage_handoff_price_input() {
     case "$1" in
-        claude-opus-4-7|claude-opus-4-6)   echo 15 ;;
-        claude-sonnet-4-6|claude-sonnet-4-5) echo 3 ;;
-        claude-haiku-4-5)                  echo 0.80 ;;
-        *)                                 echo 15 ;;
+        claude-fable-5*|claude-mythos-5*)     echo 10 ;;
+        claude-opus-4-8*|claude-opus-4-7*|claude-opus-4-6*) echo 5 ;;
+        # Sonnet 5 has an introductory $2/$10 rate through 2026-08-31. The list
+        # rate is deliberately used: the intro rate expires, and an expired
+        # discount silently UNDER-reports cost, which is the worse error here.
+        claude-sonnet-5*|claude-sonnet-4-6*)  echo 3 ;;
+        claude-sonnet-4-5*)                   echo 3 ;;   # unverified; unchanged from the previous table
+        claude-haiku-4-5*)                    echo 1 ;;
+        *)                                    echo 5 ;;   # current Opus tier
     esac
 }
 _ccage_handoff_price_output() {
     case "$1" in
-        claude-opus-4-7|claude-opus-4-6)   echo 75 ;;
-        claude-sonnet-4-6|claude-sonnet-4-5) echo 15 ;;
-        claude-haiku-4-5)                  echo 4 ;;
-        *)                                 echo 75 ;;
+        claude-fable-5*|claude-mythos-5*)     echo 50 ;;
+        claude-opus-4-8*|claude-opus-4-7*|claude-opus-4-6*) echo 25 ;;
+        claude-sonnet-5*|claude-sonnet-4-6*)  echo 15 ;;
+        claude-sonnet-4-5*)                   echo 15 ;;  # unverified; unchanged from the previous table
+        claude-haiku-4-5*)                    echo 5 ;;
+        *)                                    echo 25 ;;  # current Opus tier
     esac
 }
-_ccage_handoff_price_cache_write() {
-    case "$1" in
-        claude-opus-4-7|claude-opus-4-6)   echo 18.75 ;;
-        claude-sonnet-4-6|claude-sonnet-4-5) echo 3.75 ;;
-        claude-haiku-4-5)                  echo 1.00 ;;
-        *)                                 echo 18.75 ;;
-    esac
+
+# Cache-rate multipliers, applied to the input rate. Kept as named constants so
+# the ratios appear exactly once.
+_CCAGE_CW_5M_MULT=1.25
+_CCAGE_CW_1H_MULT=2.00
+_CCAGE_CR_MULT=0.10
+
+# Retained as thin derived wrappers: they were part of this file's surface, and
+# expressing them in terms of the input rate is what stops them drifting.
+_ccage_handoff_price_cache_write() {   # 5-minute TTL (the historical meaning)
+    awk -v i="$(_ccage_handoff_price_input "$1")" -v m="$_CCAGE_CW_5M_MULT" \
+        'BEGIN { printf "%g\n", i * m }'
+}
+_ccage_handoff_price_cache_write_1h() {
+    awk -v i="$(_ccage_handoff_price_input "$1")" -v m="$_CCAGE_CW_1H_MULT" \
+        'BEGIN { printf "%g\n", i * m }'
 }
 _ccage_handoff_price_cache_read() {
-    case "$1" in
-        claude-opus-4-7|claude-opus-4-6)   echo 1.50 ;;
-        claude-sonnet-4-6|claude-sonnet-4-5) echo 0.30 ;;
-        claude-haiku-4-5)                  echo 0.08 ;;
-        *)                                 echo 1.50 ;;
-    esac
+    awk -v i="$(_ccage_handoff_price_input "$1")" -v m="$_CCAGE_CR_MULT" \
+        'BEGIN { printf "%g\n", i * m }'
 }
 
 # ---- pwd-to-slug ------------------------------------------------------------
@@ -306,13 +335,13 @@ _ccage_handoff_last_assistant_text() {
 _ccage_handoff_collect() {
     local jsonl="$1"
     [ -f "$jsonl" ] || {
-        printf '%s\n' '{"session_id":null,"first_ts":null,"last_ts":null,"last_model":null,"assistant_count":0,"in":0,"out":0,"cw":0,"cr":0,"prompts":[],"files":{},"bash_commands":[],"last_text":null}'
+        printf '%s\n' '{"session_id":null,"first_ts":null,"last_ts":null,"last_model":null,"assistant_count":0,"in":0,"out":0,"cw":0,"cw5":0,"cw1":0,"cr":0,"prompts":[],"files":{},"bash_commands":[],"last_text":null}'
         return 0
     }
     jq -cRn '
         reduce (inputs | fromjson? // empty) as $r (
             { session_id: null, first_ts: null, last_ts: null, last_model: null,
-              assistant_count: 0, in: 0, out: 0, cw: 0, cr: 0,
+              assistant_count: 0, in: 0, out: 0, cw: 0, cw5: 0, cw1: 0, cr: 0,
               prompts: [], files: {}, bash_commands: [], last_text: null };
             # session id: first non-null
             ( if .session_id == null and ($r.sessionId // null) != null
@@ -331,6 +360,12 @@ _ccage_handoff_collect() {
                   | .in += ($r.message.usage.input_tokens // 0)
                   | .out += ($r.message.usage.output_tokens // 0)
                   | .cw  += ($r.message.usage.cache_creation_input_tokens // 0)
+                  # Cache-write split by TTL — priced differently (1.25x vs 2x
+                  # input). Absent on transcripts written before Claude Code
+                  # reported the split; the caller falls back to attributing an
+                  # unsplit total to the 5-minute bucket.
+                  | .cw5 += ($r.message.usage.cache_creation.ephemeral_5m_input_tokens // 0)
+                  | .cw1 += ($r.message.usage.cache_creation.ephemeral_1h_input_tokens // 0)
                   | .cr  += ($r.message.usage.cache_read_input_tokens // 0)
                   | reduce ($r.message.content[]?
                             | select(.type == "text" or .type == "tool_use")) as $c (.;
@@ -427,21 +462,27 @@ _ccage_handoff_truncate_words() {
 }
 
 # ---- compute estimated total session cost (dollars, 2 decimal) --------------
-# Args: input_tokens output_tokens cache_write_tokens cache_read_tokens model
-# Echoes a dollar amount like "$9.25" representing the cumulative spend across
-# all four billing components: input + output + cache-write + cache-read.
+# Args: input_tokens output_tokens cw5m_tokens cw1h_tokens cache_read_tokens model
+#
+# Cache-write is split by TTL because the two are priced differently (1.25× vs
+# 2× input) and the difference is large: the same tokens cost 60% more at the
+# 1-hour TTL. Transcripts record the split under
+# `usage.cache_creation.{ephemeral_5m,ephemeral_1h}_input_tokens`, so this is
+# measured, not assumed — the previous version charged everything at 1.25×.
+#
+# Echoes a dollar amount like "$9.25" covering input + output + both cache-write
+# buckets + cache-read.
 _ccage_handoff_cost() {
-    local in_tok="$1" out_tok="$2" cw_tok="$3" cr_tok="$4" model="$5"
-    local in_rate out_rate cw_rate cr_rate
+    local in_tok="$1" out_tok="$2" cw5_tok="$3" cw1_tok="$4" cr_tok="$5" model="$6"
+    local in_rate out_rate
     in_rate=$(_ccage_handoff_price_input "$model")
     out_rate=$(_ccage_handoff_price_output "$model")
-    cw_rate=$(_ccage_handoff_price_cache_write "$model")
-    cr_rate=$(_ccage_handoff_price_cache_read "$model")
     # Note: gawk reserves `or` as a builtin — use `outr` instead.
-    awk -v i="$in_tok" -v o="$out_tok" -v cw="$cw_tok" -v cr="$cr_tok" \
-        -v ir="$in_rate" -v outr="$out_rate" -v cwr="$cw_rate" -v crr="$cr_rate" \
+    awk -v i="$in_tok" -v o="$out_tok" -v cw5="$cw5_tok" -v cw1="$cw1_tok" \
+        -v cr="$cr_tok" -v ir="$in_rate" -v outr="$out_rate" \
+        -v m5="$_CCAGE_CW_5M_MULT" -v m1="$_CCAGE_CW_1H_MULT" -v mr="$_CCAGE_CR_MULT" \
         'BEGIN {
-            total = i*ir + o*outr + cw*cwr + cr*crr
+            total = i*ir + o*outr + cw5*(ir*m5) + cw1*(ir*m1) + cr*(ir*mr)
             printf "$%.2f\n", total / 1000000
         }'
 }
@@ -522,7 +563,7 @@ _ccage_handoff_compose_brief() {
     printf '**Turns:** %s user / %s assistant\n' "$prompt_count" "$assistant_count"
     printf '**Tokens billed so far:** %s input · %s output · %s cache-write · %s cache-read\n' \
         "$in_tok" "$out_tok" "$cw_tok" "$cr_tok"
-    printf '**Estimated cost so far:** ~%s (%s, 200K tier)\n' "$cost_so_far" "$model"
+    printf '**Estimated cost so far:** ~%s (%s, standard rates)\n' "$cost_so_far" "$model"
     printf '**Last model used:** %s\n' "$model"
     printf '\n'
 
@@ -634,20 +675,28 @@ _ccage_handoff_generate() {
 
     # Generate needs only the scalars driving the file path, age, and cost;
     # compose_brief re-extracts the full set from the same blob.
-    local session_id last_ts model in_tok out_tok cw_tok cr_tok
-    IFS=$'\t' read -r session_id last_ts model in_tok out_tok cw_tok cr_tok < <(
+    local session_id last_ts model in_tok out_tok cw_tok cw5_tok cw1_tok cr_tok
+    # cw5/cw1 fall back to attributing an unsplit cache-write total to the
+    # 5-minute bucket: transcripts predating the per-TTL breakdown carry only
+    # `cache_creation_input_tokens`, and 1.25x is the cheaper of the two rates,
+    # so an old transcript under-states rather than inventing a premium.
+    IFS=$'\t' read -r session_id last_ts model in_tok out_tok cw_tok cw5_tok cw1_tok cr_tok < <(
         jq -r '[
             (.session_id // "unknown"),
             (.last_ts // ""),
             (.last_model // "unknown"),
-            .in, .out, .cw, .cr
+            .in, .out, .cw,
+            (if ((.cw5 + .cw1) == 0 and .cw > 0) then .cw else .cw5 end),
+            .cw1,
+            .cr
         ] | @tsv' <<<"$handoff_data"
     )
     : "${session_id:=unknown}"; : "${model:=unknown}"
     : "${in_tok:=0}"; : "${out_tok:=0}"; : "${cw_tok:=0}"; : "${cr_tok:=0}"
+    : "${cw5_tok:=0}"; : "${cw1_tok:=0}"
 
     local cost_so_far
-    cost_so_far=$(_ccage_handoff_cost "$in_tok" "$out_tok" "$cw_tok" "$cr_tok" "$model")
+    cost_so_far=$(_ccage_handoff_cost "$in_tok" "$out_tok" "$cw5_tok" "$cw1_tok" "$cr_tok" "$model")
 
     # age in seconds
     local age_sec=""
