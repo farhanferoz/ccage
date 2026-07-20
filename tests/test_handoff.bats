@@ -285,6 +285,87 @@ STUB
     [[ "$output" != *"idle_notification"* ]]
 }
 
+# ===== delegated (subagent) work =====
+#
+# The brief used to read only the main transcript, so a fan-out session
+# reported its orchestrator's spend and nothing else. Measured on one real
+# session: 800 KB of main transcript against 7.4 MB across four subagents, and
+# $8.19 reported against $44.66 actual.
+
+# Lay out one session with N subagents exactly as Claude Code writes them:
+#   <dir>/<session>.jsonl
+#   <dir>/<session>/subagents/agent-<id>.jsonl + .meta.json
+_mk_subagent() {
+    local main_jsonl="$1" id="$2" meta_json="$3" body="$4"
+    local sub="${main_jsonl%.jsonl}/subagents"
+    mkdir -p "$sub"
+    printf '%s\n' "$body" > "$sub/agent-$id.jsonl"
+    if [ -n "$meta_json" ]; then
+        printf '%s\n' "$meta_json" > "$sub/agent-$id.meta.json"
+    fi
+}
+
+@test "subagents: folded into totals, listed, and attributed in Files touched" {
+    local main="$BATS_TEST_TMPDIR/sess/deadbeef.jsonl"
+    mkdir -p "$(dirname "$main")"
+    cp "$FIXTURES/minimal.jsonl" "$main"
+
+    # Agent 1: named in meta, ran on opus, ended normally, edited a shared file.
+    _mk_subagent "$main" "aworker-one-1111" \
+        '{"name":"worker-one","agentType":"general-purpose","customAgentType":"task-worker","model":"sonnet"}' \
+        '{"type":"assistant","timestamp":"2026-07-20T09:00:00.000Z","message":{"role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"done"},{"type":"tool_use","id":"t1","name":"Edit","input":{"file_path":"/tmp/foo.py"}}],"usage":{"input_tokens":100,"output_tokens":200,"cache_read_input_tokens":5000,"cache_creation":{"ephemeral_1h_input_tokens":1000}}}}'
+
+    # Agent 2: NO meta sidecar (name must fall back to the filename), and its
+    # last turn is the synthetic weekly-limit error — the shape verified on
+    # disk: isApiErrorMessage true, model "<synthetic>".
+    _mk_subagent "$main" "aworker-two-2222" "" \
+        '{"type":"assistant","timestamp":"2026-07-20T09:05:00.000Z","isApiErrorMessage":true,"message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"You'"'"'ve hit your weekly limit · resets 2am (Europe/London)"}],"usage":{"input_tokens":0,"output_tokens":0}}}'
+
+    local agents
+    agents=$(_ccage_handoff_subagents_json "$main")
+    [ "$(jq 'length' <<<"$agents")" = 2 ]
+    # meta name wins; missing meta falls back to the filename minus the hash.
+    [ "$(jq -r '.[0].name' <<<"$agents")" = worker-one ]
+    [ "$(jq -r '.[1].name' <<<"$agents")" = aworker-two ]
+    [ "$(jq -r '.[0].type' <<<"$agents")" = task-worker ]
+    # The model that actually served the turns, not the meta's alias.
+    [ "$(jq -r '.[0].model' <<<"$agents")" = claude-sonnet-5 ]
+    [ "$(jq -r '.[0].ended' <<<"$agents")" = ok ]
+    [[ "$(jq -r '.[1].ended' <<<"$agents")" == "api error: "*"weekly limit"* ]]
+    # Priced per agent at its own rate, 1-hour cache-write included.
+    [ "$(jq -r '.[0].cost > 0' <<<"$agents")" = true ]
+
+    run _ccage_handoff_generate "$main" --stdout
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"## Delegated work"* ]]
+    [[ "$output" == *"worker-one"* ]]
+    [[ "$output" == *"of which delegated"* ]]
+    [[ "$output" == *"delegated)"* ]]          # turn count carries the split
+    # Files touched attributes the shared path to both toucher and main.
+    [[ "$output" == *"| By |"* ]]
+    [[ "$output" == *"/tmp/foo.py"* ]]
+
+    # --no-subagents restores the main-transcript-only view.
+    run _ccage_handoff_generate "$main" --stdout --no-subagents
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"## Delegated work"* ]]
+    [[ "$output" != *"of which delegated"* ]]
+}
+
+@test "subagents: a session that delegated nothing is unchanged" {
+    local main="$BATS_TEST_TMPDIR/solo/deadbeef.jsonl"
+    mkdir -p "$(dirname "$main")"
+    cp "$FIXTURES/minimal.jsonl" "$main"
+
+    [ "$(_ccage_handoff_subagents_json "$main")" = "[]" ]
+    run _ccage_handoff_generate "$main" --stdout
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"## Delegated work"* ]]
+    [[ "$output" != *"of which delegated"* ]]
+    # The By column is still present — it reads "main" for every row.
+    [[ "$output" == *"| main |"* ]]
+}
+
 # ===== cage resolution (no CLAUDE_CONFIG_DIR) =====
 #
 # `ccage handoff` runs from a plain shell, where CLAUDE_CONFIG_DIR is unset by

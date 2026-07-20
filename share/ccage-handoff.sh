@@ -362,14 +362,15 @@ _ccage_handoff_last_assistant_text() {
 _ccage_handoff_collect() {
     local jsonl="$1"
     [ -f "$jsonl" ] || {
-        printf '%s\n' '{"session_id":null,"first_ts":null,"last_ts":null,"last_model":null,"assistant_count":0,"in":0,"out":0,"cw":0,"cw5":0,"cw1":0,"cr":0,"prompts":[],"notifications":[],"files":{},"bash_commands":[],"last_text":null}'
+        printf '%s\n' '{"session_id":null,"first_ts":null,"last_ts":null,"last_model":null,"assistant_count":0,"in":0,"out":0,"cw":0,"cw5":0,"cw1":0,"cr":0,"prompts":[],"notifications":[],"files":{},"bash_commands":[],"last_text":null,"last_is_error":false}'
         return 0
     }
     jq -cRn "$_CCAGE_HANDOFF_JQ_DEFS"'
         reduce (inputs | fromjson? // empty) as $r (
             { session_id: null, first_ts: null, last_ts: null, last_model: null,
               assistant_count: 0, in: 0, out: 0, cw: 0, cw5: 0, cw1: 0, cr: 0,
-              prompts: [], notifications: [], files: {}, bash_commands: [], last_text: null };
+              prompts: [], notifications: [], files: {}, bash_commands: [],
+              last_text: null, last_is_error: false };
             # session id: first non-null
             ( if .session_id == null and ($r.sessionId // null) != null
               then .session_id = $r.sessionId else . end )
@@ -381,6 +382,15 @@ _ccage_handoff_collect() {
             # assistant turns: model, counts, tokens, files/commands/last-text from content
             | ( if $r.type == "assistant" then
                   .assistant_count += 1
+                  # Terminal state. A transcript records no explicit
+                  # termination, so the honest signal is whether the LAST
+                  # assistant record was a synthetic API-error message —
+                  # verified shape: isApiErrorMessage true, model "<synthetic>",
+                  # text e.g. "You have hit your weekly limit - resets 2am".
+                  # Overwritten on every assistant record, so it reflects the
+                  # last one, not any earlier transient error.
+                  # (No apostrophes here: the whole program is single-quoted.)
+                  | .last_is_error = ($r.isApiErrorMessage // false)
                   | ( if ($r.message.model // null) != null
                         and $r.message.model != "<synthetic>"
                       then .last_model = $r.message.model else . end )
@@ -438,6 +448,127 @@ _ccage_handoff_collect() {
                 else . end )
         )
     ' "$jsonl" 2>/dev/null
+}
+
+# ---- delegated (subagent) work ----------------------------------------------
+# A fan-out session's real work — and its real spend — lives in the subagents'
+# own transcripts, which the brief used to ignore entirely. Measured on one
+# session: 800 KB of main transcript against 7.4 MB across four subagents, so
+# the header under-reported cost by an order of magnitude of activity.
+#
+# Layout (verified on disk, not assumed):
+#   <cage>/projects/<slug>/<session-id>/subagents/agent-<id>.jsonl
+#                                                 agent-<id>.meta.json
+# The meta carries {agentType, customAgentType, description, name, model,
+# teamName, parentAgentId, spawnDepth, taskKind}. The .jsonl uses the same
+# record schema as the main transcript, so _ccage_handoff_collect works on it
+# unmodified.
+#
+# Perf: measured 0.08 s across 7.4 MB, so this is one collect pass per agent
+# with no caching.
+
+# Size discipline: the brief is the input to a paid turn (/checkpoint
+# --from-session), so the agent list is capped rather than allowed to grow with
+# the fan-out. Target for the whole brief is under 15 KB.
+_CCAGE_HANDOFF_MAX_AGENTS=12
+
+_ccage_handoff_subagents_dir() {
+    printf '%s\n' "${1%.jsonl}/subagents"
+}
+
+# Echoes a JSON array, one object per subagent, newest activity last. Empty
+# array when the session delegated nothing.
+_ccage_handoff_subagents_json() {
+    local jsonl="$1"
+    local dir
+    dir=$(_ccage_handoff_subagents_dir "$jsonl")
+    if [ ! -d "$dir" ]; then
+        printf '[]\n'
+        return 0
+    fi
+
+    local rows=()
+    local f meta name agent_data cost
+    for f in "$dir"/agent-*.jsonl; do
+        [ -f "$f" ] || continue
+        meta="${f%.jsonl}.meta.json"
+        # Fall back to the filename when there is no meta sidecar: the id is
+        # `agent-<name>-<hash>`, so strip the prefix and the trailing hash.
+        name="${f##*/agent-}"
+        name="${name%.jsonl}"
+        name="${name%-*}"
+
+        agent_data=$(_ccage_handoff_collect "$f")
+        # Per-agent cost: agents run on different tiers, so a single session-wide
+        # rate would be wrong in both directions.
+        local a_model a_in a_out a_cw5 a_cw1 a_cr
+        IFS=$'\t' read -r a_model a_in a_out a_cw5 a_cw1 a_cr < <(
+            jq -r '[
+                (.last_model // "unknown"), .in, .out,
+                (if ((.cw5 + .cw1) == 0 and .cw > 0) then .cw else .cw5 end),
+                .cw1, .cr
+            ] | @tsv' <<<"$agent_data"
+        )
+        cost=$(_ccage_handoff_cost "$a_in" "$a_out" "$a_cw5" "$a_cw1" "$a_cr" "$a_model")
+
+        # Pull the small pieces out of the blob with heredocs rather than
+        # passing the whole thing as an argument: a busy agent's collect blob
+        # carries every prompt and Bash command it issued, which is exactly the
+        # shape that overflows ARG_MAX on the one session that matters.
+        local a_files a_ended a_turns
+        a_files=$(jq -c '.files' <<<"$agent_data")
+        a_turns=$(jq -r '.assistant_count' <<<"$agent_data")
+        # Honest wording: a transcript carries no explicit termination record,
+        # so "ok" means the last turn completed normally, not that the agent
+        # finished its task.
+        a_ended=$(jq -r '
+            if .last_is_error
+            then "api error: " + ((.last_text // "") | split("\n")[0] | .[0:60])
+            else "ok" end' <<<"$agent_data")
+
+        # --slurpfile on a missing sidecar would abort jq; /dev/null slurps to
+        # [], which the filter below folds to {}.
+        local meta_src=/dev/null
+        if [ -f "$meta" ]; then
+            meta_src="$meta"
+        fi
+
+        rows+=("$(
+            jq -c -n \
+                --arg fallback_name "$name" \
+                --arg model "$a_model" \
+                --arg ended "$a_ended" \
+                --arg turns "$a_turns" \
+                --arg cost "${cost#\$}" \
+                --arg in "$a_in" --arg out "$a_out" --arg cr "$a_cr" \
+                --arg cw "$((a_cw5 + a_cw1))" \
+                --argjson files "$a_files" \
+                --slurpfile meta "$meta_src" '
+                ($meta[0] // {}) as $m |
+                {
+                    name:  ($m.name // $fallback_name),
+                    type:  ($m.customAgentType // $m.agentType // "unknown"),
+                    # The transcript records what actually served the turns; the
+                    # meta only records what was requested ("opus", "sonnet").
+                    # Prefer the former, and it is what cost was priced from.
+                    model: (if $model != "unknown" then $model else ($m.model // "unknown") end),
+                    turns: ($turns | tonumber),
+                    cost:  ($cost | tonumber),
+                    in:    ($in | tonumber),
+                    out:   ($out | tonumber),
+                    cw:    ($cw | tonumber),
+                    cr:    ($cr | tonumber),
+                    files: $files,
+                    ended: $ended
+                }'
+        )")
+    done
+
+    if [ ${#rows[@]} -eq 0 ]; then
+        printf '[]\n'
+        return 0
+    fi
+    printf '%s\n' "${rows[@]}" | jq -cs '.'
 }
 
 # ---- timestamps -------------------------------------------------------------
@@ -562,12 +693,17 @@ _ccage_handoff_copy_to_clipboard() {
 #   $3 — age_sec:      seconds since last activity ("" if date couldn't parse)
 #   $4 — max_prompts:  cap on user-prompt list
 #   $5 — jsonl_label:  path printed in the footer ("Generated by … from …")
+#   $6 — subagents:    JSON array from _ccage_handoff_subagents_json ("[]" if none)
+#   $7 — main_cost:    cost of the main transcript alone, for the "of which
+#                      delegated" split ($2 is the combined figure)
 _ccage_handoff_compose_brief() {
     local handoff_data="$1"
     local cost_so_far="$2"
     local age_sec="$3"
     local max_prompts="$4"
     local jsonl_label="$5"
+    local subagents="${6:-[]}"
+    local main_cost="${7:-$2}"
 
     local session_id first_ts last_ts model assistant_count prompt_count
     local in_tok out_tok cw_tok cr_tok
@@ -594,10 +730,32 @@ _ccage_handoff_compose_brief() {
     else
         printf '**Last activity:** %s\n' "${last_ts:-unknown}"
     fi
-    printf '**Turns:** %s user / %s assistant\n' "$prompt_count" "$assistant_count"
+    local delegated_turns
+    delegated_turns=$(jq -r '[.[].turns] | add // 0' <<<"$subagents")
+    if [ "${delegated_turns:-0}" -gt 0 ]; then
+        printf '**Turns:** %s user / %s assistant (+%s delegated)\n' \
+            "$prompt_count" "$assistant_count" "$delegated_turns"
+    else
+        printf '**Turns:** %s user / %s assistant\n' "$prompt_count" "$assistant_count"
+    fi
+    # Token totals fold in every subagent: a fan-out session that reports only
+    # its orchestrator's usage under-states the real work by an order of
+    # magnitude (measured: 800 KB main against 7.4 MB delegated).
+    local d_in d_out d_cw d_cr
+    IFS=$'\t' read -r d_in d_out d_cw d_cr < <(
+        jq -r '[([.[].in] | add // 0), ([.[].out] | add // 0),
+                ([.[].cw] | add // 0), ([.[].cr] | add // 0)] | @tsv' <<<"$subagents"
+    )
     printf '**Tokens billed so far:** %s input · %s output · %s cache-write · %s cache-read\n' \
-        "$in_tok" "$out_tok" "$cw_tok" "$cr_tok"
+        "$((in_tok + d_in))" "$((out_tok + d_out))" "$((cw_tok + d_cw))" "$((cr_tok + d_cr))"
     printf '**Estimated cost so far:** ~%s (%s, standard rates)\n' "$cost_so_far" "$model"
+    local agent_count
+    agent_count=$(jq -r 'length' <<<"$subagents")
+    if [ "${agent_count:-0}" -gt 0 ]; then
+        printf '**of which delegated:** ~$%s across %s subagent(s); main thread ~%s\n' \
+            "$(jq -r '[.[].cost] | add // 0 | .*100 | round / 100 | tostring' <<<"$subagents")" \
+            "$agent_count" "$main_cost"
+    fi
     printf '**Last model used:** %s\n' "$model"
     printf '\n'
 
@@ -623,19 +781,50 @@ _ccage_handoff_compose_brief() {
         printf '_(no user prompts recorded in this session)_\n'
     fi
 
-    # Files touched section — sort by total touches desc.
+    # Delegated work — one line per agent. Capped, because this brief is the
+    # input to a paid turn (/checkpoint --from-session) and must stay small.
+    if [ "${agent_count:-0}" -gt 0 ]; then
+        printf '\n## Delegated work\n\n'
+        printf '| Agent | Type | Model | Turns | Cost | Files | Ended |\n'
+        printf '|---|---|---|---:|---:|---:|---|\n'
+        jq -r --argjson n "$_CCAGE_HANDOFF_MAX_AGENTS" '
+            sort_by(-.cost) | .[0:$n] | .[]
+            | "| \(.name) | \(.type) | \(.model) | \(.turns) | $\(.cost) | \(.files | length) | \(.ended) |"
+        ' <<<"$subagents"
+        if [ "$agent_count" -gt "$_CCAGE_HANDOFF_MAX_AGENTS" ]; then
+            printf '\n_(%d further agent(s) elided — costliest %d shown)_\n' \
+                $((agent_count - _CCAGE_HANDOFF_MAX_AGENTS)) "$_CCAGE_HANDOFF_MAX_AGENTS"
+        fi
+        printf '\n_"ok" means the last turn completed normally; a transcript records no\nexplicit termination, so it does not mean the agent finished its task._\n'
+    fi
+
+    # Files touched section — sort by total touches desc. Rows merge the main
+    # thread and every subagent, with `By` naming who touched the path.
     printf '\n## Files touched\n\n'
     local files_table
-    files_table=$(jq -r '
-        .files | to_entries
-        | map(. + {total: (.value.Read + .value.Edit + .value.Write)})
-        | sort_by(-.total)
-        | .[] | "\(.key)\t\(.value.Read)\t\(.value.Edit)\t\(.value.Write)"
+    files_table=$(jq -r --argjson subagents "$subagents" '
+        ([{by: "main", files: .files}] + [$subagents[] | {by: .name, files: .files}])
+        | map(.by as $b | .files | to_entries
+              | map({path: .key, by: $b, r: .value.Read, e: .value.Edit, w: .value.Write}))
+        | add // []
+        | group_by(.path)
+        | map({
+            path:  .[0].path,
+            r:     (map(.r) | add), e: (map(.e) | add), w: (map(.w) | add),
+            # One toucher is always named, however long the agent name; a
+            # crowd collapses to a count so the column cannot run away.
+            by:    ((map(.by) | unique) as $names
+                    | if ($names | length) == 1 then $names[0]
+                      elif ($names | join("+") | length) <= 28 then ($names | join("+"))
+                      else "\($names | length) sources" end)
+          })
+        | sort_by(-(.r + .e + .w))
+        | .[] | "\(.path)\t\(.r)\t\(.e)\t\(.w)\t\(.by)"
     ' <<<"$handoff_data")
     if [ -n "$files_table" ]; then
-        printf '| Path | Read | Edit | Write |\n'
-        printf '|---|---:|---:|---:|\n'
-        printf '%s\n' "$files_table" | head -30 | awk -F'\t' '{ printf "| %s | %d | %d | %d |\n", $1, $2, $3, $4 }'
+        printf '| Path | Read | Edit | Write | By |\n'
+        printf '|---|---:|---:|---:|---|\n'
+        printf '%s\n' "$files_table" | head -30 | awk -F'\t' '{ printf "| %s | %d | %d | %d | %s |\n", $1, $2, $3, $4, $5 }'
     else
         printf '_(no files touched via Read/Edit/Write in this session)_\n'
     fi
@@ -689,12 +878,14 @@ _ccage_handoff_generate() {
     local out_mode="file"   # file | stdout | explicit
     local out_path=""
     local max_prompts=20
+    local include_subagents=1
 
     while [ $# -gt 0 ]; do
         case "$1" in
             --stdout)       out_mode=stdout; shift ;;
             --output)       out_mode=explicit; out_path="$2"; shift 2 ;;
             --max-prompts)  max_prompts="$2"; shift 2 ;;
+            --no-subagents) include_subagents=0; shift ;;
             -*)             printf 'ccage handoff: unknown flag: %s\n' "$1" >&2; return 2 ;;
             *)              if [ -z "$jsonl" ]; then jsonl="$1"; else printf 'ccage handoff: too many positional args\n' >&2; return 2; fi; shift ;;
         esac
@@ -732,6 +923,19 @@ _ccage_handoff_generate() {
     local cost_so_far
     cost_so_far=$(_ccage_handoff_cost "$in_tok" "$out_tok" "$cw5_tok" "$cw1_tok" "$cr_tok" "$model")
 
+    # ---- delegated work ----
+    # Priced per agent (they run on different tiers) and added to the main
+    # figure, so a fan-out session no longer reports only its orchestrator's
+    # spend. --no-subagents restores the old main-transcript-only view.
+    local subagents='[]' delegated_cost=0
+    if [ "$include_subagents" = 1 ]; then
+        subagents=$(_ccage_handoff_subagents_json "$jsonl")
+        delegated_cost=$(jq -r '[.[].cost] | add // 0' <<<"$subagents")
+    fi
+    local total_cost
+    total_cost=$(awk -v m="${cost_so_far#\$}" -v d="$delegated_cost" \
+        'BEGIN { printf "$%.2f\n", m + d }')
+
     # age in seconds
     local age_sec=""
     if [ -n "$last_ts" ] && command -v date >/dev/null 2>&1; then
@@ -766,9 +970,9 @@ _ccage_handoff_generate() {
     esac
 
     if [ -z "$final_path" ]; then
-        _ccage_handoff_compose_brief "$handoff_data" "$cost_so_far" "$age_sec" "$max_prompts" "$jsonl"
+        _ccage_handoff_compose_brief "$handoff_data" "$total_cost" "$age_sec" "$max_prompts" "$jsonl" "$subagents" "$cost_so_far"
     else
-        _ccage_handoff_compose_brief "$handoff_data" "$cost_so_far" "$age_sec" "$max_prompts" "$jsonl" > "$final_path"
+        _ccage_handoff_compose_brief "$handoff_data" "$total_cost" "$age_sec" "$max_prompts" "$jsonl" "$subagents" "$cost_so_far" > "$final_path"
         printf '%s\n' "$final_path"
         if [ "$out_mode" = file ]; then
             # Paste hint + clipboard auto-copy (file mode only — stdout/explicit
@@ -907,7 +1111,7 @@ _ccage_handoff_main() {
             --project)     project="$2"; shift 2 ;;
             --config-dir)  config_dir_flag="$2"; shift 2 ;;
             --output|--max-prompts) pass_args+=("$1" "$2"); shift 2 ;;
-            --stdout)      pass_args+=("$1"); shift ;;
+            --stdout|--no-subagents) pass_args+=("$1"); shift ;;
             -h|--help)
                 cat <<EOF
 Usage: ccage handoff [<session-id-prefix>] [options]
@@ -921,6 +1125,7 @@ Options:
   --max-prompts N      Cap user-prompt list at N most-recent (default 20).
   --project PATH       Use PATH (not PWD) when deriving the project slug.
   --config-dir DIR     Read sessions from cage DIR instead of resolving it.
+  --no-subagents       Skip delegated work; report the main transcript only.
   -h, --help           This message.
 
 Defaults: writes to \${CCAGE_HANDOFF_DIR:-~/.local/share/ccage/handoffs}/

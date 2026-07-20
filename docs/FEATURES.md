@@ -182,14 +182,28 @@ ccage handoff --stdout                 # write to stdout instead of file
 ccage handoff --output FILE            # explicit output path
 ccage handoff --project /abs/path      # use that path's slug, not $PWD's
 ccage handoff --max-prompts N          # cap user-prompt list (default 20)
+ccage handoff --config-dir DIR         # read sessions from cage DIR
+ccage handoff --no-subagents           # main transcript only, skip delegated work
 ```
+
+### Which cage it reads
+
+`ccage` runs from a plain shell, where `CLAUDE_CONFIG_DIR` is unset — the `claude()` wrapper exports it with `local -x` so it never leaks out. The cage is therefore resolved in this order:
+
+1. `--config-dir DIR`.
+2. `$CLAUDE_CONFIG_DIR`, when something has set it.
+3. ccage's own keying rule (`_ccage_config_dir_for`), so `CCAGE_ROOT`, `CCAGE_PREFIX`, `CCAGE_SLOT` and a user's `_ccage_config_dir_override` all apply. `bin/ccage` sources `claude-isolation.sh` and a `claude-overrides.sh` companion to get it.
+4. A scan of every cage for an `.owning_path` naming this project. Several cages can own one path (that is what `CCAGE_SLOT` is for), so the most recent session wins and the choice is reported on stderr.
+
+Failing all four, the error names the cages actually searched and points at `--config-dir`.
 
 ### What's in the brief
 
 - Session metadata (id, started/last-activity, turn counts, last model used).
-- Tokens billed so far (input · output · cache-write · cache-read) and an estimated cost in dollars based on the pricing table in `share/ccage-handoff.sh`.
-- User prompts (verbatim, chronological, last N up to `--max-prompts`).
-- Files touched, aggregated from Read/Edit/Write tool_use records — top 30 by frequency.
+- Tokens billed so far (input · output · cache-write · cache-read) and an estimated cost in dollars based on the pricing table in `share/ccage-handoff.sh`. Both fold in every subagent, with an "of which delegated" split — a fan-out session that reported only its orchestrator's usage understated the real figure by an order of magnitude.
+- User prompts (verbatim, chronological, last N up to `--max-prompts`). Harness-injected notifications — a teammate's idle message, a background-task completion — arrive as ordinary user records and are bucketed separately rather than counted as prompts.
+- Delegated work: one row per subagent (name, type, model, turns, cost, files, how its last turn ended), read from `<session-id>/subagents/agent-*.jsonl` plus the `.meta.json` sidecar. Capped at the 12 costliest. Skip with `--no-subagents`.
+- Files touched, aggregated from Read/Edit/Write tool_use records — top 30 by frequency, with a `By` column naming the main thread or the agent that touched the path.
 - Bash commands, deduplicated and with trivials (`pwd`, `ls`, `true`, `clear`, `exit`, `cd`) filtered out.
 - The last assistant text turn (truncated to first/last 300 words if longer than 600).
 
