@@ -2,7 +2,7 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.14.1] — 2026-07-20
 
 ### Fixed — `ccage-auto-yolo --soft 45` silently launched at the default threshold
 - **Launch flags were only parsed up to the first token ccage-auto does not own.** A user alias prepends one by construction — `ccage-auto-yolo` is `ccage-auto --dangerously-skip-permissions` — so `--soft`, `--hard`, `--status`, `--poll`, `--window` and `--weekly-floor` after it were never seen: the session launched at the *default* soft threshold and the flags were handed to `claude`, which rejected them (`error: unknown option '--soft'`). Only the control subcommands (`--set`/`--pause`/`--resume`/`--reset`) had been fixed for this. Every flag ccage-auto owns is now recognised anywhere before a literal `--`; unrecognised tokens still reach `claude` in order, and `--` still ends ccage-auto's claim on the line, so `ccage-auto --status -- --soft 99` leaves thresholds alone.
