@@ -31,7 +31,19 @@ jobs:
 
       - name: shellcheck
         if: matrix.os == 'ubuntu-latest' && matrix.shell == 'bash'
-        run: shellcheck share/*.sh share/hooks/*.sh share/skills/checkpoint/*.sh share/skills/keepwarm/*.sh install.sh uninstall.sh
+        run: shellcheck bin/ccage share/*.sh share/hooks/*.sh share/skills/checkpoint/*.sh share/skills/keepwarm/*.sh install.sh uninstall.sh
+        shell: bash
+
+      # `shell: bash` resolves via PATH, so a green macOS leg does not by itself
+      # prove bash 3.2 compatibility — the runner may put a newer Homebrew bash
+      # first. ccage targets stock macOS bash 3.2, so make the version that
+      # actually ran visible in the log rather than assuming it.
+      - name: report bash version
+        if: matrix.shell == 'bash'
+        run: |
+          command -v bash
+          bash --version | head -1
+          printf 'stock /bin/bash: '; /bin/bash --version | head -1
         shell: bash
 
       - name: source smoke test (bash)

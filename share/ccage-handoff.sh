@@ -497,6 +497,21 @@ _CCAGE_HANDOFF_MAX_CMD_CHARS=140
 _CCAGE_HANDOFF_MAX_PROMPT_CHARS=600
 _CCAGE_HANDOFF_PROMPT_BUDGET=9000
 
+# Shared by every section that interpolates free text into the brief: escape a
+# line-leading Markdown heading so pasted text cannot forge one of the brief's
+# own sections. Prompts are not the only such section — assistant text ends
+# its turns with headings routinely (13 of 120 real sessions), so a brief that
+# neutralized only prompts still had a forgeable neighbour.
+#
+# jq's `^` anchors at STRING start only (verified on jq 1.8.1), so the
+# per-line case is matched via an explicit \n rather than relying on a (?m)
+# flag whose meaning varies between regex flavours.
+_CCAGE_HANDOFF_JQ_NEUTRALIZE='
+    def neutralize:
+        gsub("^(?<h>#{1,6} )"; "\\\(.h)")
+        | gsub("\n(?<h>#{1,6} )"; "\n\\\(.h)");
+'
+
 _ccage_handoff_subagents_dir() {
     printf '%s\n' "${1%.jsonl}/subagents"
 }
@@ -819,16 +834,12 @@ _ccage_handoff_compose_brief() {
         #
         # Per-prompt character cap, then a byte budget across the section
         # (newest kept — they are the ones that matter for resuming), then
-        # line-leading `#` escaped so prompt text cannot forge a heading.
-        # jq's `^` anchors at STRING start only (verified on jq 1.8.1), so the
-        # per-line case is matched via an explicit \n rather than relying on a
-        # (?m) flag whose meaning varies between regex flavours.
+        # line-leading `#` escaped (see _CCAGE_HANDOFF_JQ_NEUTRALIZE) so prompt
+        # text cannot forge a heading.
         jq -r --argjson start "$((total_prompts - shown_n))" \
               --argjson cap "$_CCAGE_HANDOFF_MAX_PROMPT_CHARS" \
-              --argjson budget "$_CCAGE_HANDOFF_PROMPT_BUDGET" '
-            def neutralize:
-                gsub("^(?<h>#{1,6} )"; "\\\(.h)")
-                | gsub("\n(?<h>#{1,6} )"; "\n\\\(.h)");
+              --argjson budget "$_CCAGE_HANDOFF_PROMPT_BUDGET" \
+              "$_CCAGE_HANDOFF_JQ_NEUTRALIZE"'
             def cap: if length > $cap then .[0:$cap] + "\n…(prompt truncated)" else . end;
             (.prompts[$start:] | to_entries | map(.key = .key + $start + 1)
                | map(.value |= (cap | neutralize))) as $items
@@ -934,10 +945,12 @@ _ccage_handoff_compose_brief() {
         printf '_(no Bash commands recorded)_\n'
     fi
 
-    # Last assistant turn
+    # Last assistant turn. Neutralized like the prompts section: assistant
+    # turns routinely sign off with their own `## ` headings, which are
+    # otherwise indistinguishable from the brief's real sections.
     printf '\n## Last assistant turn\n\n'
     local last_text
-    last_text=$(jq -r '.last_text // ""' <<<"$handoff_data")
+    last_text=$(jq -r "$_CCAGE_HANDOFF_JQ_NEUTRALIZE"'.last_text // "" | neutralize' <<<"$handoff_data")
     if [ -n "$last_text" ]; then
         local words
         words=$(printf '%s' "$last_text" | wc -w)
