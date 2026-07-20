@@ -508,14 +508,21 @@ print(json.dumps({'type':'user','timestamp':'2026-07-20T09:00:00.000Z',
 
     # A real user's claude-overrides.sh is arbitrary shell. An `echo` in one
     # landed ahead of the `# Handoff:` heading and corrupted a file whose whole
-    # purpose is to be pasted into a fresh session. `set -e` + a failing command
-    # must not abort the run either.
+    # purpose is to be pasted into a fresh session. A `set -e` in one leaked
+    # into ccage and aborted it at the next non-zero command, since cage
+    # resolution is a ladder whose early rungs are expected to fail.
+    #
+    # The rc deliberately does NOT also run a failing command. Bash 3.2 and
+    # bash 5 disagree on whether an errexit abort *inside* a sourced file kills
+    # the caller even in an `|| true` context, so asserting on that would be
+    # asserting on the bash version rather than on ccage. The leak itself —
+    # which is what this repo fixed and can control — is portable to assert.
     export HOME="$BATS_TEST_TMPDIR/fakehome"
     mkdir -p "$HOME/.bashrc.d"
     cat > "$HOME/.bashrc.d/claude-overrides.sh" <<'RC'
 echo "NOISE FROM THE USER RC"
 set -e
-false
+set -u
 RC
 
     run env -i PATH="$PATH" HOME="$HOME" CCAGE_ROOT="$CCAGE_ROOT" \
@@ -562,6 +569,51 @@ RC
     [[ "$output" != *"no user prompts recorded"* ]]
     # And no shell diagnostics leaked into the document.
     [[ "$output" != *"integer expected"* ]]
+}
+
+# Three size/structure bounds that a word count or a codepoint count does not
+# actually enforce. Grouped: one generated brief per fixture, per this file's
+# speed note.
+@test "bounds: unbroken blob, multibyte budget, and newline/tab in a path" {
+    # (a) A word cap is not a size cap: whitespace-free text is ONE word at any
+    # length, so a 3 MB blob composed a 3 MB brief against a 15 KB target.
+    local blob="$BATS_TEST_TMPDIR/blob.jsonl"
+    python3 -c "
+import json
+print(json.dumps({'type':'assistant','timestamp':'2026-07-20T09:00:00.000Z',
+  'message':{'role':'assistant','model':'claude-sonnet-5',
+  'content':[{'type':'text','text':'A'*3000000}],
+  'usage':{'input_tokens':10,'output_tokens':10}}}))" > "$blob"
+    run _ccage_handoff_generate "$blob" --stdout
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | wc -c)" -lt 15360 ]
+    [[ "$output" == *"bytes of unbroken text elided"* ]]
+
+    # (b) The prompts budget is in BYTES. Summing codepoints let CJK overshoot
+    # roughly threefold — 3 bytes per character in UTF-8.
+    local cjk="$BATS_TEST_TMPDIR/cjk.jsonl"
+    python3 -c "
+import json
+for i in range(40):
+    print(json.dumps({'type':'user','timestamp':'2026-07-20T09:00:00.000Z',
+      'message':{'role':'user','content':'日本語'*180}}))" > "$cjk"
+    run _ccage_handoff_generate "$cjk" --stdout
+    [ "$status" -eq 0 ]
+    local section_bytes
+    section_bytes=$(printf '%s\n' "$output" \
+        | awk '/^## User prompts/{f=1} /^## Files touched/{f=0} f' | wc -c)
+    [ "$section_bytes" -lt 12000 ]
+
+    # (c) A newline in a path ENDS the Markdown row, fabricating a phantom row
+    # plus one whose "path" is filesystem-controlled text — in a document a
+    # fresh session is told to trust. A tab collides with the TSV feeding awk.
+    local nl="$BATS_TEST_TMPDIR/nl.jsonl"
+    printf '%s\n' '{"type":"assistant","timestamp":"2026-07-20T09:00:00.000Z","message":{"role":"assistant","model":"claude-sonnet-5","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/tmp/ev|il\n| /etc/passwd | 9 | 9 | 9 | main "}}],"usage":{"input_tokens":10,"output_tokens":10}}}' > "$nl"
+    run _ccage_handoff_generate "$nl" --stdout
+    [ "$status" -eq 0 ]
+    # Exactly one data row in the table — no fabricated second row.
+    [ "$(printf '%s\n' "$output" | grep -c '^| /tmp/ev')" = 1 ]
+    [ "$(printf '%s\n' "$output" | grep -c '^| /etc/passwd')" = 0 ]
 }
 
 @test "pricing: an unknown model is flagged as a guess, not asserted as known" {

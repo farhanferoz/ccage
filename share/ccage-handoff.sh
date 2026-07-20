@@ -521,6 +521,10 @@ _CCAGE_HANDOFF_MAX_CMD_CHARS=140
 # the only thing that ever blew the 15 KB whole-brief target.
 _CCAGE_HANDOFF_MAX_PROMPT_CHARS=600
 _CCAGE_HANDOFF_PROMPT_BUDGET=9000
+# Hard size bound for a free-text block, applied before any word-based cap.
+# Whitespace-free text is one "word" at any length, so the word cap alone let a
+# single blob carry the whole brief past its target.
+_CCAGE_HANDOFF_MAX_TEXT_BYTES=8000
 
 # Shared by every section that interpolates free text into the brief: escape a
 # line-leading Markdown heading so pasted text cannot forge one of the brief's
@@ -543,7 +547,15 @@ _CCAGE_HANDOFF_JQ_NEUTRALIZE='
 # and macOS. An unescaped pipe silently splits one row into extra columns, so
 # the row no longer lines up with its header.
 _CCAGE_HANDOFF_JQ_CELL='
-    def cell: tostring | gsub("\\|"; "\\|");
+    def cell: tostring
+        # A newline in a cell ends the Markdown ROW, fabricating a phantom
+        # all-zero row plus one whose "path" is filesystem-controlled text — in
+        # a document a fresh session is told to trust. A tab additionally
+        # collides with the TSV that feeds the Files-touched awk pass, silently
+        # shifting every count into the wrong column. Both are legal in a path
+        # on Linux and macOS. Same defect the Commands section already fixed.
+        | gsub("[\\n\\t\\r]"; " ")
+        | gsub("\\|"; "\\|");
 '
 
 _ccage_handoff_subagents_dir() {
@@ -716,6 +728,21 @@ _ccage_handoff_age_human() {
 _ccage_handoff_truncate_words() {
     local max="$1" text="$2"
     local n
+    # A WORD cap is not a SIZE cap. A base64 blob, a minified line or a long
+    # hash carries no whitespace, so it is one "word" however many megabytes it
+    # is — a 50 MB single-token last turn composed a 52 MB brief against this
+    # file's 15 KB target. Bound the bytes first; the word logic below then
+    # operates on something already known to be small.
+    local bytes
+    bytes=$(printf '%s' "$text" | wc -c)
+    if [ "$bytes" -gt "$_CCAGE_HANDOFF_MAX_TEXT_BYTES" ]; then
+        # Cut on a character boundary via the shell rather than byte-slicing,
+        # so a multibyte sequence is never split in half.
+        text="${text:0:$_CCAGE_HANDOFF_MAX_TEXT_BYTES}"
+        printf '%s\n…(truncated — %d bytes of unbroken text elided)…\n' \
+            "$text" $((bytes - _CCAGE_HANDOFF_MAX_TEXT_BYTES))
+        return
+    fi
     n=$(printf '%s' "$text" | wc -w)
     if [ "$n" -le "$max" ]; then
         printf '%s\n' "$text"
@@ -913,9 +940,9 @@ _ccage_handoff_compose_brief() {
             | ($items | reverse
                | reduce .[] as $e ({keep: [], used: 0, done: false};
                    if .done then .
-                   elif (.used + ($e.value | length)) > $budget and (.keep | length) > 0
+                   elif (.used + ($e.value | utf8bytelength)) > $budget and (.keep | length) > 0
                    then (.done = true)
-                   else {keep: (.keep + [$e]), used: (.used + ($e.value | length)), done: false}
+                   else {keep: (.keep + [$e]), used: (.used + ($e.value | utf8bytelength)), done: false}
                    end)
                | .keep | reverse) as $kept
             | "\($kept | length)",
@@ -1053,13 +1080,11 @@ _ccage_handoff_compose_brief() {
     local last_text
     last_text=$(jq -r "$_CCAGE_HANDOFF_JQ_NEUTRALIZE"'.last_text // "" | neutralize' <<<"$handoff_data")
     if [ -n "$last_text" ]; then
-        local words
-        words=$(printf '%s' "$last_text" | wc -w)
-        if [ "$words" -gt 600 ]; then
-            _ccage_handoff_truncate_words 600 "$last_text"
-        else
-            printf '%s\n' "$last_text"
-        fi
+        # Always route through the truncator. It returns short text unchanged,
+        # and it owns the BYTE bound as well as the word one — gating the call
+        # on a word count here meant a whitespace-free blob (one "word" at any
+        # size) bypassed both, and a 50 MB last turn composed a 52 MB brief.
+        _ccage_handoff_truncate_words 600 "$last_text"
     else
         printf '_(no assistant text content)_\n'
     fi
