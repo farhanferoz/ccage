@@ -527,6 +527,43 @@ RC
     [[ "$(printf '%s\n' "$output" | head -1)" == '# Handoff:'* ]]
 }
 
+# A transcript is not schema-checked. jq raises a type error on a wrongly-typed
+# field, and a type error anywhere aborts the WHOLE reduce — so one malformed
+# record erased every other record and the brief rendered as a confident, empty
+# session. For a recovery tool, silently claiming a real session did nothing is
+# worse than crashing.
+@test "collect: one malformed record cannot erase the rest of the transcript" {
+    local f="$BATS_TEST_TMPDIR/malformed.jsonl"
+    {
+        printf '%s\n' '{"type":"user","timestamp":"2026-07-20T09:00:00.000Z","message":{"role":"user","content":"please fix the parser"}}'
+        printf '%s\n' '{"type":"assistant","timestamp":"2026-07-20T09:01:00.000Z","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/tmp/real.py"}}],"usage":{"input_tokens":440000,"output_tokens":1200}}}'
+        # usage is a STRING, and cache_creation a NUMBER — both raise jq type
+        # errors that `// 0` does not defend against.
+        printf '%s\n' '{"type":"assistant","timestamp":"2026-07-20T09:02:00.000Z","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"mid"}],"usage":"not-an-object"}}'
+        printf '%s\n' '{"type":"assistant","timestamp":"2026-07-20T09:02:30.000Z","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"mid2"}],"usage":{"input_tokens":100,"cache_creation":7}}}'
+        printf '%s\n' '{"type":"assistant","timestamp":"2026-07-20T09:03:00.000Z","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"the final summary"}],"usage":{"input_tokens":100,"output_tokens":50}}}'
+    } > "$f"
+
+    local blob
+    blob=$(_ccage_handoff_collect "$f")
+    # Every well-formed record still counted; the malformed ones contribute 0.
+    [ "$(jq -r '.in' <<<"$blob")" = 440200 ]
+    [ "$(jq -r '.out' <<<"$blob")" = 1250 ]
+    [ "$(jq -r '.prompts | length' <<<"$blob")" = 1 ]
+    [ "$(jq -r '.files | keys | length' <<<"$blob")" = 1 ]
+
+    run _ccage_handoff_generate "$f" --stdout
+    [ "$status" -eq 0 ]
+    # The brief reports the real session, not a plausible-looking empty one.
+    [[ "$output" == *"440200 input"* ]]
+    [[ "$output" == *"please fix the parser"* ]]
+    [[ "$output" == *"/tmp/real.py"* ]]
+    [[ "$output" == *"the final summary"* ]]
+    [[ "$output" != *"no user prompts recorded"* ]]
+    # And no shell diagnostics leaked into the document.
+    [[ "$output" != *"integer expected"* ]]
+}
+
 @test "pricing: an unknown model is flagged as a guess, not asserted as known" {
     [ "$(_ccage_handoff_model_family claude-vega-9)" = unknown ]
     [ "$(_ccage_handoff_model_family 'claude-opus-4-8[1m]')" = opus ]

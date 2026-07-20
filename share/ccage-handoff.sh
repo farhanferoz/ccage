@@ -174,6 +174,12 @@ def is_harness_notification:
     startswith("<teammate-message ")
     or startswith("Another Claude session sent a message:\n<teammate-message ")
     or startswith("<task-notification>");
+# Type coercions for fields read out of a transcript. A transcript is not a
+# schema-checked artifact, and jq raises a type error — which aborts an entire
+# reduce, not just the offending record — the moment a field holds the wrong
+# type. The // operator does not help: it only substitutes for null and false.
+def num: if type == "number" then . else 0 end;
+def obj: if type == "object" then . else {} end;
 '
 
 # ---- token totals -----------------------------------------------------------
@@ -377,10 +383,16 @@ _ccage_handoff_last_assistant_text() {
 # for unit-test coverage; only the production caller uses this fast path.
 #
 # Echoes one compact JSON object. Empty / missing file → object of defaults.
+# The skeleton emitted whenever a real blob cannot be produced. Defined once so
+# the missing-file branch and the jq-failure fallback cannot drift apart — the
+# latter matters because a jq abort used to yield NOTHING, and downstream a
+# missing blob composes into a confident, entirely empty brief.
+_CCAGE_HANDOFF_COLLECT_DEFAULTS='{"session_id":null,"first_ts":null,"last_ts":null,"last_model":null,"assistant_count":0,"in":0,"out":0,"cw":0,"cw5":0,"cw1":0,"cr":0,"prompts":[],"notifications":[],"files":{},"bash_commands":[],"last_text":null,"last_is_error":false}'
+
 _ccage_handoff_collect() {
     local jsonl="$1"
     [ -f "$jsonl" ] || {
-        printf '%s\n' '{"session_id":null,"first_ts":null,"last_ts":null,"last_model":null,"assistant_count":0,"in":0,"out":0,"cw":0,"cw5":0,"cw1":0,"cr":0,"prompts":[],"notifications":[],"files":{},"bash_commands":[],"last_text":null,"last_is_error":false}'
+        printf '%s\n' "$_CCAGE_HANDOFF_COLLECT_DEFAULTS"
         return 0
     }
     jq -cRn "$_CCAGE_HANDOFF_JQ_DEFS"'
@@ -412,16 +424,29 @@ _ccage_handoff_collect() {
                   | ( if ($r.message.model // null) != null
                         and $r.message.model != "<synthetic>"
                       then .last_model = $r.message.model else . end )
-                  | .in += ($r.message.usage.input_tokens // 0)
-                  | .out += ($r.message.usage.output_tokens // 0)
-                  | .cw  += ($r.message.usage.cache_creation_input_tokens // 0)
+                  # Every usage field goes through num/obj rather than `// 0`.
+                  # `//` only defends against null: a `usage` that is a string,
+                  # or a `cache_creation` that is a number, raises a jq type
+                  # error, and a type error ANYWHERE aborts the whole reduce —
+                  # so one malformed record erased the entire transcript and
+                  # the brief rendered as a plausible-looking empty session
+                  # (no prompts, no files, $0.00) for a session that really
+                  # happened. For a recovery tool that silent lie is worse
+                  # than a crash. Guarding per field keeps the data from every
+                  # well-formed record instead.
+                  # (No apostrophes here: the whole program is single-quoted.)
+                  | ($r.message | obj | .usage | obj) as $u
+                  | ($u.cache_creation | obj) as $cc
+                  | .in  += ($u.input_tokens | num)
+                  | .out += ($u.output_tokens | num)
+                  | .cw  += ($u.cache_creation_input_tokens | num)
                   # Cache-write split by TTL — priced differently (1.25x vs 2x
                   # input). Absent on transcripts written before Claude Code
                   # reported the split; the caller falls back to attributing an
                   # unsplit total to the 5-minute bucket.
-                  | .cw5 += ($r.message.usage.cache_creation.ephemeral_5m_input_tokens // 0)
-                  | .cw1 += ($r.message.usage.cache_creation.ephemeral_1h_input_tokens // 0)
-                  | .cr  += ($r.message.usage.cache_read_input_tokens // 0)
+                  | .cw5 += ($cc.ephemeral_5m_input_tokens | num)
+                  | .cw1 += ($cc.ephemeral_1h_input_tokens | num)
+                  | .cr  += ($u.cache_read_input_tokens | num)
                   | reduce ($r.message.content[]?
                             | select(.type == "text" or .type == "tool_use")) as $c (.;
                       if $c.type == "text" and (($c.text // "") | length) > 0 then
@@ -465,7 +490,7 @@ _ccage_handoff_collect() {
                       else . end )
                 else . end )
         )
-    ' "$jsonl" 2>/dev/null
+    ' "$jsonl" 2>/dev/null || printf '%s\n' "$_CCAGE_HANDOFF_COLLECT_DEFAULTS"
 }
 
 # ---- delegated (subagent) work ----------------------------------------------
@@ -798,6 +823,10 @@ _ccage_handoff_compose_brief() {
     )
     : "${session_id:=unknown}"; : "${model:=unknown}"
     : "${in_tok:=0}"; : "${out_tok:=0}"; : "${cw_tok:=0}"; : "${cr_tok:=0}"
+    # These two were the only numerics without a default, so an empty collect
+    # blob reached `[ "$shown_n" -gt "$total_prompts" ]` as an empty string and
+    # printed `[: : integer expected` into the middle of the brief.
+    : "${assistant_count:=0}"; : "${prompt_count:=0}"
 
     printf '# Handoff: %s\n\n' "$session_id"
     printf '**Project:** %s\n' "${PWD:-unknown}"
