@@ -512,6 +512,15 @@ _CCAGE_HANDOFF_JQ_NEUTRALIZE='
         | gsub("\n(?<h>#{1,6} )"; "\n\\\(.h)");
 '
 
+# Pipe-escape for any value interpolated into a Markdown table cell. Both
+# tables need it and for different reasons: an agent's terminal state is free
+# text from the server, and a file path may legally contain `|` on both Linux
+# and macOS. An unescaped pipe silently splits one row into extra columns, so
+# the row no longer lines up with its header.
+_CCAGE_HANDOFF_JQ_CELL='
+    def cell: tostring | gsub("\\|"; "\\|");
+'
+
 _ccage_handoff_subagents_dir() {
     printf '%s\n' "${1%.jsonl}/subagents"
 }
@@ -870,12 +879,11 @@ _ccage_handoff_compose_brief() {
         printf '\n## Delegated work\n\n'
         printf '| Agent | Type | Model | Turns | Cost | Files | Ended |\n'
         printf '|---|---|---|---:|---:|---:|---|\n'
-        # Every cell is pipe-escaped: an API-error message containing `|`
-        # (they are free text from the server) would otherwise split the row
-        # into extra columns and corrupt the table. Newlines are already
-        # handled upstream by the split("\n")[0] on `ended`.
-        jq -r --argjson n "$_CCAGE_HANDOFF_MAX_AGENTS" '
-            def cell: tostring | gsub("\\|"; "\\|");
+        # Every cell is pipe-escaped (see _CCAGE_HANDOFF_JQ_CELL): an API-error
+        # message containing `|` — free text from the server — would otherwise
+        # split the row into extra columns. Newlines are already handled
+        # upstream by the split("\n")[0] on `ended`.
+        jq -r --argjson n "$_CCAGE_HANDOFF_MAX_AGENTS" "$_CCAGE_HANDOFF_JQ_CELL"'
             sort_by(-.cost) | .[0:$n] | .[]
             | "| \(.name|cell) | \(.type|cell) | \(.model|cell) | \(.turns) | $\(.cost) | \(.files | length) | \(.ended|cell) |"
         ' <<<"$subagents"
@@ -890,7 +898,7 @@ _ccage_handoff_compose_brief() {
     # thread and every subagent, with `By` naming who touched the path.
     printf '\n## Files touched\n\n'
     local files_table
-    files_table=$(jq -r --argjson subagents "$subagents" '
+    files_table=$(jq -r --argjson subagents "$subagents" "$_CCAGE_HANDOFF_JQ_CELL"'
         ([{by: "main", files: .files}] + [$subagents[] | {by: .name, files: .files}])
         | map(.by as $b | .files | to_entries
               | map({path: .key, by: $b, r: .value.Read, e: .value.Edit, w: .value.Write}))
@@ -907,7 +915,7 @@ _ccage_handoff_compose_brief() {
                       else "\($names | length) sources" end)
           })
         | sort_by(-(.r + .e + .w))
-        | .[] | "\(.path)\t\(.r)\t\(.e)\t\(.w)\t\(.by)"
+        | .[] | "\(.path|cell)\t\(.r)\t\(.e)\t\(.w)\t\(.by|cell)"
     ' <<<"$handoff_data")
     if [ -n "$files_table" ]; then
         printf '| Path | Read | Edit | Write | By |\n'

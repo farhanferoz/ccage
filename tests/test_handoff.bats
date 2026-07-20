@@ -435,6 +435,23 @@ print(json.dumps({'type':'user','timestamp':'2026-07-20T09:00:00.000Z',
     [ "$(printf '%s' "$row" | grep -o '[^\]|' | wc -l)" = 7 ]
 }
 
+# The Files-touched table is assembled in awk, so the jq `cell` def guarding the
+# Delegated-work table was unreachable from it. A path containing `|` is legal
+# on both Linux and macOS.
+@test "files: a pipe in a path cannot split the Files touched table" {
+    local f="$BATS_TEST_TMPDIR/pipepath.jsonl"
+    printf '%s\n' '{"type":"assistant","timestamp":"2026-07-20T09:00:00.000Z","message":{"role":"assistant","model":"claude-sonnet-5","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/tmp/we|rd/pa|th.py"}}],"usage":{"input_tokens":10,"output_tokens":10}}}' > "$f"
+
+    run _ccage_handoff_generate "$f" --stdout
+    [ "$status" -eq 0 ]
+    local row
+    row=$(printf '%s\n' "$output" | grep 'th.py')
+    [[ "$row" == *'\|'* ]]
+    # 5 cells declared by the header, so 5 unescaped delimiters after the path's
+    # own pipes are escaped. Counting is what fails if `cell` is not applied.
+    [ "$(printf '%s' "$row" | grep -o '[^\]|' | wc -l)" = 5 ]
+}
+
 @test "handoff: a value-taking flag given last exits 2 instead of spinning" {
     # These four used to `shift 2` with one argument left: the shift fails,
     # nothing is consumed, and the loop spins at 100% CPU. The guard was shipped
