@@ -314,6 +314,23 @@ while time.time() < deadline:
                 f.write("done\n")
             confirmed = True
             deadline = time.time() + 3
+    elif mode == "confirm_then_raise":
+        # Play the incident: the model checkpoints (sentinel + RESUME), and a
+        # live `--set soft=N` raises the threshold above the session's current
+        # occupancy. Both must land inside ONE poll interval so the watcher
+        # sees them together -- written back to back with no sleep between,
+        # against a 1s poll, so the tick cannot fall in the gap. (Pausing to
+        # stage them is not an option: un-pausing deliberately re-arms from
+        # NORMAL, which destroys the very state under test.)
+        if not confirmed and len(buf) > 20:
+            append_turn(300000, text=sentinel + " done")
+            with open(os.path.join(os.getcwd(), "RESUME.md"), "a") as f:
+                f.write("checkpoint\n")
+            with open(os.path.join(os.getcwd(), ".ccage-autock.conf"), "w") as f:
+                f.write("soft=50\n")             # 50% > the fixture's 30% occupancy
+            confirmed = True
+        if b"Resume the task" in buf:
+            break
     elif mode == "manual_clear":
         # Play a user-driven /clear (not the watcher's own): a fresh,
         # low-occupancy transcript appears under a new name, never through the
@@ -394,6 +411,22 @@ drive() {
     ! grep -q "HARD threshold" "$CAGE/ccage-autock.log"   # never hard-escalated
 }
 
+@test "a confirmed checkpoint still clears when a live --set raises soft above the current occupancy" {
+    # Live incident, v0.13.1: nudge at 35.1%, the model checkpointed, then
+    # `--set soft=45` landed while occupancy read 38.2%. The NUDGED state
+    # tested `pct < soft` BEFORE `_confirmed()`, so it cancelled the cycle,
+    # threw away a checkpoint that had already been written, and left the
+    # session parked -- the model had printed the sentinel and stopped, so no
+    # clear was ever coming. The confirmation must win over the raise.
+    drive confirm_then_raise "--soft 10 --hard 90 --poll 1"
+    [ "$status" -eq 0 ]
+    cap_has "b'auto-checkpoint'"                           # nudged at the low soft
+    grep -q "control update: soft=50%" "$CAGE/ccage-autock.log"   # the raise landed
+    grep -q "checkpoint confirmed" "$CAGE/ccage-autock.log"
+    cap_has "b'/clear'"                                    # ...and the clear followed
+    ! grep -q "cancelling nudge cycle" "$CAGE/ccage-autock.log"
+}
+
 @test "self-triggers off own occupancy: checkpoint -> /clear -> resume" {
     drive confirm "--soft 10 --hard 90 --poll 1"
     [ "$status" -eq 0 ]
@@ -431,6 +464,46 @@ print("UNIT_OK")
 PY
     [ "$status" -eq 0 ]
     [[ "$output" == *UNIT_OK* ]]
+}
+
+@test "watcher pidfiles are per-pid: teardown removes only its own, dead ones are swept" {
+    # W1: one shared .ccage-autock.pid was last-writer-wins and was removed
+    # unconditionally, so a second watcher starting (and then exiting) in the
+    # same directory erased a LIVE watcher's ownership — after which the next
+    # session's SessionStart hook deleted the conf/done state that watcher was
+    # still using. Each watcher now writes and removes ONLY its own record.
+    git init -q "$REPO" >/dev/null 2>&1 || skip "git unavailable"
+    run python3 - "$AUTO" "$REPO" <<'PY'
+import importlib.util, importlib.machinery, os, subprocess, sys
+loader = importlib.machinery.SourceFileLoader("ccageauto", sys.argv[1])
+spec = importlib.util.spec_from_loader("ccageauto", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+d = sys.argv[2]
+rec = lambda pid: os.path.join(d, ".ccage-autock.pid.%d" % pid)
+me = os.getpid()
+sib = subprocess.Popen(["sleep", "30"])          # a real, live sibling watcher
+
+m.write_watcher_pidfile(d, me)
+m.write_watcher_pidfile(d, sib.pid)              # must not clobber mine
+assert os.path.isfile(rec(me)), "sibling's write clobbered this watcher's record"
+assert os.path.isfile(rec(sib.pid))
+assert open(rec(me)).read().startswith("pid=%d\n" % me)
+
+m.remove_watcher_pidfile(d, me)                  # my teardown
+assert not os.path.exists(rec(me))
+assert os.path.isfile(rec(sib.pid)), "teardown removed a LIVE sibling's record"
+
+sib.kill(); sib.wait()                           # SIGKILL: no teardown of its own
+m.write_watcher_pidfile(d, me)
+assert os.path.isfile(rec(me))
+assert not os.path.exists(rec(sib.pid)), "dead sibling's record was not swept"
+left = sorted(n for n in os.listdir(d) if n.startswith(".ccage-autock.pid"))
+assert left == [os.path.basename(rec(me))], "unexpected pidfile litter: %r" % left
+print("UNIT_OK")
+PY
+    [ "$status" -eq 0 ]
+    [[ "$output" == *UNIT_OK* ]]
+    grep -q '^\.ccage-autock\.pid\*$' "$REPO/.git/info/exclude"
 }
 
 @test "a --final completion marker stands the watcher down before any /clear" {

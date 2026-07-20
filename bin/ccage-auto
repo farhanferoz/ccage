@@ -675,14 +675,26 @@ def session_done_mtime(cwd):
 
 
 # Liveness record for the ccage-auto watcher process itself: written when a
-# watched launch starts, removed when it exits. resume_autoload.sh reads this
+# watched launch starts, removed when it exits. resume_autoload.sh reads these
 # (pid + start-time token) to decide whether SOME watcher is still depending
 # on the marker files below before deleting them on a sibling session's
-# startup — see WATCHER_PIDFILE's docstring context and
-# plans/wave2-task6-findings.md for the incident that motivated this. Cheap
-# and unambiguous by construction: a specific pid to `kill -0`, not a
-# substring match over every process on the machine.
-WATCHER_PIDFILE = ".ccage-autock.pid"
+# startup — see plans/wave2-task6-findings.md for the incident that motivated
+# this. Cheap and unambiguous by construction: a specific pid to `kill -0`,
+# not a substring match over every process on the machine.
+#
+# ONE FILE PER WATCHER (`.ccage-autock.pid.<pid>`), not one shared file.
+# Concurrent watchers in a single directory are an observed condition here, and
+# a single shared record reopened the very bug this mechanism exists to close:
+# watcher B starting in A's directory overwrote the record (last-writer-wins),
+# and B's teardown then removed it unconditionally — leaving live watcher A
+# unrepresented, so the next sibling session deleted the state A depends on.
+# Per-pid files make both write and remove concurrent-safe by construction
+# (each watcher only ever touches its own), and the hook's rule becomes "ANY
+# live pid recorded here owns this directory's state", which is still an O(1)
+# `kill -0` per file.
+WATCHER_PIDFILE_BASE = ".ccage-autock.pid"
+# One git-exclude pattern covers the per-pid records and the temp files below.
+WATCHER_PIDFILE_GLOB = WATCHER_PIDFILE_BASE + "*"
 
 
 def _parse_etime(s):
@@ -735,30 +747,96 @@ def _process_start_epoch(pid):
     return time.time() - elapsed
 
 
-def watcher_pidfile_path(cwd):
-    return os.path.join(cwd, WATCHER_PIDFILE)
+def watcher_pidfile_path(cwd, pid):
+    return os.path.join(cwd, "%s.%d" % (WATCHER_PIDFILE_BASE, pid))
+
+
+def _pid_alive(pid):
+    """True if a process with `pid` exists. EPERM means it exists but belongs
+    to another user — still alive, so still owning its record."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
+def _read_watcher_pid(path):
+    """The `pid=` value from a watcher liveness record, or None."""
+    try:
+        with open(path) as f:
+            for line in f:
+                if line.startswith("pid="):
+                    return int(line[4:].strip())
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _sweep_dead_watcher_pidfiles(cwd, keep_pid):
+    """Delete liveness records whose watcher is gone. Per-pid records are only
+    ever removed by their own watcher's teardown, so one killed with SIGKILL
+    (or a temp file from an interrupted write) would otherwise linger forever.
+    Harmless if it does — the hook already treats a dead pid as no watcher —
+    so this is litter control, and deliberately conservative: an unreadable or
+    still-live record is left alone."""
+    try:
+        names = os.listdir(cwd)
+    except OSError:
+        return
+    for name in names:
+        if not name.startswith(WATCHER_PIDFILE_BASE):
+            continue
+        path = os.path.join(cwd, name)
+        pid = _read_watcher_pid(path)
+        if pid is None or pid == keep_pid or _pid_alive(pid):
+            continue
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def write_watcher_pidfile(cwd, pid):
-    """Record `pid` (this ccage-auto process) as the live watcher for cwd,
-    with a start-time token alongside it so a later reader can detect pid
-    reuse (see resume_autoload.sh). Best-effort: a failure here just means
-    the hook falls back to its own conservative default instead of blocking
-    anything on a file that was never written."""
+    """Record `pid` (this ccage-auto process) as A live watcher for cwd, with a
+    start-time token alongside it so a later reader can detect pid reuse (see
+    resume_autoload.sh). Written to a temp file and renamed, so a hook reading
+    the directory mid-write never sees a truncated record (which would read as
+    "no watcher" and clear state this watcher still depends on). Best-effort: a
+    failure here just means the hook falls back to its own conservative default
+    instead of blocking anything on a file that was never written."""
     start = _process_start_epoch(pid)
+    path = watcher_pidfile_path(cwd, pid)
+    # Temp name deliberately shares the WATCHER_PIDFILE_BASE prefix (so the
+    # sweep above reclaims it) while NOT matching the hook's `.pid.<pid>` read
+    # glob (so a leftover temp is never mistaken for a record).
+    tmp = os.path.join(cwd, "%stmp.%d" % (WATCHER_PIDFILE_BASE, pid))
     try:
-        with open(watcher_pidfile_path(cwd), "w") as f:
+        with open(tmp, "w") as f:
             f.write("pid=%d\n" % pid)
             if start is not None:
                 f.write("start=%d\n" % int(start))
-        _git_exclude(cwd, WATCHER_PIDFILE)
+        os.replace(tmp, path)
+        _git_exclude(cwd, WATCHER_PIDFILE_GLOB)
     except OSError:
-        pass
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return
+    _sweep_dead_watcher_pidfiles(cwd, pid)
 
 
-def remove_watcher_pidfile(cwd):
+def remove_watcher_pidfile(cwd, pid):
+    """Remove only THIS watcher's record. A watcher never touches a sibling's:
+    that is what keeps a concurrent watcher in the same directory represented
+    after this one exits."""
     try:
-        os.remove(watcher_pidfile_path(cwd))
+        os.remove(watcher_pidfile_path(cwd, pid))
     except OSError:
         pass
 
@@ -1299,18 +1377,31 @@ class Watcher:
                 continue
 
             if self.state == self.NUDGED:
-                if pct < cfg.soft:
-                    # Occupancy fell below soft (manual /clear, a stale arm, a
-                    # threshold raise): the nudge is moot. Never re-nudge or
-                    # escalate below the live threshold — stand down instead.
-                    self._log("occupancy %.1f%% < soft %.0f%% — cancelling "
-                              "nudge cycle; back to NORMAL" % (pct, cfg.soft))
-                    self.state = self.NORMAL
-                elif self._confirmed():
+                if self._confirmed():
+                    # FIRST, ahead of the below-soft cancellation: a confirmed
+                    # checkpoint is work the model has already done, and the
+                    # only thing that finishes it is the /clear. Observed:
+                    # nudge at 35.1%, model checkpointed, then a live
+                    # `--set soft=45` raised the threshold past the current
+                    # 38.2% — the cancellation ran first, discarded the
+                    # confirmation, and the session sat parked forever with
+                    # its checkpoint written and no clear (the model had
+                    # printed the sentinel and stopped, so nothing else was
+                    # coming). Safe to prefer: _confirmed() needs the sentinel
+                    # in text logged SINCE the nudge, so it cannot fire on a
+                    # stale arm or a manual /clear.
                     self._log("checkpoint confirmed at %.1f%% — clearing" % pct)
                     self._do_clear()
                     self.cooldown_until = time.time() + cfg.cooldown
                     self.state = self.COOLDOWN
+                elif pct < cfg.soft:
+                    # Occupancy fell below soft (manual /clear, a stale arm, a
+                    # threshold raise) with nothing checkpointed: the nudge is
+                    # moot. Never re-nudge or escalate below the live
+                    # threshold — stand down instead.
+                    self._log("occupancy %.1f%% < soft %.0f%% — cancelling "
+                              "nudge cycle; back to NORMAL" % (pct, cfg.soft))
+                    self.state = self.NORMAL
                 elif pct >= cfg.hard and not self.hard_fired:
                     # Fire the forceful escalation ONCE per nudge cycle. Re-firing
                     # every poll would re-interrupt the model mid-checkpoint and
@@ -1649,7 +1740,7 @@ def run_proxy(cfg, cwd, sdir, logpath):
         if raw and old_attr is not None:
             termios.tcsetattr(0, termios.TCSADRAIN, old_attr)
         if cfg.enabled:
-            remove_watcher_pidfile(cwd)
+            remove_watcher_pidfile(cwd, os.getpid())
         try:
             logf.close()
         except Exception:
