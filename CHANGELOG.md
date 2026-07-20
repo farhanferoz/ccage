@@ -2,6 +2,14 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed — `ccage-auto-yolo --soft 45` silently launched at the default threshold
+- **Launch flags were only parsed up to the first token ccage-auto does not own.** A user alias prepends one by construction — `ccage-auto-yolo` is `ccage-auto --dangerously-skip-permissions` — so `--soft`, `--hard`, `--status`, `--poll`, `--window` and `--weekly-floor` after it were never seen: the session launched at the *default* soft threshold and the flags were handed to `claude`, which rejected them (`error: unknown option '--soft'`). Only the control subcommands (`--set`/`--pause`/`--resume`/`--reset`) had been fixed for this. Every flag ccage-auto owns is now recognised anywhere before a literal `--`; unrecognised tokens still reach `claude` in order, and `--` still ends ccage-auto's claim on the line, so `ccage-auto --status -- --soft 99` leaves thresholds alone.
+
+### Changed — `/checkpoint --from-session` no longer re-merges a session that already checkpointed
+- **Recovery is for a session that ended *without* a checkpoint; it had no way to tell.** It generated the brief and merged regardless, spending a paid turn to re-state settled work as if it were new. It now compares `RESUME.md`'s mtime against the recovered session's last activity (and corroborates against whether that session touched `RESUME.md` at all), reports that the state was already saved, and stops without editing. This is the common case under `ccage-auto`, where every `/clear` rotates to a new transcript — so the previous transcript is usually the pre-clear segment of a run that did checkpoint.
+
 ## [0.14.0] — 2026-07-20
 
 ### Fixed — `ccage handoff` needed a manual `CLAUDE_CONFIG_DIR=` prefix to find any session

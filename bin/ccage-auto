@@ -313,10 +313,21 @@ class Config:
             instead of raising IndexError."""
             return args[i + 1] if i + 1 < len(args) else None
 
+        # Scan the WHOLE line for ccage-auto's own flags, not just the prefix up
+        # to the first token we don't recognise. A user alias prepends flags —
+        # `ccage-auto-yolo` is `ccage-auto --dangerously-skip-permissions` — so
+        # stopping at the first unknown token meant `ccage-auto-yolo --soft 45`
+        # silently launched at the DEFAULT soft and handed `--soft 45` to
+        # claude, which rejected it. Task 6 fixed this for the control
+        # subcommands (--set/--pause/...); it applies just as much to the launch
+        # flags. Everything unrecognised still goes to claude in order, and a
+        # literal `--` still ends ccage-auto's claim on the line entirely.
+        claude_args = []
         while i < len(args):
             a = args[i]
             if a == "--":
-                return args[i + 1:]
+                claude_args.extend(args[i + 1:])
+                return claude_args
             elif a == "--autock":
                 self.enabled = True
             elif a == "--no-autock":
@@ -345,23 +356,23 @@ class Config:
                 self.weekly_floor = _num(take(), self.weekly_floor)
                 i += 1
             else:
-                # First token we don't recognise: the rest is claude's. But a
-                # ccage-auto-shaped flag that's merely misspelled (--hardd,
-                # --softish, a --set that reached here instead of being
-                # intercepted in main()) would otherwise vanish silently into
-                # claude's argv — warn so the mistake is visible. Prefix match
-                # (--set*/--soft*/--hard*), not a word-boundary regex: the
-                # typo shape we care about is "extra trailing characters",
-                # which a \b anchor would miss (no boundary between two word
-                # characters).
+                # Not ours: hand it to claude, in order, and keep scanning for
+                # our own flags further along the line. A ccage-auto-shaped
+                # flag that's merely misspelled (--hardd, --softish, a --set
+                # that reached here instead of being intercepted in main())
+                # would otherwise vanish silently into claude's argv — warn so
+                # the mistake is visible. Prefix match (--set*/--soft*/--hard*),
+                # not a word-boundary regex: the typo shape we care about is
+                # "extra trailing characters", which a \b anchor would miss (no
+                # boundary between two word characters).
                 if a.startswith(("--set", "--soft", "--hard")):
                     sys.stderr.write(
                         "[ccage-auto] warning: '%s' looks like a ccage-auto "
                         "flag but wasn't recognised — forwarding it to claude "
                         "verbatim; check the spelling\n" % a)
-                return args[i:]
+                claude_args.append(a)
             i += 1
-        return []
+        return claude_args
 
     def window_for(self, model):
         """Resolve the context window for a model id, most specific first:
