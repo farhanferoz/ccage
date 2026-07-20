@@ -750,18 +750,128 @@ _ccage_handoff_generate() {
     fi
 }
 
+# ---- cage resolution -------------------------------------------------------
+# `ccage handoff` runs from a plain shell, where CLAUDE_CONFIG_DIR is unset: the
+# claude() wrapper exports it with `local -x` precisely so it never leaks out.
+# Defaulting to ~/.claude therefore looked in the one directory that holds no
+# cage sessions. Resolution order, most explicit first:
+#
+#   1. --config-dir DIR
+#   2. $CLAUDE_CONFIG_DIR                       (unchanged behaviour when set)
+#   3. _ccage_config_dir_for from the isolation lib, when bin/ccage managed to
+#      source it — the real keying rule, so CCAGE_ROOT/CCAGE_PREFIX/CCAGE_SLOT
+#      and a user's _ccage_config_dir_override are all honoured
+#   4. scan every cage for an .owning_path naming this project
+#   5. give up, naming what was actually searched
+#
+# Rules 3 and 4 both require the cage to hold sessions for this project's slug;
+# a cage that exists but has never run here is not an answer, and falling
+# through to the scan finds the sibling slot that does. 76 cages exist on the
+# author's machine and three project paths own several each (CCAGE_SLOT), so
+# rule 4 must disambiguate rather than take the first hit.
+
+# Newest .jsonl in a session dir, or nothing. `ls -t` rather than `stat`: BSD
+# stat takes -f, GNU takes -c, and ordering is all we need.
+_ccage_handoff_newest_session() {
+    local dir="$1"
+    [ -d "$dir" ] || return 1
+    local newest
+    # shellcheck disable=SC2012  # ls -t is fine here — session UUIDs are hex+dashes
+    newest=$(ls -t "$dir"/*.jsonl 2>/dev/null | head -1)
+    [ -n "$newest" ] && [ -f "$newest" ] || return 1
+    printf '%s\n' "$newest"
+}
+
+# _ccage_handoff_resolve_config_dir PROJECT SLUG [EXPLICIT_DIR]
+_ccage_handoff_resolve_config_dir() {
+    local project="$1" slug="$2" explicit="${3:-}"
+
+    if [ -n "$explicit" ]; then
+        printf '%s\n' "$explicit"
+        return 0
+    fi
+    if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+        printf '%s\n' "$CLAUDE_CONFIG_DIR"
+        return 0
+    fi
+
+    local keyed=""
+    if command -v _ccage_config_dir_for >/dev/null 2>&1; then
+        keyed=$(_ccage_config_dir_for "$project" 2>/dev/null)
+        if [ -n "$keyed" ] && _ccage_handoff_newest_session "$keyed/projects/$slug" >/dev/null; then
+            printf '%s\n' "$keyed"
+            return 0
+        fi
+    fi
+
+    # Rule 4 — .owning_path scan.
+    local root="${CCAGE_ROOT:-$HOME}"
+    local cage_prefix="${CCAGE_PREFIX:-.claude-}"
+    local matched=() newests=()
+    local cand owner newest
+    for cand in "$root/$cage_prefix"*; do
+        [ -d "$cand" ] || continue
+        [ -f "$cand/.owning_path" ] || continue
+        owner=""
+        { IFS= read -r owner < "$cand/.owning_path"; } 2>/dev/null
+        [ "$owner" = "$project" ] || continue
+        matched+=("$cand")
+        if newest=$(_ccage_handoff_newest_session "$cand/projects/$slug"); then
+            newests+=("$newest")
+        fi
+    done
+
+    if [ ${#newests[@]} -gt 0 ]; then
+        local best chosen
+        # shellcheck disable=SC2012  # ordering only; these are ccage-generated paths
+        best=$(ls -t ${newests[@]+"${newests[@]}"} 2>/dev/null | head -1)
+        chosen="${best%/projects/*}"
+        if [ ${#matched[@]} -gt 1 ]; then
+            printf 'ccage handoff: %s cages own %s:\n' "${#matched[@]}" "$project" >&2
+            for cand in ${matched[@]+"${matched[@]}"}; do
+                printf '  %s\n' "$cand" >&2
+            done
+            printf 'ccage handoff: using %s (most recent session)\n' "$chosen" >&2
+        fi
+        printf '%s\n' "$chosen"
+        return 0
+    fi
+
+    # Rule 5 — name what was searched, never the misleading ~/.claude.
+    printf 'ccage handoff: no cage with sessions for %s\n' "$project" >&2
+    if [ -n "$keyed" ]; then
+        local keyed_note=' (does not exist)'
+        if [ -d "$keyed" ]; then
+            keyed_note=' (exists, but holds no sessions for this project)'
+        fi
+        printf '  keyed cage:  %s%s\n' "$keyed" "$keyed_note" >&2
+    fi
+    if [ ${#matched[@]} -gt 0 ]; then
+        printf '  cages owning this path but holding no sessions for it:\n' >&2
+        for cand in ${matched[@]+"${matched[@]}"}; do
+            printf '    %s\n' "$cand" >&2
+        done
+    else
+        printf '  scanned:     %s%s* (no .owning_path matched)\n' "$root/" "$cage_prefix" >&2
+    fi
+    printf 'ccage handoff: pass --config-dir DIR to name the cage explicitly.\n' >&2
+    return 2
+}
+
 # ---- main entry — exposed via bin/ccage handoff ----------------------------
 # Args mirror ccage handoff subcommand:
 #   ccage handoff [<session-id-prefix>] [--output FILE | --stdout]
-#                 [--project PATH] [--max-prompts N]
+#                 [--project PATH] [--config-dir DIR] [--max-prompts N]
 _ccage_handoff_main() {
     local prefix=""
     local project="$PWD"
+    local config_dir_flag=""
     local pass_args=()
 
     while [ $# -gt 0 ]; do
         case "$1" in
             --project)     project="$2"; shift 2 ;;
+            --config-dir)  config_dir_flag="$2"; shift 2 ;;
             --output|--max-prompts) pass_args+=("$1" "$2"); shift 2 ;;
             --stdout)      pass_args+=("$1"); shift ;;
             -h|--help)
@@ -776,10 +886,15 @@ Options:
   --output FILE        Write brief to FILE.
   --max-prompts N      Cap user-prompt list at N most-recent (default 20).
   --project PATH       Use PATH (not PWD) when deriving the project slug.
+  --config-dir DIR     Read sessions from cage DIR instead of resolving it.
   -h, --help           This message.
 
 Defaults: writes to \${CCAGE_HANDOFF_DIR:-~/.local/share/ccage/handoffs}/
           <slug>-<session-prefix>-<timestamp>.md.
+
+The cage is resolved without \$CLAUDE_CONFIG_DIR: --config-dir, then
+\$CLAUDE_CONFIG_DIR, then ccage's own keying rule, then a scan of every
+cage's .owning_path for one naming this project.
 EOF
                 return 0
                 ;;
@@ -793,9 +908,10 @@ EOF
         esac
     done
 
-    local config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
     local slug
     slug=$(_ccage_handoff_pwd_to_slug "$project")
+    local config_dir
+    config_dir=$(_ccage_handoff_resolve_config_dir "$project" "$slug" "$config_dir_flag") || return $?
     local session_dir="$config_dir/projects/$slug"
 
     local jsonl

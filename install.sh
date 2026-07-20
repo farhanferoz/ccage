@@ -135,6 +135,11 @@ install_file "$REPO_ROOT/share/claude-isolation.sh" "$rcd/claude-isolation.sh"
 
 if [ "$install_cli" = 1 ]; then
     install_file "$REPO_ROOT/share/ccage-handoff.sh"    "$prefix/share/ccage/ccage-handoff.sh"
+    # Second copy of the isolation lib, beside the CLI's other libs. bin/ccage
+    # sources it to reuse _ccage_config_dir_for, which is how `ccage handoff`
+    # finds a project's cage from a plain shell. The <rcd> copy above is for
+    # interactive shells and is not on the CLI's search path in every layout.
+    install_file "$REPO_ROOT/share/claude-isolation.sh" "$prefix/share/ccage/claude-isolation.sh"
     install_file "$REPO_ROOT/share/ccage-doctor.sh"     "$prefix/share/ccage/ccage-doctor.sh"
     install_file "$REPO_ROOT/share/ccage-enable-mcp.sh" "$prefix/share/ccage/ccage-enable-mcp.sh"
     install_file "$REPO_ROOT/bin/ccage"                 "$prefix/bin/ccage"  0755

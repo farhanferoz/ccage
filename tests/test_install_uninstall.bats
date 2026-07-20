@@ -118,6 +118,10 @@ setup() {
     [ -x "$FAKE_HOME/.local/bin/ccage" ]
     [ -f "$FAKE_HOME/.local/share/ccage/ccage-handoff.sh" ]
     [ -f "$FAKE_HOME/.local/share/ccage/ccage-enable-mcp.sh" ]
+    # bin/ccage sources this to reuse _ccage_config_dir_for; without it, cage
+    # resolution silently loses its keying rule in an installed layout and
+    # falls back to scanning .owning_path markers.
+    [ -f "$FAKE_HOME/.local/share/ccage/claude-isolation.sh" ]
 }
 
 @test "install: circuit-breaker lib and ccb-report land at prefix" {
@@ -132,6 +136,7 @@ setup() {
     [ ! -e "$FAKE_HOME/.local/bin/ccage" ]
     [ ! -e "$FAKE_HOME/.local/share/ccage/ccage-handoff.sh" ]
     [ ! -e "$FAKE_HOME/.local/share/ccage/ccage-enable-mcp.sh" ]
+    [ ! -e "$FAKE_HOME/.local/share/ccage/claude-isolation.sh" ]
 }
 
 @test "uninstall: bin/ccage and libraries removed" {
@@ -140,6 +145,7 @@ setup() {
     [ ! -e "$FAKE_HOME/.local/bin/ccage" ]
     [ ! -e "$FAKE_HOME/.local/share/ccage/ccage-handoff.sh" ]
     [ ! -e "$FAKE_HOME/.local/share/ccage/ccage-enable-mcp.sh" ]
+    [ ! -e "$FAKE_HOME/.local/share/ccage/claude-isolation.sh" ]
 }
 
 @test "installed bin/ccage handoff --help works (no source-tree access)" {

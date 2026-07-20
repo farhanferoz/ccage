@@ -69,6 +69,12 @@ if [ -f "$prefix/share/ccage/ccage-enable-mcp.sh" ]; then
     run rm -f "$prefix/share/ccage/ccage-enable-mcp.sh"
     printf 'removed %s/share/ccage/ccage-enable-mcp.sh\n' "$prefix"
 fi
+# The CLI's copy of the isolation lib. The <rcd> copy is removed separately
+# below with the rest of the interactive-shell files.
+if [ -f "$prefix/share/ccage/claude-isolation.sh" ]; then
+    run rm -f "$prefix/share/ccage/claude-isolation.sh"
+    printf 'removed %s/share/ccage/claude-isolation.sh\n' "$prefix"
+fi
 # rmdir empty share/ccage dir if we left it behind, but don't force.
 if [ -d "$prefix/share/ccage" ]; then
     if [ "$dry_run" = 1 ]; then

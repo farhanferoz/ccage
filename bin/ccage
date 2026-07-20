@@ -46,10 +46,38 @@ _ccage_resolve_lib() {
     return 2
 }
 
+# Source the isolation lib (and a user's overrides companion) so subcommands can
+# reuse ccage's real cage-keying rule. A plain shell has no CLAUDE_CONFIG_DIR —
+# the claude() wrapper exports it with `local -x` so it never leaks — so without
+# this, `ccage handoff` had no way to find the cage owning the current project.
+#
+# The overrides file is what an interactive shell loads after the lib; it is
+# also where _CCAGE_OVERRIDE_ACTIVE=1 is set, so skipping it would silently
+# ignore a user's _ccage_config_dir_override. Both are optional: absent, cage
+# resolution falls back to scanning .owning_path markers.
+_ccage_source_isolation() {
+    local lib_dir="$1" iso rcd
+    for iso in "$lib_dir/claude-isolation.sh" "$HOME/.bashrc.d/claude-isolation.sh" "$HOME/.zshrc.d/claude-isolation.sh"; do
+        if [ -r "$iso" ]; then
+            # shellcheck source=../share/claude-isolation.sh disable=SC1091
+            . "$iso"
+            break
+        fi
+    done
+    for rcd in "$HOME/.bashrc.d" "$HOME/.zshrc.d"; do
+        if [ -r "$rcd/claude-overrides.sh" ]; then
+            # shellcheck disable=SC1091  # user-supplied, may not exist
+            . "$rcd/claude-overrides.sh"
+            break
+        fi
+    done
+}
+
 case "${1:-}" in
     handoff)
         shift
         CCAGE_LIB=$(_ccage_resolve_lib) || exit $?
+        _ccage_source_isolation "$CCAGE_LIB"
         # shellcheck source=../share/ccage-handoff.sh disable=SC1091
         . "$CCAGE_LIB/ccage-handoff.sh"
         _ccage_handoff_main "$@"

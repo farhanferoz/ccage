@@ -251,6 +251,147 @@ STUB
     [[ "$stderr" == *"unknown"* ]] || [[ "$stderr" == *"usage"* ]]
 }
 
+# ===== cage resolution (no CLAUDE_CONFIG_DIR) =====
+#
+# `ccage handoff` runs from a plain shell, where CLAUDE_CONFIG_DIR is unset by
+# design — the claude() wrapper exports it with `local -x`. The old default of
+# ~/.claude therefore pointed at the one directory holding no cage sessions, and
+# every invocation needed a manual `CLAUDE_CONFIG_DIR=` prefix. Each test below
+# pins one rung of the resolution order.
+
+# Build a fake cage owning $2 with one session for it. Echoes the cage path.
+_mk_cage() {
+    local cage="$1" owner="$2" stamp="${3:-}"
+    local slug sd
+    slug="$(_ccage_handoff_pwd_to_slug "$owner")"
+    sd="$cage/projects/$slug"
+    mkdir -p "$sd"
+    printf '%s\n' "$owner" > "$cage/.owning_path"
+    cp "$FIXTURES/minimal.jsonl" "$sd/session-001.jsonl"
+    if [ -n "$stamp" ]; then
+        touch -t "$stamp" "$sd/session-001.jsonl"
+    fi
+    printf '%s\n' "$cage"
+}
+
+@test "resolve: --config-dir and CLAUDE_CONFIG_DIR outrank cage keying" {
+    local proj="$BATS_TEST_TMPDIR/proj"
+    mkdir -p "$proj"
+    local slug
+    slug="$(_ccage_handoff_pwd_to_slug "$proj")"
+
+    unset CLAUDE_CONFIG_DIR
+    run _ccage_handoff_resolve_config_dir "$proj" "$slug" /explicit/dir
+    [ "$status" -eq 0 ]
+    [ "$output" = /explicit/dir ]
+
+    # An explicit dir wins even over an exported CLAUDE_CONFIG_DIR.
+    export CLAUDE_CONFIG_DIR=/env/dir
+    run _ccage_handoff_resolve_config_dir "$proj" "$slug" /explicit/dir
+    [ "$output" = /explicit/dir ]
+    run _ccage_handoff_resolve_config_dir "$proj" "$slug" ""
+    [ "$output" = /env/dir ]
+}
+
+@test "resolve: uses ccage's keying rule when the isolation lib is available" {
+    # shellcheck source=../share/claude-isolation.sh disable=SC1091
+    source "$REPO_ROOT/share/claude-isolation.sh"
+    unset CLAUDE_CONFIG_DIR
+    export CCAGE_ROOT="$BATS_TEST_TMPDIR/cages"
+    export CCAGE_PREFIX=.cage-
+    mkdir -p "$CCAGE_ROOT"
+
+    local proj="$BATS_TEST_TMPDIR/keyed-proj"
+    mkdir -p "$proj"
+    local slug
+    slug="$(_ccage_handoff_pwd_to_slug "$proj")"
+    _mk_cage "$CCAGE_ROOT/.cage-keyed-proj" "$proj" >/dev/null
+
+    run _ccage_handoff_resolve_config_dir "$proj" "$slug" ""
+    [ "$status" -eq 0 ]
+    [ "$output" = "$CCAGE_ROOT/.cage-keyed-proj" ]
+}
+
+@test "resolve: falls back to an .owning_path scan when keying misses" {
+    # No isolation lib sourced, so _ccage_config_dir_for does not exist — the
+    # same position bin/ccage is in on a machine that never installed it.
+    ! command -v _ccage_config_dir_for >/dev/null 2>&1
+    unset CLAUDE_CONFIG_DIR
+    export CCAGE_ROOT="$BATS_TEST_TMPDIR/cages"
+    export CCAGE_PREFIX=.cage-
+    mkdir -p "$CCAGE_ROOT"
+
+    # Cage name deliberately unrelated to the project basename, so ONLY the
+    # .owning_path marker can find it.
+    local proj="$BATS_TEST_TMPDIR/scan-proj"
+    mkdir -p "$proj"
+    local slug
+    slug="$(_ccage_handoff_pwd_to_slug "$proj")"
+    _mk_cage "$CCAGE_ROOT/.cage-something-else" "$proj" >/dev/null
+    # A decoy cage owning a different project must not be selected.
+    local other="$BATS_TEST_TMPDIR/other-proj"
+    mkdir -p "$other"
+    _mk_cage "$CCAGE_ROOT/.cage-decoy" "$other" >/dev/null
+
+    run _ccage_handoff_resolve_config_dir "$proj" "$slug" ""
+    [ "$status" -eq 0 ]
+    [ "$output" = "$CCAGE_ROOT/.cage-something-else" ]
+}
+
+@test "resolve: several cages own one path (CCAGE_SLOT) — newest session wins, and says so" {
+    unset CLAUDE_CONFIG_DIR
+    export CCAGE_ROOT="$BATS_TEST_TMPDIR/cages"
+    export CCAGE_PREFIX=.cage-
+    mkdir -p "$CCAGE_ROOT"
+
+    local proj="$BATS_TEST_TMPDIR/slotted"
+    mkdir -p "$proj"
+    local slug
+    slug="$(_ccage_handoff_pwd_to_slug "$proj")"
+    # POSIX -t format [[CC]YY]MMDDhhmm — portable across GNU and BSD touch.
+    _mk_cage "$CCAGE_ROOT/.cage-slotted"        "$proj" 202001010000 >/dev/null
+    _mk_cage "$CCAGE_ROOT/.cage-slotted--newer" "$proj" 203001010000 >/dev/null
+
+    run --separate-stderr _ccage_handoff_resolve_config_dir "$proj" "$slug" ""
+    [ "$status" -eq 0 ]
+    [ "$output" = "$CCAGE_ROOT/.cage-slotted--newer" ]
+    # Ambiguity is reported, not silently resolved.
+    [[ "$stderr" == *"2 cages own"* ]]
+    [[ "$stderr" == *".cage-slotted--newer"* ]]
+    [[ "$stderr" == *"most recent session"* ]]
+}
+
+@test "resolve: not-found names the cages searched, never ~/.claude" {
+    unset CLAUDE_CONFIG_DIR
+    export CCAGE_ROOT="$BATS_TEST_TMPDIR/cages"
+    export CCAGE_PREFIX=.cage-
+    mkdir -p "$CCAGE_ROOT"
+
+    local proj="$BATS_TEST_TMPDIR/orphan"
+    mkdir -p "$proj"
+    local slug
+    slug="$(_ccage_handoff_pwd_to_slug "$proj")"
+
+    run --separate-stderr _ccage_handoff_resolve_config_dir "$proj" "$slug" ""
+    [ "$status" -eq 2 ]
+    [[ "$stderr" == *"$CCAGE_ROOT/.cage-"* ]]
+    [[ "$stderr" == *"--config-dir"* ]]
+    [[ "$stderr" != *"$HOME/.claude/projects"* ]]
+}
+
+@test "bin/ccage handoff resolves the cage with CLAUDE_CONFIG_DIR unset" {
+    export CCAGE_ROOT="$BATS_TEST_TMPDIR/cages"
+    export CCAGE_PREFIX=.cage-
+    mkdir -p "$CCAGE_ROOT"
+    local proj="$BATS_TEST_TMPDIR/e2e-proj"
+    mkdir -p "$proj"
+    _mk_cage "$CCAGE_ROOT/.cage-e2e-proj" "$proj" >/dev/null
+
+    run env -u CLAUDE_CONFIG_DIR "$REPO_ROOT/bin/ccage" handoff --project "$proj" --stdout
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"session-001"* ]]
+}
+
 # Pricing regression guard. The 2026-05-16 table drifted badly: opus read
 # $15/$75 against an actual $5/$25, every model released after that date fell
 # through to the opus default (costing a Sonnet 5 session at 5x), and all
