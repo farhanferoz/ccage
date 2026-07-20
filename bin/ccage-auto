@@ -1377,18 +1377,31 @@ class Watcher:
                 continue
 
             if self.state == self.NUDGED:
-                if pct < cfg.soft:
-                    # Occupancy fell below soft (manual /clear, a stale arm, a
-                    # threshold raise): the nudge is moot. Never re-nudge or
-                    # escalate below the live threshold — stand down instead.
-                    self._log("occupancy %.1f%% < soft %.0f%% — cancelling "
-                              "nudge cycle; back to NORMAL" % (pct, cfg.soft))
-                    self.state = self.NORMAL
-                elif self._confirmed():
+                if self._confirmed():
+                    # FIRST, ahead of the below-soft cancellation: a confirmed
+                    # checkpoint is work the model has already done, and the
+                    # only thing that finishes it is the /clear. Observed:
+                    # nudge at 35.1%, model checkpointed, then a live
+                    # `--set soft=45` raised the threshold past the current
+                    # 38.2% — the cancellation ran first, discarded the
+                    # confirmation, and the session sat parked forever with
+                    # its checkpoint written and no clear (the model had
+                    # printed the sentinel and stopped, so nothing else was
+                    # coming). Safe to prefer: _confirmed() needs the sentinel
+                    # in text logged SINCE the nudge, so it cannot fire on a
+                    # stale arm or a manual /clear.
                     self._log("checkpoint confirmed at %.1f%% — clearing" % pct)
                     self._do_clear()
                     self.cooldown_until = time.time() + cfg.cooldown
                     self.state = self.COOLDOWN
+                elif pct < cfg.soft:
+                    # Occupancy fell below soft (manual /clear, a stale arm, a
+                    # threshold raise) with nothing checkpointed: the nudge is
+                    # moot. Never re-nudge or escalate below the live
+                    # threshold — stand down instead.
+                    self._log("occupancy %.1f%% < soft %.0f%% — cancelling "
+                              "nudge cycle; back to NORMAL" % (pct, cfg.soft))
+                    self.state = self.NORMAL
                 elif pct >= cfg.hard and not self.hard_fired:
                     # Fire the forceful escalation ONCE per nudge cycle. Re-firing
                     # every poll would re-interrupt the model mid-checkpoint and
