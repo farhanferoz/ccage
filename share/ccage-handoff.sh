@@ -826,11 +826,6 @@ _ccage_handoff_compose_brief() {
     local total_prompts="$prompt_count"
     local shown_n="$max_prompts"
     [ "$shown_n" -gt "$total_prompts" ] && shown_n="$total_prompts"
-    if [ "$total_prompts" -le "$max_prompts" ]; then
-        printf '## User prompts\n\n'
-    else
-        printf '## User prompts (last %s of %s)\n\n' "$shown_n" "$total_prompts"
-    fi
 
     if [ "$total_prompts" -gt 0 ]; then
         # Prompts were capped by COUNT but never by LENGTH, and were
@@ -845,7 +840,13 @@ _ccage_handoff_compose_brief() {
         # (newest kept — they are the ones that matter for resuming), then
         # line-leading `#` escaped (see _CCAGE_HANDOFF_JQ_NEUTRALIZE) so prompt
         # text cannot forge a heading.
-        jq -r --argjson start "$((total_prompts - shown_n))" \
+        #
+        # The heading is emitted AFTER this pass, not before it: the count it
+        # promises is only known once the byte budget has decided what fits.
+        # Printed ahead of time it read "(last 20 of 50)" above 14 rendered
+        # prompts. The count travels back on a sentinel first line.
+        local prompts_out kept_n
+        prompts_out=$(jq -r --argjson start "$((total_prompts - shown_n))" \
               --argjson cap "$_CCAGE_HANDOFF_MAX_PROMPT_CHARS" \
               --argjson budget "$_CCAGE_HANDOFF_PROMPT_BUDGET" \
               "$_CCAGE_HANDOFF_JQ_NEUTRALIZE"'
@@ -860,16 +861,25 @@ _ccage_handoff_compose_brief() {
                    else {keep: (.keep + [$e]), used: (.used + ($e.value | length)), done: false}
                    end)
                | .keep | reverse) as $kept
-            | ($kept[] | "\(.key). \(.value)\n"),
+            | "\($kept | length)",
+              ($kept[] | "\(.key). \(.value)\n"),
               (if ($kept | length) < ($items | length)
                then "_(\(($items | length) - ($kept | length)) of the last \($items | length) prompt(s) dropped for size)_\n"
                else empty end)
-        ' <<<"$handoff_data"
+        ' <<<"$handoff_data")
+        kept_n=${prompts_out%%$'\n'*}
+        if [ "$kept_n" -ge "$total_prompts" ]; then
+            printf '## User prompts\n\n'
+        else
+            printf '## User prompts (last %s of %s)\n\n' "$kept_n" "$total_prompts"
+        fi
+        printf '%s\n' "${prompts_out#*$'\n'}"
         if [ "$total_prompts" -gt "$max_prompts" ]; then
             printf '\n_(%d earlier prompt(s) elided — see raw JSONL for full history)_\n' \
                 $((total_prompts - shown_n))
         fi
     else
+        printf '## User prompts\n\n'
         printf '_(no user prompts recorded in this session)_\n'
     fi
 

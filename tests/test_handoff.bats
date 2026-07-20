@@ -435,6 +435,31 @@ print(json.dumps({'type':'user','timestamp':'2026-07-20T09:00:00.000Z',
     [ "$(printf '%s' "$row" | grep -o '[^\]|' | wc -l)" = 7 ]
 }
 
+# The heading counted what the COUNT cap admitted, but the byte budget trims
+# again afterwards, so it promised 20 above 14 rendered prompts.
+@test "prompts: the heading counts what actually rendered, not what was offered" {
+    local f="$BATS_TEST_TMPDIR/heading.jsonl"
+    : > "$f"
+    local n
+    for n in $(seq 1 50); do
+        python3 -c "
+import json
+print(json.dumps({'type':'user','timestamp':'2026-07-20T09:00:00.000Z',
+                  'message':{'role':'user','content':'P%02d ' % $n + 'z'*700}}))" >> "$f"
+    done
+
+    run _ccage_handoff_generate "$f" --stdout
+    [ "$status" -eq 0 ]
+    local heading rendered
+    heading=$(printf '%s\n' "$output" | grep '^## User prompts')
+    rendered=$(printf '%s\n' "$output" | grep -c '^[0-9]\+\. P[0-9]')
+    # The number in the heading IS the number of prompts below it.
+    [[ "$heading" == "## User prompts (last $rendered of 50)" ]]
+    # And it is genuinely fewer than the count cap offered, so this fixture
+    # actually exercises the mismatch rather than passing trivially.
+    [ "$rendered" -lt 20 ]
+}
+
 # The Files-touched table is assembled in awk, so the jq `cell` def guarding the
 # Delegated-work table was unreachable from it. A path containing `|` is legal
 # on both Linux and macOS.
