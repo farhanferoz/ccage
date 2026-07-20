@@ -536,10 +536,36 @@ _ccage_handoff_subagents_json() {
         return 0
     fi
 
-    local rows=()
-    local f meta name agent_data cost
+    # Two layouts, not one. A plain subagent lands in <session>/subagents/;
+    # a Workflow-spawned agent lands one level deeper, in
+    # <session>/subagents/workflows/wf_<id>/. Globbing only the first missed
+    # every workflow agent — the exact under-reporting this section exists to
+    # prevent, and worst where it matters most: a session whose delegation was
+    # entirely workflow-driven has no top-level agents at all, so the brief
+    # rendered no delegated section and silently stated it delegated nothing.
+    # Measured on one real session: 122 agents and $15.04 uncounted against a
+    # reported $70.90.
+    local files=()
+    local f meta name agent_data cost wf
     for f in "$dir"/agent-*.jsonl; do
-        [ -f "$f" ] || continue
+        [ -f "$f" ] && files+=("$f")
+    done
+    for f in "$dir"/workflows/wf_*/agent-*.jsonl; do
+        [ -f "$f" ] && files+=("$f")
+    done
+
+    local rows=()
+    for f in ${files[@]+"${files[@]}"}; do
+        # Workflow membership, from the path: "" for a plain subagent, the
+        # wf_<id> directory name for a workflow one. The brief groups by this
+        # so 166 workflow agents cannot swamp a size-budgeted table.
+        wf=""
+        case "$f" in
+            "$dir"/workflows/*)
+                wf="${f#"$dir"/workflows/}"
+                wf="${wf%%/*}"
+                ;;
+        esac
         meta="${f%.jsonl}.meta.json"
         # Fall back to the filename when there is no meta sidecar: the id is
         # `agent-<name>-<hash>`, so strip the prefix and the trailing hash.
@@ -589,6 +615,7 @@ _ccage_handoff_subagents_json() {
                 --arg ended "$a_ended" \
                 --arg turns "$a_turns" \
                 --arg cost "${cost#\$}" \
+                --arg wf "$wf" \
                 --arg in "$a_in" --arg out "$a_out" --arg cr "$a_cr" \
                 --arg cw "$((a_cw5 + a_cw1))" \
                 --argjson files "$a_files" \
@@ -608,7 +635,8 @@ _ccage_handoff_subagents_json() {
                     cw:    ($cw | tonumber),
                     cr:    ($cr | tonumber),
                     files: $files,
-                    ended: $ended
+                    ended: $ended,
+                    wf:    $wf
                 }'
         )")
     done
@@ -893,13 +921,39 @@ _ccage_handoff_compose_brief() {
         # message containing `|` — free text from the server — would otherwise
         # split the row into extra columns. Newlines are already handled
         # upstream by the split("\n")[0] on `ended`.
+        #
+        # Workflow agents collapse to ONE row per workflow. A workflow fans out
+        # by construction — 166 agents in one real session — so a row each
+        # would swamp a brief that has to stay small, and the useful unit is
+        # the workflow anyway. Plain subagents still get a row each.
         jq -r --argjson n "$_CCAGE_HANDOFF_MAX_AGENTS" "$_CCAGE_HANDOFF_JQ_CELL"'
-            sort_by(-.cost) | .[0:$n] | .[]
-            | "| \(.name|cell) | \(.type|cell) | \(.model|cell) | \(.turns) | $\(.cost) | \(.files | length) | \(.ended|cell) |"
+            def row: "| \(.name|cell) | \(.type|cell) | \(.model|cell) | \(.turns) | $\(.cost) | \(.files|length) | \(.ended|cell) |";
+            ([.[] | select(.wf == "")] | sort_by(-.cost) | .[0:$n] | .[] | row),
+            ([.[] | select(.wf != "")] | group_by(.wf) | sort_by(-(map(.cost) | add)) | .[]
+             | {
+                 name:  "\(.[0].wf) (\(length) agent(s))",
+                 type:  "workflow",
+                 # One tier named when they agree, "mixed" when they do not —
+                 # a workflow commonly pins cheap tiers per stage.
+                 model: ((map(.model) | unique) as $m
+                         | if ($m | length) == 1 then $m[0] else "mixed" end),
+                 turns: (map(.turns) | add),
+                 cost:  (map(.cost) | add | .*100 | round / 100),
+                 files: (map(.files | keys) | add // [] | unique),
+                 ended: ((map(select(.ended != "ok")) | length) as $bad
+                         | if $bad == 0 then "ok" else "\($bad) ended in error" end)
+               } | row)
         ' <<<"$subagents"
-        if [ "$agent_count" -gt "$_CCAGE_HANDOFF_MAX_AGENTS" ]; then
+        local plain_count wf_count
+        plain_count=$(jq -r '[.[] | select(.wf == "")] | length' <<<"$subagents")
+        wf_count=$(jq -r '[.[] | select(.wf != "")] | length' <<<"$subagents")
+        if [ "$plain_count" -gt "$_CCAGE_HANDOFF_MAX_AGENTS" ]; then
             printf '\n_(%d further agent(s) elided — costliest %d shown)_\n' \
-                $((agent_count - _CCAGE_HANDOFF_MAX_AGENTS)) "$_CCAGE_HANDOFF_MAX_AGENTS"
+                $((plain_count - _CCAGE_HANDOFF_MAX_AGENTS)) "$_CCAGE_HANDOFF_MAX_AGENTS"
+        fi
+        if [ "$wf_count" -gt 0 ]; then
+            printf '\n_(%d workflow agent(s) summarised by workflow rather than listed)_\n' \
+                "$wf_count"
         fi
         printf '\n_"ok" means the last turn completed normally; a transcript records no\nexplicit termination, so it does not mean the agent finished its task._\n'
     fi

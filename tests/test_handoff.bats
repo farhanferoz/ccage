@@ -619,6 +619,43 @@ _mk_subagent() {
     [[ "$output" != *"of which delegated"* ]]
 }
 
+# Workflow-spawned agents live one directory deeper than plain subagents, so
+# the non-recursive glob missed all of them. Worst case is silent: a session
+# that delegated ONLY via a workflow has no top-level agents, so the brief
+# rendered no delegated section and stated it delegated nothing. Measured on a
+# real session: 122 agents and $15.04 uncounted against a reported $70.90.
+@test "subagents: workflow agents are counted, and summarised per workflow" {
+    local main="$BATS_TEST_TMPDIR/wf/deadbeef.jsonl"
+    mkdir -p "$(dirname "$main")"
+    cp "$FIXTURES/minimal.jsonl" "$main"
+
+    # No top-level subagents at all — only workflow ones, the silent case.
+    local wfdir="${main%.jsonl}/subagents/workflows/wf_abc123-def"
+    mkdir -p "$wfdir"
+    local n
+    for n in 1 2 3; do
+        printf '%s\n' "{\"name\":\"wfagent$n\",\"customAgentType\":\"task-worker\",\"model\":\"sonnet\"}" \
+            > "$wfdir/agent-awfagent$n-hash$n.meta.json"
+        printf '%s\n' "{\"type\":\"assistant\",\"timestamp\":\"2026-07-20T09:00:00.000Z\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-sonnet-5\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"usage\":{\"input_tokens\":1000000,\"output_tokens\":0}}}" \
+            > "$wfdir/agent-awfagent$n-hash$n.jsonl"
+    done
+
+    [ "$(_ccage_handoff_subagents_json "$main" | jq 'length')" = 3 ]
+
+    run _ccage_handoff_generate "$main" --stdout
+    [ "$status" -eq 0 ]
+    # The section exists at all — this is what was missing entirely.
+    [[ "$output" == *"## Delegated work"* ]]
+    # Three sonnet agents at 1M input each = 3 × $3.00 = $9.00, folded into
+    # the totals. An exact figure, so a silently-uncounted agent fails here.
+    [[ "$output" == *"of which delegated:** ~\$9 across 3 subagent(s)"* ]]
+    # Collapsed to ONE row naming the workflow, not three rows.
+    [[ "$output" == *"wf_abc123-def (3 agent(s))"* ]]
+    [[ "$output" == *"| workflow |"* ]]
+    [[ "$output" == *"3 workflow agent(s) summarised"* ]]
+    [ "$(printf '%s\n' "$output" | grep -c '^| wfagent')" = 0 ]
+}
+
 @test "subagents: the agent-list cap is enforced and the elision is reported" {
     local main="$BATS_TEST_TMPDIR/many/deadbeef.jsonl"
     mkdir -p "$(dirname "$main")"
