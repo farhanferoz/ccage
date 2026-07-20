@@ -630,13 +630,20 @@ _mk_subagent() {
     cp "$FIXTURES/minimal.jsonl" "$main"
 
     # No top-level subagents at all — only workflow ones, the silent case.
-    local wfdir="${main%.jsonl}/subagents/workflows/wf_abc123-def"
-    mkdir -p "$wfdir"
-    local n
+    # TWO workflows, because with one, grouping by workflow and lumping every
+    # workflow together are indistinguishable. Agents 1 and 2 share a path, so
+    # the per-workflow file count must be the DISTINCT set (1), not the sum (2).
+    local base="${main%.jsonl}/subagents/workflows"
+    local n wfdir path
     for n in 1 2 3; do
+        case $n in
+            1|2) wfdir="$base/wf_abc123-def"; path=/tmp/shared.py ;;
+            3)   wfdir="$base/wf_zzz999-aaa"; path=/tmp/other.py ;;
+        esac
+        mkdir -p "$wfdir"
         printf '%s\n' "{\"name\":\"wfagent$n\",\"customAgentType\":\"task-worker\",\"model\":\"sonnet\"}" \
             > "$wfdir/agent-awfagent$n-hash$n.meta.json"
-        printf '%s\n' "{\"type\":\"assistant\",\"timestamp\":\"2026-07-20T09:00:00.000Z\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-sonnet-5\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"usage\":{\"input_tokens\":1000000,\"output_tokens\":0}}}" \
+        printf '%s\n' "{\"type\":\"assistant\",\"timestamp\":\"2026-07-20T09:00:00.000Z\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-sonnet-5\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t$n\",\"name\":\"Read\",\"input\":{\"file_path\":\"$path\"}}],\"usage\":{\"input_tokens\":1000000,\"output_tokens\":0}}}" \
             > "$wfdir/agent-awfagent$n-hash$n.jsonl"
     done
 
@@ -649,11 +656,18 @@ _mk_subagent() {
     # Three sonnet agents at 1M input each = 3 × $3.00 = $9.00, folded into
     # the totals. An exact figure, so a silently-uncounted agent fails here.
     [[ "$output" == *"of which delegated:** ~\$9 across 3 subagent(s)"* ]]
-    # Collapsed to ONE row naming the workflow, not three rows.
-    [[ "$output" == *"wf_abc123-def (3 agent(s))"* ]]
+    # Collapsed to one row PER WORKFLOW — two rows, not one lumped row and not
+    # three agent rows. Lumping every workflow together passes a count check,
+    # so assert the names.
+    [[ "$output" == *"wf_abc123-def (2 agent(s))"* ]]
+    [[ "$output" == *"wf_zzz999-aaa (1 agent(s))"* ]]
+    [ "$(printf '%s\n' "$output" | grep -c '^| wf_')" = 2 ]
     [[ "$output" == *"| workflow |"* ]]
     [[ "$output" == *"3 workflow agent(s) summarised"* ]]
     [ "$(printf '%s\n' "$output" | grep -c '^| wfagent')" = 0 ]
+    # Files column is the DISTINCT path set: agents 1 and 2 both read the same
+    # file, so their workflow reports 1, not 2.
+    [[ "$(printf '%s\n' "$output" | grep '^| wf_abc123-def')" == *"| 1 | ok |"* ]]
 }
 
 @test "subagents: the agent-list cap is enforced and the elision is reported" {
