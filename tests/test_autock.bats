@@ -384,11 +384,9 @@ drive() {
 @test "re-nudge is occupancy-anchored (hard - 5), fires without an Escape interrupt" {
     # soft=10, hard=30 -> re-nudge=25. Pin occupancy at 28% (above soft and the
     # re-nudge line, below hard) so the soft nudge fires, then the SAME
-    # occupancy crosses the re-nudge line on the next poll -- well before the
-    # 600s timeout fallback could ever fire in a 6s test. Never reaches hard,
-    # so this isolates the occupancy trigger from both the timeout fallback
-    # and the hard escalation (neither of which types this message or skips
-    # the Escape interrupt).
+    # occupancy crosses the re-nudge line on the next poll. Never reaches hard,
+    # so this isolates the occupancy trigger from the hard escalation (which
+    # would type a different message and Escape-interrupt).
     export FAKE_TOKENS=280000 FAKE_DEADLINE=6
     drive hard "--soft 10 --hard 30 --poll 1"
     unset FAKE_TOKENS FAKE_DEADLINE

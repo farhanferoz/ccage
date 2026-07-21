@@ -247,17 +247,17 @@ ccage-auto --status   # print the resolved transcript + current occupancy, then 
 It launches your normal cage session through a pseudo-terminal and runs a tiny in-process watcher that:
 
 - **measures** real context occupancy from the session's transcript JSONL — `input + cache_read + cache_creation` tokens of the latest turn. No LLM, no estimation, no API calls; CPU cost is rounding-error.
-- at a **soft threshold** (default 35%) types a one-line *advisory* nudge: the model checkpoints at a clean breakpoint and prints a sentinel — but it's told to use its judgment and **hold off if checkpointing now would lose in-flight work** (a running subagent, a mid-edit). It's a suggestion, not an order;
+- at a **soft threshold** (default 40%) types a one-line *advisory* nudge: the model checkpoints at a clean breakpoint and prints a sentinel — but it's told to use its judgment and **hold off if checkpointing now would lose in-flight work** (a running subagent, a mid-edit). It's a suggestion, not an order;
 - once the checkpoint is confirmed on disk, types the one thing the model can't do for itself — `/clear` — then a short resume nudge. Your `SessionStart` auto-read hook reloads `RESUME.md`, so work continues from where it left off;
-- at a **hard threshold** (default 55%) forces the checkpoint as a backstop — the real deadline before auto-compact — if the model deferred too long or blew past the soft nudge in one long turn.
+- at a **hard threshold** (default 60%, derived as `soft + 20`) forces the checkpoint as a backstop — the real deadline before auto-compact — if the model deferred too long or blew past the soft nudge in one long turn. The whole escalation ladder (soft → re-nudge at `hard − 5` → hard) is occupancy-only — nothing here fires off a wall-clock timer, so the `%` in a message always reflects an actual threshold crossing.
 
 Injection is just writing keystrokes to the pty — no tmux, no API cost. The only model work triggered is the checkpoint + resume you wanted anyway, far cheaper than letting the window balloon. Slot-aware (`CCAGE_SLOT`) and a no-op for slotless cages alike.
 
 | Knob | Flag | Env | Default |
 |------|------|-----|---------|
 | On/off | `--autock` / `--no-autock` | `CCAGE_AUTOCK=0` | on |
-| Soft threshold (%) | `--soft N` | `CCAGE_AUTOCK_SOFT` | 35 |
-| Hard threshold (%) | `--hard N` | `CCAGE_AUTOCK_HARD` | 55 |
+| Soft threshold (%) | `--soft N` | `CCAGE_AUTOCK_SOFT` | 40 |
+| Hard threshold (%) | `--hard N` | `CCAGE_AUTOCK_HARD` | 60 (soft + 20) |
 | Context window — force (tokens) | `--window N` | `CCAGE_AUTOCK_WINDOW` | per-model |
 | Context window — per-model map | `--window-map 'opus=1000000,haiku=200000'` | `CCAGE_AUTOCK_WINDOWS` | built-in |
 | Poll interval (s) | `--poll N` | `CCAGE_AUTOCK_POLL` | 12 |
@@ -268,7 +268,7 @@ Thresholds are validated: an out-of-range value falls back to its default, and `
 **Retune it live — `/checkpoint-threshold`.** The thresholds above are fixed at launch, but you don't have to restart to change them. Inside a running `ccage-auto` session, the `/checkpoint-threshold` skill adjusts them on the fly:
 
 ```
-/checkpoint-threshold 50        # nudge at 50% instead of 35%
+/checkpoint-threshold 50        # nudge at 50% instead of 40%
 /checkpoint-threshold 50 65     # soft 50%, hard 65%
 /checkpoint-threshold pause      # suspend auto-checkpointing during delicate work
 /checkpoint-threshold resume     # re-enable it
