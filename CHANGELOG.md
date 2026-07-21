@@ -2,6 +2,17 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed — the re-nudge line now escalates the wording, not just the percentage
+- **The re-nudge (`hard − 5`) retyped the identical soft-nudge text as the original 40% nudge** — same "use your judgment, hold off if it's a bad moment" phrasing, just a bigger number. Nothing distinguished "you're being reminded" from "you're one step from a forced stop." It now types the same firm wording used at the real hard backstop — still without interrupting, that stays reserved for `cfg.hard` itself — so there are three distinct signal levels (soft → mandatory-but-not-yet-forced → forced) instead of two identical ones. The trigger point is unchanged: `cfg.renudge = cfg.hard - RENUDGE_MARGIN`, tracking whatever `--hard`/`CCAGE_AUTOCK_HARD`/a live `/checkpoint-threshold` override actually sets it to, never a hardcoded percentage.
+
+### Changed — the context/occupancy escalation no longer has a wall-clock timeout fallback
+- **The NUDGED-state re-nudge and hard escalation were occupancy-anchored but also had a `CCAGE_AUTOCK_NUDGE_TIMEOUT` (600s) time fallback layered on top**, so a session that hadn't reached the re-nudge/hard line yet could still get force-escalated — with the identical "the hard backstop" wording — purely because 10 minutes had passed since the last nudge. Observed live: a "Context is at 48%" hard-backstop message on a session whose configured hard threshold was 60%, because the re-nudge had already fired once and the timeout fallback fired next, reporting whatever occupancy happened to be current rather than a real threshold crossing. The context/occupancy machine (`bin/ccage-auto`, `Watcher` NUDGED state) is now occupancy-only: soft → re-nudge (`hard − 5`, once) → hard, with no timer anywhere in that path. If occupancy stalls, nothing forces anything — a stalled session isn't filling its window, so there's nothing to protect against. `CCAGE_AUTOCK_NUDGE_TIMEOUT` still applies, unchanged, to the unrelated weekly rate-limit-floor stand-down, which has no occupancy signal to substitute.
+
+### Fixed — README documented the pre-0.9.0 auto-checkpoint defaults (35%/55%) three releases after they changed to 40%/60%
+- The soft/hard defaults were bumped in the threshold-derivation rework but `README.md`'s prose, reference table, and `/checkpoint-threshold` example still said 35%/55% in four places. Corrected to match `bin/ccage-auto` (`DEFAULT_SOFT=40`, hard derives as `soft + 20`).
+
 ## [0.14.1] — 2026-07-20
 
 ### Fixed — `ccage-auto-yolo --soft 45` silently launched at the default threshold

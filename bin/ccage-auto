@@ -64,8 +64,9 @@
 #   CCAGE_AUTOCK_READY_MARKER (string marking the TUI as rendered; default ❯),
 #   CCAGE_AUTOCK_NUDGE (override the soft-nudge text; {pct}/{sentinel} substituted),
 #   CCAGE_AUTOCK_HARD_NUDGE (override the hard-backstop nudge text; same substitutions),
-#   CCAGE_AUTOCK_NUDGE_TIMEOUT (s before re-nudge if unconfirmed; default 600 — a
-#     fallback alongside the re-nudge line at hard - 5%, whichever fires first),
+#   CCAGE_AUTOCK_NUDGE_TIMEOUT (s before re-nudging the weekly-floor stand-down
+#     if unconfirmed; default 600 — the context/occupancy escalation below is
+#     occupancy-only and ignores this),
 #   CCAGE_AUTOCK_COOLDOWN (s to ignore thresholds after a reset; default 30),
 #   CCAGE_AUTOCK_NO_ASK_GUARD (1 = don't register the AskUserQuestion guard),
 #   CCAGE_AUTOCK_WEEKLY_FLOOR (remaining-% weekly-limit floor; see below).
@@ -174,9 +175,10 @@ DEFAULT_WINDOW = WINDOW_1M    # fallback when the model is unknown / ambiguous
 KEY_DELAY = 0.25        # pause between typing a line and submitting it
 CLEAR_SETTLE = 3.0      # wait after /clear for the SessionStart hook + reload
 COOLDOWN = 30.0         # ignore thresholds for this long after a reset
-NUDGE_TIMEOUT = 600.0   # if no checkpoint confirmation, re-nudge / escalate (a
-                        # fallback alongside the occupancy-anchored re-nudge —
-                        # whichever fires first)
+NUDGE_TIMEOUT = 600.0   # weekly-floor stand-down only: re-nudge if the model
+                        # hasn't confirmed after this long (no occupancy signal
+                        # applies once floored). The context/occupancy machine
+                        # below escalates on occupancy alone — no timer.
 MAX_RENUDGE = 1         # soft re-nudges before escalating to the hard path
 
 # Threshold derivation (decided contract, three rounds of clarification — do
@@ -1345,9 +1347,10 @@ class Watcher:
             # Re-measure occupancy only when the active transcript changed or grew,
             # and only treat a changed token count as a fresh reading — growth from
             # user typing or a logged /clear keeps the last pct. Skipping the
-            # *re-parse* must never skip the state machine below: a stalled or
-            # idle-over-threshold session still has to be nudged, re-nudged, and
-            # hard-interrupted on the timed cadence even while nothing new is logged.
+            # *re-parse* must never skip the state machine below: an already-nudged
+            # session still has to be re-evaluated against the last known pct every
+            # poll, even while nothing new is logged, so a live threshold change
+            # (`/checkpoint-threshold`) is picked up without new tokens arriving.
             if path != self.last_path:
                 self.last_path = path
                 self.last_sz = -1
@@ -1415,34 +1418,27 @@ class Watcher:
                     self.state = self.NORMAL
                 elif pct >= cfg.hard and not self.hard_fired:
                     # Fire the forceful escalation ONCE per nudge cycle. Re-firing
-                    # every poll would re-interrupt the model mid-checkpoint and
-                    # keep resetting nudge_at, so the timed fallbacks in
-                    # _confirmed() could never accumulate. After this, fall through
-                    # to the nudge_timeout cadence below.
+                    # every poll would re-interrupt the model mid-checkpoint; after
+                    # this, later polls see hard_fired and just wait for
+                    # confirmation — no further chatter.
                     self._log("HARD threshold at %.1f%% — forcing checkpoint" % pct)
                     if cfg.hard_interrupt:
                         self._interrupt()
                     self.hard_fired = True
                     self._arm_nudge(path, pct, hard=True)
-                elif self.renudges < MAX_RENUDGE and (
-                        pct >= cfg.renudge or (time.time() - self.nudge_at) > cfg.nudge_timeout):
-                    # Occupancy-anchored re-nudge (hard - RENUDGE_MARGIN), with the
-                    # timer kept as a fallback for a session that stalls below that
-                    # line — whichever fires first. Same soft-style message either
-                    # way; only the trigger moved.
-                    if pct >= cfg.renudge:
-                        self._log("occupancy %.1f%% reached the re-nudge line (%.0f%%) "
-                                  "— re-nudging" % (pct, cfg.renudge))
-                    else:
-                        self._log("no checkpoint after %.0fs — re-nudging" % cfg.nudge_timeout)
+                elif self.renudges < MAX_RENUDGE and pct >= cfg.renudge:
+                    # Occupancy-anchored re-nudge (hard - RENUDGE_MARGIN, tracking
+                    # whatever cfg.hard actually is — never a hardcoded number).
+                    # Types the SAME wording as the real hard backstop, so the
+                    # model gets an unambiguous "this is mandatory now" signal
+                    # instead of a second copy of the wishy-washy soft text — but
+                    # does NOT interrupt: that stays reserved for cfg.hard itself,
+                    # the true forced-if-still-ignored line.
+                    self._log("occupancy %.1f%% reached the re-nudge line (%.0f%%) "
+                              "— re-nudging with hard wording, no interrupt yet"
+                              % (pct, cfg.renudge))
                     self.renudges += 1
-                    self._arm_nudge(path, pct)
-                elif (time.time() - self.nudge_at) > cfg.nudge_timeout:
-                    self._log("re-nudge exhausted — interrupting + nudging")
-                    if cfg.hard_interrupt:
-                        self._interrupt()
                     self._arm_nudge(path, pct, hard=True)
-                    self.renudges = 0
 
 
 # ----------------------------------------------------------------------------
@@ -1883,7 +1879,7 @@ def print_status(cfg, cwd, config_dir, sdir):
     print("  ready marker :", "%s (ceiling %.0fs)" % (cfg.ready_marker.decode("utf-8"), cfg.init_delay))
     print("  soft / hard  : %.0f%% / %.0f%% (launch)" % (cfg.soft, cfg.hard))
     print("  re-nudge     : %.0f%% (occupancy-anchored at hard − %g%%; "
-          "%.0fs timeout is the fallback)" % (cfg.renudge, RENUDGE_MARGIN, cfg.nudge_timeout))
+          "occupancy-only, no timeout)" % (cfg.renudge, RENUDGE_MARGIN))
     ov = read_control_file(cwd)
     if ov:
         hard_in = ov["hard"] if "hard" in ov else (cfg.hard if cfg.hard_explicit else None)
