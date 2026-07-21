@@ -2,7 +2,7 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.14.2] — 2026-07-21
 
 ### Changed — the re-nudge line now escalates the wording, not just the percentage
 - **The re-nudge (`hard − 5`) retyped the identical soft-nudge text as the original 40% nudge** — same "use your judgment, hold off if it's a bad moment" phrasing, just a bigger number. Nothing distinguished "you're being reminded" from "you're one step from a forced stop." It now types the same firm wording used at the real hard backstop — still without interrupting, that stays reserved for `cfg.hard` itself — so there are three distinct signal levels (soft → mandatory-but-not-yet-forced → forced) instead of two identical ones. The trigger point is unchanged: `cfg.renudge = cfg.hard - RENUDGE_MARGIN`, tracking whatever `--hard`/`CCAGE_AUTOCK_HARD`/a live `/checkpoint-threshold` override actually sets it to, never a hardcoded percentage.
