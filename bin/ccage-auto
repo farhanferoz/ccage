@@ -1427,13 +1427,18 @@ class Watcher:
                     self.hard_fired = True
                     self._arm_nudge(path, pct, hard=True)
                 elif self.renudges < MAX_RENUDGE and pct >= cfg.renudge:
-                    # Occupancy-anchored re-nudge (hard - RENUDGE_MARGIN). Purely
-                    # occupancy-based: if occupancy never reaches this line the
-                    # window isn't filling, so there is nothing to force.
+                    # Occupancy-anchored re-nudge (hard - RENUDGE_MARGIN, tracking
+                    # whatever cfg.hard actually is — never a hardcoded number).
+                    # Types the SAME wording as the real hard backstop, so the
+                    # model gets an unambiguous "this is mandatory now" signal
+                    # instead of a second copy of the wishy-washy soft text — but
+                    # does NOT interrupt: that stays reserved for cfg.hard itself,
+                    # the true forced-if-still-ignored line.
                     self._log("occupancy %.1f%% reached the re-nudge line (%.0f%%) "
-                              "— re-nudging" % (pct, cfg.renudge))
+                              "— re-nudging with hard wording, no interrupt yet"
+                              % (pct, cfg.renudge))
                     self.renudges += 1
-                    self._arm_nudge(path, pct)
+                    self._arm_nudge(path, pct, hard=True)
 
 
 # ----------------------------------------------------------------------------
