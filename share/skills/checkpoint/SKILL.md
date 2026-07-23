@@ -13,7 +13,6 @@ description: >-
   RESUME.<slot>.md files into the plain trunk; --from-session recovers a PREVIOUS
   session that ended without a checkpoint, by compressing its on-disk transcript
   with `ccage handoff` and merging the brief in.
-effort: medium
 ---
 
 # /checkpoint
@@ -32,11 +31,13 @@ One command that keeps a durable, lean `RESUME.md` so a session's state survives
 You (the agent) do the writing. This skill tells you exactly what to write and
 where. **Two commands, zero lossy copy/paste.**
 
-This skill runs at **`medium` effort** (pinned in frontmatter, regardless of the
-session's `/effort`). A checkpoint is distillation, not hard reasoning — `medium`
-keeps the summary sharp while avoiding the large thinking budgets of
-`high`/`xhigh`/`max`. **Efficiency here comes from doing _less work_ (fewer
-round-trips, no proactive archival), not from thinking less.** Two use cases:
+A checkpoint is distillation, not hard reasoning — it runs at whatever effort the
+session already uses, deliberately unpinned. (Switching effort mid-session
+invalidates the conversation cache — only the small tools+system prefix survives —
+so a per-skill effort pin would cost far more than it could save. If you want a
+cheaper tier, change `/effort` at low occupancy, ideally right after a clear.)
+**Efficiency here comes from doing _less work_ (fewer round-trips, no proactive
+archival), not from thinking less.** Two use cases:
 
 - **Mid-work** (`/checkpoint`): the lean path in §3 — touches only `$resume` /
   `$changelog`, reuses what's already in context, finishes in ~2–3 tool calls.
@@ -227,6 +228,13 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    finished one-shot waiter → where its output landed + the condition to re-check).
    Point to a plan doc instead of dumping a long backlog. Drop done/moot items
    (their detail goes to CHANGELOG).
+   - **Never promise a notification from a background task.** Backgrounded
+     watchers/waiters do NOT survive the session — measured (2026-07-23
+     forensics): every `Bash(run_in_background)` watcher was killed 50–131 s
+     after the session's last turn, while RESUME and the sign-off text claimed
+     "you'll get a notification". Write the bridge instead: the re-check /
+     re-arm action becomes the FIRST `### Next` item, so the next session
+     performs it — no phantom notification is ever relied on.
 4. **Refresh the current day's `## Session <YYYY-MM-DD>` block *in place*.** If a
    block for today already exists (you checkpointed earlier today), **edit it** to
    reflect the latest 2–5 sentence state — do **not** prepend another block. Only
@@ -510,11 +518,11 @@ true end-of-day.
   `CCAGE_SLOT` is unset.
 - **Lean is the point.** RESUME is injected into context on every session start;
   every line costs tokens on every start. When in doubt, move detail to CHANGELOG.
-- **Pinned to `medium` effort.** Frontmatter fixes the effort regardless of the
-  session's `/effort`; don't escalate your own reasoning for a checkpoint. Get
-  speed and cost from fewer round-trips and deferred archival, not from thinking
-  less — a vague checkpoint just moves the cost to a more expensive re-discovery
-  on resume.
+- **No effort pin — and don't toggle `/effort` for a checkpoint.** An effort
+  switch invalidates the conversation cache (only the tools+system prefix
+  survives), so it costs more than it saves. Get speed and cost from fewer
+  round-trips and deferred archival, not from thinking less — a vague checkpoint
+  just moves the cost to a more expensive re-discovery on resume.
 - **Rebuild-on-resume state** lives only in `### Live jobs & tasks`: the task list
   and any background jobs/Monitors (all wiped by `/clear`). Record active tasks +
   per-job rearm commands; omit when empty; never dump a long backlog.
