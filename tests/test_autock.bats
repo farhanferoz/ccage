@@ -409,6 +409,27 @@ drive() {
     ! grep -q "HARD threshold" "$CAGE/ccage-autock.log"   # never hard-escalated
 }
 
+@test "silent-stall watchdog re-nudges a quiet NUDGED session, then logs instead of nagging" {
+    # StrategyA 2026-07-22 incident class: the model checkpoints (or just goes
+    # quiet) after the soft nudge WITHOUT printing the sentinel, and occupancy
+    # sits below the re-nudge line — so no occupancy branch can ever fire and
+    # the watcher would sit NUDGED forever. The watchdog must fire on
+    # idleness: one loud log + one firm stall nudge, then rate-limited
+    # "persists" logging with no further typing and no Escape interrupt.
+    # pct = 15% of the 1M window: above soft (10), below re-nudge (25) & hard (30).
+    export FAKE_TOKENS=150000 FAKE_DEADLINE=12 CCAGE_AUTOCK_STALL_IDLE=2
+    drive hard "--soft 10 --hard 30 --poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_STALL_IDLE
+    [ "$status" -eq 0 ]
+    grep -q "SILENT STALL" "$CAGE/ccage-autock.log"
+    cap_has "b'quiet for'"                                # the stall nudge was typed
+    grep -q "silent stall persists" "$CAGE/ccage-autock.log"
+    # typed exactly once, not per poll (the "persists" path must not re-type)
+    python3 -c "import sys; sys.exit(0 if open('$CAP','rb').read().count(b'quiet for') == 1 else 1)"
+    ! cap_has "b'\x1b'"                                    # never interrupts
+    ! grep -q "HARD threshold" "$CAGE/ccage-autock.log"    # occupancy never reached hard
+}
+
 @test "a confirmed checkpoint still clears when a live --set raises soft above the current occupancy" {
     # Live incident, v0.13.1: nudge at 35.1%, the model checkpointed, then
     # `--set soft=45` landed while occupancy read 38.2%. The NUDGED state
