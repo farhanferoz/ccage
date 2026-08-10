@@ -1110,6 +1110,29 @@ stopg() {   # stopg <json> [extra PATH prefix] -> $output is the hook's stdout
         PATH='${2:-}${2:+:}$PATH' bash '$STOPG'"
 }
 
+# stopg with PATH REPLACED rather than prefixed, for the cases that assert on
+# something being ABSENT from PATH.
+stopg_with_path() {   # stopg_with_path <json> <full PATH>
+    run bash -c "echo '$1' | CLAUDE_CONFIG_DIR='$CAGE' CCAGE_AUTONOMOUS=1 \
+        PATH='$2' bash '$STOPG'"
+}
+
+# $PATH minus every directory that provides ccage-watch. The UNARMED_PROMISE
+# trigger is inert exactly while ccage-watch is missing, so testing that case
+# against the developer's real PATH means the test passes only until ccage-watch
+# gets installed — which is precisely what happened the day install.sh started
+# shipping it. Same non-hermeticity class as the CLAUDE_CONFIG_DIR note above.
+path_sans_ccage_watch() {
+    local out="" d
+    local IFS=:
+    for d in $PATH; do
+        if [ -z "$d" ]; then continue; fi
+        if [ -x "$d/ccage-watch" ]; then continue; fi
+        out="${out}${out:+:}$d"
+    done
+    printf '%s' "$out"
+}
+
 @test "stop-guard: inert (silent, exit 0) without the autonomous marker" {
     run bash -c "echo '{\"session_id\":\"a\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Next I will run the suite.\"}' \
         | env -u CCAGE_AUTONOMOUS CLAUDE_CONFIG_DIR='$CAGE' bash '$STOPG'"
@@ -1171,7 +1194,8 @@ stopg() {   # stopg <json> [extra PATH prefix] -> $output is the hook's stdout
 }
 
 @test "stop-guard: UNARMED_PROMISE stays inert while ccage-watch is absent" {
-    stopg "{\"session_id\":\"j\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"The job is running in the background. I will let you know when it finishes.\"}"
+    stopg_with_path "{\"session_id\":\"j\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"The job is running in the background. I will let you know when it finishes.\"}" \
+        "$(path_sans_ccage_watch)"
     [ -z "$output" ]
 }
 

@@ -10,6 +10,7 @@
 #   <prefix>/share/ccage/ccage-enable-mcp.sh — enable-mcp/disable-mcp library
 #   <prefix>/bin/ccage            — CLI dispatcher (uses the libraries)
 #   <prefix>/bin/ccage-auto       — autonomous context manager (python3 pty wrapper)
+#   <prefix>/bin/ccage-watch      — session-bridging condition watcher (python3)
 #   <prefix>/share/ccage/lib/ccb_types.py      — circuit-breaker types/config lib
 #   <prefix>/share/ccage/lib/subagent_watch.py — circuit-breaker watcher lib
 #   <prefix>/bin/ccb-report       — circuit-breaker ledger evaluation report CLI
@@ -144,6 +145,13 @@ if [ "$install_cli" = 1 ]; then
     install_file "$REPO_ROOT/share/ccage-enable-mcp.sh" "$prefix/share/ccage/ccage-enable-mcp.sh"
     install_file "$REPO_ROOT/bin/ccage"                 "$prefix/bin/ccage"  0755
     install_file "$REPO_ROOT/bin/ccage-auto"            "$prefix/bin/ccage-auto" 0755
+
+    # ccage-watch — session-bridging condition watcher. This line is load-bearing
+    # beyond installing a tool: stop_continuation_guard's UNARMED_PROMISE trigger
+    # probes PATH for `ccage-watch` and stays deliberately INERT while it is
+    # absent, so that it can never demand a remedy the machine cannot perform.
+    # Installing this is what switches that trigger on.
+    install_file "$REPO_ROOT/bin/ccage-watch"           "$prefix/bin/ccage-watch" 0755
 
     # Circuit-breaker (subagent watchdog) lib + report tool. ccage-auto's
     # _load_ccb() finds the lib at share/ccage/lib in an installed layout;
