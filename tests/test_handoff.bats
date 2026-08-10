@@ -616,6 +616,19 @@ for i in range(40):
     [ "$(printf '%s\n' "$output" | grep -c '^| /etc/passwd')" = 0 ]
 }
 
+@test "pricing: the shipping Opus is KNOWN, not silently defaulted" {
+    # Regression: claude-opus-5 matched no pattern and fell through to the
+    # `unknown` default, which is the Opus rate -- right by coincidence, and
+    # silently wrong the moment Opus 5 is repriced. A model the user actually
+    # runs must resolve to a family by NAME.
+    [ "$(_ccage_handoff_model_family claude-opus-5)" = opus ]
+    [ "$(_ccage_handoff_model_family 'claude-opus-5[1m]')" = opus ]
+    [ "$(_ccage_handoff_price_input claude-opus-5)" = 5 ]
+    [ "$(_ccage_handoff_price_output claude-opus-5)" = 25 ]
+    # The second, duplicated table lives in share/claude-isolation.sh and is
+    # asserted in test_resume_interception.bats, which sources it.
+}
+
 @test "pricing: an unknown model is flagged as a guess, not asserted as known" {
     [ "$(_ccage_handoff_model_family claude-vega-9)" = unknown ]
     [ "$(_ccage_handoff_model_family 'claude-opus-4-8[1m]')" = opus ]
