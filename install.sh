@@ -203,6 +203,13 @@ if [ "$install_session_docs" = 1 ]; then
     install_file "$REPO_ROOT/share/skills/checkpoint/SKILL.md"           "$share_from/skills/checkpoint/SKILL.md"
     install_file "$REPO_ROOT/share/skills/checkpoint/checkpoint-init.sh" "$share_from/skills/checkpoint/checkpoint-init.sh" 0755
 
+    # skill-catalog — searches every skill on disk and activates one on demand.
+    # Inert in an unscoped cage (skills/ symlinked to master): it refuses --add
+    # there and simply reports what is already listed. It only earns its keep
+    # once a cage is scoped to a core set.
+    install_file "$REPO_ROOT/share/skills/skill-catalog/SKILL.md"        "$share_from/skills/skill-catalog/SKILL.md"
+    install_file "$REPO_ROOT/share/skills/skill-catalog/skill-catalog.sh" "$share_from/skills/skill-catalog/skill-catalog.sh" 0755
+
     # CLAUDE.md anchor — short always-on note, marker-guarded so re-runs are safe.
     claude_md="$HOME/.claude/CLAUDE.md"
     if [ -f "$claude_md" ] && grep -qF 'ccage:session-docs:start' "$claude_md" 2>/dev/null; then
