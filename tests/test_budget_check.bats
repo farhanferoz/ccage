@@ -162,3 +162,44 @@ blocks() {  # write $1 "## Session" blocks to file $2
     [ -z "$output" ]
     [ -f "$CLAUDE_CONFIG_DIR/.resume_budget_state" ]
 }
+
+# ===== '### Next' must not silently shrink =====
+
+nextlist() {  # write $1 numbered items under ### Next in file $2
+    local n="$1" f="$2" i
+    printf '# R\n\n### Next\n' > "$f"
+    for ((i = 1; i <= n; i++)); do printf '%d. item %d\n' "$i" "$i" >> "$f"; done
+    printf '\n### Threads\n- x\n' >> "$f"
+}
+
+@test "next-guard: a write that REDUCES ### Next items is blocked once" {
+    local r="$BATS_TEST_TMPDIR/RESUME.md"
+    nextlist 10 "$r"; run emit "$r"; [ "$status" -eq 0 ]
+    nextlist 6 "$r"; run emit "$r"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"SHRANK"* ]]
+    [[ "$output" == *"10 items -> 6"* ]]
+}
+
+@test "next-guard: the immediate retry passes — confirm-once, never a deadlock" {
+    local r="$BATS_TEST_TMPDIR/RESUME.md"
+    nextlist 10 "$r"; run emit "$r"
+    nextlist 6 "$r"; run emit "$r"; [ "$status" -eq 2 ]
+    run emit "$r"                       # same content, re-issued
+    [ "$status" -eq 0 ]
+}
+
+@test "next-guard: growing or holding steady is never blocked" {
+    local r="$BATS_TEST_TMPDIR/RESUME.md"
+    nextlist 5 "$r";  run emit "$r"; [ "$status" -eq 0 ]
+    nextlist 5 "$r";  run emit "$r"; [ "$status" -eq 0 ]
+    nextlist 9 "$r";  run emit "$r"; [ "$status" -eq 0 ]
+}
+
+@test "next-guard: observe mode downgrades the shrink block" {
+    local r="$BATS_TEST_TMPDIR/RESUME.md"
+    nextlist 10 "$r"; run emit "$r"
+    nextlist 3 "$r"
+    CCAGE_RESUME_BUDGET_MODE=observe run emit "$r"
+    [ "$status" -eq 0 ]
+}

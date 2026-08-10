@@ -46,22 +46,55 @@ bytes="$(wc -c < "$fp" 2>/dev/null | tr -d '[:space:]')"
 [ -n "$bytes" ] || bytes=0
 budget_bytes="${CCAGE_RESUME_BUDGET_BYTES:-14000}"
 
+# Counted BEFORE the state write below, which records it.
+next_n="$(awk '/^### Next/{f=1;next} /^### /{f=0} f && /^[0-9]+\./{c++} END{print c+0}' "$fp" 2>/dev/null)"
+
 over=0
 { [ "$n" -gt "$MAX" ] || [ "$bytes" -gt "$budget_bytes" ]; } 2>/dev/null && over=1
 
 # --- last-seen size, so a shrinking write is recognised as progress ----------
 state_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 state="$state_dir/.resume_budget_state"
-prev=""
+prev=""; prev_next=""
 if [ -r "$state" ]; then
+    # BOTH previous values must be read BEFORE the rewrite below — reading
+    # prev_next afterwards compares the new value against itself, which silently
+    # disabled the shrink check entirely (caught by the behavioural test).
     prev="$(awk -F'\t' -v p="$fp" '$1 == p { v = $2 } END { print v }' "$state" 2>/dev/null)"
+    prev_next="$(awk -F'\t' -v p="$fp" '$1 == p { v = $3 } END { print v }' "$state" 2>/dev/null)"
 fi
 if [ -d "$state_dir" ] && [ -w "$state_dir" ]; then
     tmp="$state.$$"
     { [ -r "$state" ] && awk -F'\t' -v p="$fp" '$1 != p' "$state" 2>/dev/null
-      printf '%s\t%s\n' "$fp" "$bytes"
+      printf '%s\t%s\t%s\n' "$fp" "$bytes" "$next_n"
     } > "$tmp" 2>/dev/null && mv -f "$tmp" "$state" 2>/dev/null
     rm -f "$tmp" 2>/dev/null
+fi
+
+# ---- ### Next must not silently SHRINK ------------------------------------
+# WHY: RESUME's `### Next` is the source of truth for pending work, and the
+# measured failure (2026-08-10) is enumerating that work from MEMORY instead of
+# reading it — which silently dropped 4 live items from a next-session plan.
+# A checkpoint that rewrites `### Next` can drop items the same way, and RESUME
+# is git-excluded, so there is no history to recover them from.
+#
+# The check is mechanical: count the numbered items, and block a write that
+# reduces the count. It does NOT judge whether the removal was right — it forces
+# one conscious look. The state is updated BEFORE the block, so an immediate
+# re-issue of the same write passes: this is a confirm-once speed bump, never a
+# deadlock. Legitimately finished items should be rolled to CHANGELOG.
+if [ -n "$prev_next" ] && [ "${next_n:-0}" -lt "$prev_next" ] 2>/dev/null \
+   && [ "${CCAGE_RESUME_BUDGET_MODE:-}" != "observe" ]; then
+    cat >&2 <<MSG
+RESUME '### Next' SHRANK: $prev_next items -> ${next_n:-0}. Blocked once, deliberately.
+
+'### Next' is the only durable record of pending work, and RESUME is git-excluded
+— dropped items are unrecoverable. Confirm each removed item is genuinely done
+(roll it to CHANGELOG.md) rather than forgotten, then re-issue this same write:
+the count is already recorded, so the retry goes through.
+Escape hatch: CCAGE_RESUME_BUDGET_MODE=observe
+MSG
+    exit 2
 fi
 
 [ "$over" = 1 ] || exit 0
