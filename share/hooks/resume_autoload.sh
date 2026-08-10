@@ -204,6 +204,7 @@ fi
 # block emits nothing (a session that isn't plan-driven gets no directive).
 if [ -f "$resume" ]; then
     plan_note=""
+    plan_docs=""
     # awk carves out the `### Plan` block (up to the next ## / ### heading);
     # grep then pulls any .md path token from it — filename-agnostic on purpose.
     plan_refs="$(awk '
@@ -223,6 +224,8 @@ if [ -f "$resume" ]; then
         if [ -f "$cand" ]; then
             plan_note="${plan_note}  - ${cand}
 "
+            plan_docs="${plan_docs}${cand}
+"
         fi
     done
     if [ -n "$plan_note" ]; then
@@ -231,6 +234,50 @@ if [ -f "$resume" ]; then
         printf 'it governs. An execution-level plan with independent remaining tasks means\n'
         printf 'DISPATCHER mode — partition into dependency waves and dispatch concurrently;\n'
         printf 'never execute the list sequentially inline.\n%s' "$plan_note"
+    fi
+
+    # ---- 1c. plan readiness: OPEN ITEMS as FACTS, never as another directive --
+    # The block above is a directive, and directives are exactly what this whole
+    # setup has measured not to bind. What does bind is a checkable fact stated
+    # at the moment it matters, so this reports COUNTS the session can verify —
+    # how much of the plan is still open, and whether the open items say enough
+    # to be delegated (rung 3 of the delegation ladder is unanswerable without a
+    # write set). Two hard rules: a plan with no checkboxes reports UNVERIFIABLE
+    # and never a false pass, and the whole block stays a few lines, because
+    # resume_autoload is the largest single hook injection we ship (measured
+    # 2026-08-11: 15.9 KB per session) and this must not make that worse.
+    if [ -n "$plan_docs" ]; then
+        readiness=""
+        while IFS= read -r doc; do
+            [ -n "$doc" ] || continue
+            open_n="$(grep -cE '^[[:space:]]*[-*][[:space:]]+\[[[:space:]]\]' "$doc" 2>/dev/null || true)"
+            done_n="$(grep -cE '^[[:space:]]*[-*][[:space:]]+\[[xX]\]' "$doc" 2>/dev/null || true)"
+            [ -n "$open_n" ] || open_n=0
+            [ -n "$done_n" ] || done_n=0
+            if [ "$((open_n + done_n))" -eq 0 ]; then
+                readiness="${readiness}  - ${doc##*/}: no checkboxes — completeness UNVERIFIABLE (never read as done)
+"
+                continue
+            fi
+            # An open item is delegable only if it names something concrete: a
+            # path, or a backticked token. Anything else has no stated write set.
+            vague="$(grep -E '^[[:space:]]*[-*][[:space:]]+\[[[:space:]]\]' "$doc" 2>/dev/null \
+                | grep -cvE '`|/' 2>/dev/null || true)"
+            [ -n "$vague" ] || vague=0
+            readiness="${readiness}  - ${doc##*/}: ${open_n} of $((open_n + done_n)) items OPEN"
+            if [ "$vague" -gt 0 ] && [ "$open_n" -gt 0 ]; then
+                readiness="${readiness}; ${vague} name no file — write set unstated"
+            fi
+            readiness="${readiness}
+"
+        done <<EOF
+$plan_docs
+EOF
+        if [ -n "$readiness" ]; then
+            printf '\nPLAN STATE (facts, checkable — not an instruction):\n%s' "$readiness"
+            printf 'An item whose write set is unstated cannot be dispatched safely; state it or\n'
+            printf 'ask, rather than guessing. Counts come from checkboxes only.\n'
+        fi
     fi
 fi
 

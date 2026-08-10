@@ -557,3 +557,71 @@ STUB
     [ "$status" -eq 0 ]
     [ -e "$REPO/.ccage-session-done" ]   # start times agree -> "watcher elsewhere" -> preserved
 }
+
+# ---- plan readiness (register issue 4) -------------------------------------
+# The autoloader already emits a plan-doc DIRECTIVE. These cover the half added
+# 2026-08-11: OPEN ITEM COUNTS as checkable facts. The load-bearing case is the
+# last one — a plan with no checkboxes must report UNVERIFIABLE, because a false
+# "0 open" would license exactly the silent item-dropping this exists to stop.
+
+# Write a RESUME whose ### Plan section points at $REPO/$1, then create $1.
+plan_with() {   # plan_with <filename> <contents>
+    printf '# RESUME\n\n### Plan\n- %s/%s\n' "$REPO" "$1" > "$REPO/RESUME.md"
+    printf '%s' "$2" > "$REPO/$1"
+}
+
+@test "plan readiness: counts open items against the total" {
+    plan_with p.md '# P
+- [x] shipped, in `lib/a.py`
+- [ ] pending, in `lib/b.py`
+'
+    run run_hook
+    [[ "$output" == *"PLAN STATE"* ]]
+    [[ "$output" == *"p.md: 1 of 2 items OPEN"* ]]
+}
+
+@test "plan readiness: flags open items that name no file" {
+    plan_with p.md '# P
+- [ ] tidy things up
+- [ ] make it better
+- [ ] fix `lib/c.py`
+'
+    run run_hook
+    [[ "$output" == *"3 of 3 items OPEN"* ]]
+    [[ "$output" == *"2 name no file"* ]]
+}
+
+@test "plan readiness: says nothing about write sets when every item names one" {
+    plan_with p.md '# P
+- [ ] fix `lib/c.py`
+- [ ] update docs/readme.md
+'
+    run run_hook
+    [[ "$output" == *"2 of 2 items OPEN"* ]]
+    [[ "$output" != *"name no file"* ]]
+}
+
+@test "plan readiness: a fully ticked plan reports zero open" {
+    plan_with p.md '# P
+- [x] one, `a.py`
+- [x] two, `b.py`
+'
+    run run_hook
+    [[ "$output" == *"0 of 2 items OPEN"* ]]
+}
+
+@test "plan readiness: a plan with NO checkboxes is UNVERIFIABLE, never a false pass" {
+    plan_with p.md '# P
+
+Prose only. Several things remain to be done, described in sentences.
+'
+    run run_hook
+    [[ "$output" == *"UNVERIFIABLE"* ]]
+    [[ "$output" != *"items OPEN"* ]]
+}
+
+@test "plan readiness: silent when RESUME has no ### Plan section" {
+    printf '# RESUME\n\n### Next\n1. do a thing\n' > "$REPO/RESUME.md"
+    run run_hook
+    [[ "$output" != *"PLAN STATE"* ]]
+}
