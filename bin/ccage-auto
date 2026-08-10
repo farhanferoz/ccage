@@ -243,36 +243,61 @@ def launch_command(cfg):
     return 'claude "$@"' if cfg.chrome else 'claude --no-chrome "$@"'
 
 
-def ask_guard_path():
-    """Locate autonomous_ask_guard.sh: the copy in this script's own tree first
-    (a checkout — keeps tests hermetic even when ccage is also installed), then
-    the fixed hooks path install.sh deploys to."""
+def _hook_path(name):
+    """Locate a per-run guard hook by filename: the copy in this script's own tree
+    first (a checkout — keeps tests hermetic even when ccage is also installed),
+    then the fixed hooks path install.sh deploys to."""
     here = os.path.dirname(os.path.abspath(__file__))
     for cand in (
-        os.path.join(here, "..", "share", "hooks", "autonomous_ask_guard.sh"),
-        os.path.join(os.path.expanduser("~"), ".claude", "hooks",
-                     "autonomous_ask_guard.sh"),
+        os.path.join(here, "..", "share", "hooks", name),
+        os.path.join(os.path.expanduser("~"), ".claude", "hooks", name),
     ):
         if os.path.isfile(cand):
             return os.path.abspath(cand)
     return None
 
 
+def ask_guard_path():
+    return _hook_path("autonomous_ask_guard.sh")
+
+
+def stop_guard_path():
+    return _hook_path("stop_continuation_guard.sh")
+
+
 def write_guard_settings(sdir):
-    """Write the per-run settings file registering the AskUserQuestion guard,
-    and return its path (None if the hook script can't be found). Passed to the
-    launched session via `claude --settings <file>` — the registration lives and
-    dies with the run; no cage settings.json is ever touched. The hook itself is
-    armed by the CCAGE_AUTONOMOUS marker, so a stale file is inert."""
+    """Write the per-run settings file registering the autonomous-run guards, and
+    return its path (None if no guard hook can be found). Passed to the launched
+    session via `claude --settings <file>` — the registration lives and dies with
+    the run; no cage settings.json is ever touched. Both hooks are additionally
+    armed by the CCAGE_AUTONOMOUS marker, so a stale file is inert.
+
+    Two guards, deliberately scoped to unattended runs only:
+      * PreToolUse/AskUserQuestion — a blocking question would stall the run.
+      * Stop — refuses to end a turn while work is plainly available (the root
+        stating a next action and not taking it, or idling while subagents run).
+        An interactive session must never pay a turn-end check, which is exactly
+        why this lives here and not in any cage settings.json."""
     guard = ask_guard_path()
-    if not guard:
+    stop_guard = stop_guard_path()
+    if not guard and not stop_guard:
         return None
     os.makedirs(sdir, exist_ok=True)
     path = os.path.join(sdir, "autonomous-settings.json")
-    payload = {"hooks": {"PreToolUse": [{
-        "matcher": "AskUserQuestion",
-        "hooks": [{"type": "command", "command": "bash %s" % shlex.quote(guard)}],
-    }]}}
+    hooks = {}
+    if guard:
+        hooks["PreToolUse"] = [{
+            "matcher": "AskUserQuestion",
+            "hooks": [{"type": "command",
+                       "command": "bash %s" % shlex.quote(guard)}],
+        }]
+    if stop_guard:
+        hooks["Stop"] = [{
+            "matcher": "*",
+            "hooks": [{"type": "command",
+                       "command": "bash %s" % shlex.quote(stop_guard)}],
+        }]
+    payload = {"hooks": hooks}
     with open(path, "w") as f:
         json.dump(payload, f, indent=2)
         f.write("\n")

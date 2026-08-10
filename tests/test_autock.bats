@@ -26,9 +26,20 @@ setup() {
     # Unset CLAUDE_CONFIG_DIR: when the suite runs inside a real cage it is set in
     # the environment, and resolve_config_dir's fast path would return it instead
     # of the CCAGE_ROOT-derived dir these tests pin. Tests must own the env.
-    unset CCAGE_SLOT CCAGE_AUTOCK CCAGE_AUTOCK_WINDOW CLAUDE_CONFIG_DIR CCAGE_AUTOCK_WEEKLY_FLOOR
+    unset CCAGE_SLOT CCAGE_AUTOCK CLAUDE_CONFIG_DIR
     # Hermetic even when the suite itself runs inside an autonomous session.
-    unset CCAGE_AUTONOMOUS CCAGE_AUTOCK_NO_ASK_GUARD
+    unset CCAGE_AUTONOMOUS
+    # Unset EVERY CCAGE_AUTOCK_* rather than an enumerated list. The hand-listed
+    # set went stale when CCAGE_AUTOCK_SOFT arrived: a live ccage-auto exports its
+    # own thresholds into the session it launches, so the two default-threshold
+    # tests passed in CI and on a clean machine and failed ONLY when the suite was
+    # run from inside a real autonomous session — i.e. exactly when a developer
+    # runs it. Enumerate nothing; match the prefix. (bash 3.2 safe: no ${!x@}, no
+    # process substitution — macOS CI runs stock bash.)
+    for _v in $(env | sed -n 's/^\(CCAGE_AUTOCK_[A-Za-z0-9_]*\)=.*/\1/p'); do
+        unset "$_v"
+    done
+    unset _v
     CAGE="$CCAGE_ROOT/.claude-repo"
     SLUG="${REPO//\//-}"
     SDIR="$CAGE/projects/$SLUG"
@@ -1084,4 +1095,138 @@ PY
         > "$CAGE/rate-limits-state.json"
     run bash -c "cd '$REPO' && '$AUTO' --weekly-floor 20 --status"
     [[ "$output" == *"18.5% remaining"* ]]
+}
+
+# --------------------------------------------------------------------------
+# stop_continuation_guard.sh — the Stop hook that refuses to end an unattended
+# turn while work is plainly available. Four triggers; three rest on ground
+# truth (plan file, subagent transcripts, watcher state), one on phrase match.
+# --------------------------------------------------------------------------
+
+STOPG="$BATS_TEST_DIRNAME/../share/hooks/stop_continuation_guard.sh"
+
+stopg() {   # stopg <json> [extra PATH prefix] -> $output is the hook's stdout
+    run bash -c "echo '$1' | CLAUDE_CONFIG_DIR='$CAGE' CCAGE_AUTONOMOUS=1 \
+        PATH='${2:-}${2:+:}$PATH' bash '$STOPG'"
+}
+
+@test "stop-guard: inert (silent, exit 0) without the autonomous marker" {
+    run bash -c "echo '{\"session_id\":\"a\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Next I will run the suite.\"}' \
+        | env -u CCAGE_AUTONOMOUS CLAUDE_CONFIG_DIR='$CAGE' bash '$STOPG'"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "stop-guard: a clean completion is allowed" {
+    stopg "{\"session_id\":\"b\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"The parser is updated and the tests pass.\"}"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: stopping to ask the user a question is allowed" {
+    stopg "{\"session_id\":\"c\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"I could do A or B. Which do you want?\"}"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: UNKEPT_INTENT — states a next action then stops" {
+    stopg "{\"session_id\":\"d\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Done with the parser. Next I will run the full suite.\"}"
+    [[ "$output" == *'"decision"'* ]]
+    [[ "$output" == *"take that action"* ]]
+}
+
+@test "stop-guard: AGENTS_IDLE — live subagents and no work of its own" {
+    mkdir -p "$CAGE/projects/${REPO//\//-}/e/subagents"
+    touch "$CAGE/projects/${REPO//\//-}/e/subagents/agent-w1.jsonl"
+    stopg "{\"session_id\":\"e\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Dispatched the worker.\"}"
+    [[ "$output" == *'"decision"'* ]]
+    [[ "$output" == *"SERIALISATION"* ]]
+}
+
+@test "stop-guard: a STALE subagent transcript does not count as live" {
+    mkdir -p "$CAGE/projects/${REPO//\//-}/f/subagents"
+    touch -d '10 minutes ago' "$CAGE/projects/${REPO//\//-}/f/subagents/agent-w1.jsonl"
+    stopg "{\"session_id\":\"f\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Everything is finished.\"}"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: PLAN_ITEMS_OPEN — claims done while the plan has unticked boxes" {
+    printf '# R\n\n### Plan\n- `%s/p.md` governs\n' "$REPO" > "$REPO/RESUME.md"
+    printf '# P\n- [x] one\n- [ ] two\n- [ ] three\n' > "$REPO/p.md"
+    stopg "{\"session_id\":\"g\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All tasks are complete.\"}"
+    [[ "$output" == *'"decision"'* ]]
+    [[ "$output" == *"2 unticked"* ]]
+}
+
+@test "stop-guard: claims done with every box ticked is allowed" {
+    printf '# R\n\n### Plan\n- `%s/p.md` governs\n' "$REPO" > "$REPO/RESUME.md"
+    printf '# P\n- [x] one\n- [x] two\n' > "$REPO/p.md"
+    stopg "{\"session_id\":\"h\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All tasks are complete.\"}"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: an UNSTRUCTURED plan is unverifiable, never a false block" {
+    printf '# R\n\n### Plan\n- `%s/p.md` governs\n' "$REPO" > "$REPO/RESUME.md"
+    printf '# P\nJust prose. No checkboxes anywhere.\n' > "$REPO/p.md"
+    stopg "{\"session_id\":\"i\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All tasks are complete.\"}"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: UNARMED_PROMISE stays inert while ccage-watch is absent" {
+    stopg "{\"session_id\":\"j\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"The job is running in the background. I will let you know when it finishes.\"}"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: UNARMED_PROMISE fires once ccage-watch exists and none is armed" {
+    mkdir -p "$BATS_TEST_TMPDIR/fakebin"
+    printf '#!/bin/sh\n' > "$BATS_TEST_TMPDIR/fakebin/ccage-watch"
+    chmod +x "$BATS_TEST_TMPDIR/fakebin/ccage-watch"
+    stopg "{\"session_id\":\"k\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"The job is running in the background. I will let you know when it finishes.\"}" \
+        "$BATS_TEST_TMPDIR/fakebin"
+    [[ "$output" == *'"decision"'* ]]
+    [[ "$output" == *"ccage-watch arm"* ]]
+}
+
+@test "stop-guard: an armed watcher allows the promise" {
+    mkdir -p "$BATS_TEST_TMPDIR/fakebin" "$CAGE/watch"
+    printf '#!/bin/sh\n' > "$BATS_TEST_TMPDIR/fakebin/ccage-watch"
+    chmod +x "$BATS_TEST_TMPDIR/fakebin/ccage-watch"
+    echo '{}' > "$CAGE/watch/w1.json"
+    stopg "{\"session_id\":\"l\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"The job is running in the background. I will let you know when it finishes.\"}" \
+        "$BATS_TEST_TMPDIR/fakebin"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: yields after 2 refusals and STAYS yielded (no block/allow cycle)" {
+    local msg="{\"session_id\":\"m\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Done. Next I will run the suite.\"}"
+    local seen=""
+    for _ in 1 2 3 4 5; do
+        stopg "$msg"
+        if [[ "$output" == *'"decision"'* ]]; then seen="${seen}B"; else seen="${seen}a"; fi
+    done
+    # Two refusals, then permanently quiet. "BBaBa" (the pre-fix cycle) must fail.
+    [ "$seen" = "BBaaa" ]
+}
+
+@test "stop-guard: a clean stop re-arms the counter for a later genuine case" {
+    local msg="{\"session_id\":\"n\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Done. Next I will run the suite.\"}"
+    stopg "$msg"; stopg "$msg"; stopg "$msg"          # exhaust: B B a
+    stopg "{\"session_id\":\"n\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All good here.\"}"
+    stopg "$msg"
+    [[ "$output" == *'"decision"'* ]]
+}
+
+@test "unit: write_guard_settings registers the Stop hook alongside the ask guard" {
+    run python3 - "$AUTO" "$SDIR" <<'PY'
+import importlib.machinery, importlib.util, json, sys
+loader = importlib.machinery.SourceFileLoader("ccageauto", sys.argv[1])
+spec = importlib.util.spec_from_loader("ccageauto", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+d = json.load(open(m.write_guard_settings(sys.argv[2])))
+assert "Stop" in d["hooks"], d
+cmd = d["hooks"]["Stop"][0]["hooks"][0]["command"]
+assert cmd.endswith("stop_continuation_guard.sh"), cmd
+assert "AskUserQuestion" == d["hooks"]["PreToolUse"][0]["matcher"], d
+print("ok")
+PY
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ok"* ]]
 }

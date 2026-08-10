@@ -160,6 +160,13 @@ if [ "$install_cli" = 1 ]; then
     install_file "$REPO_ROOT/share/hooks/autonomous_ask_guard.sh" \
         "${CCAGE_HOOKS_DIR:-$HOME/.claude/hooks}/autonomous_ask_guard.sh" 0755
 
+    # Stop-continuation guard — same fixed-path treatment and the same per-run
+    # registration path as the ask-guard above (ccage-auto's _hook_path resolves
+    # a checkout copy first, then here). Without this line the installed
+    # ccage-auto finds nothing and the guard silently never fires.
+    install_file "$REPO_ROOT/share/hooks/stop_continuation_guard.sh" \
+        "${CCAGE_HOOKS_DIR:-$HOME/.claude/hooks}/stop_continuation_guard.sh" 0755
+
     # Weekly-limit floor sensor (CCAGE_AUTOCK_WEEKLY_FLOOR) — same fixed-path
     # treatment as the ask-guard above. Inert until a cage's statusLine is
     # wrapped by _ccage_seed_statusline_tee (share/claude-isolation.sh), which
