@@ -27,6 +27,8 @@
 budget="${CCAGE_RESUME_BUDGET_LINES:-250}"
 budget_bytes="${CCAGE_RESUME_BUDGET_BYTES:-14000}"
 orphan_max="${CCAGE_MEMORY_ORPHAN_MAX:-3}"
+note_max="${CCAGE_MEMORY_MAX_NOTES:-40}"
+index_max="${CCAGE_MEMORY_MAX_INDEX_BYTES:-8192}"
 base="${CLAUDE_PROJECT_DIR:-$PWD}"
 
 # SessionStart delivers its trigger source (startup|resume|clear|compact) as JSON
@@ -364,6 +366,14 @@ memdir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$slug/memory"
 index="$memdir/MEMORY.md"
 if [ -f "$index" ]; then
     needs_tidy=0
+    volume_note=""
+
+    # Counted up front: the volume check (d) needs these even when an earlier
+    # check has already fired, so the NOTE can carry the numbers.
+    files=$(find "$memdir" -maxdepth 1 -type f -name '*.md' ! -name 'MEMORY.md' 2>/dev/null | wc -l | tr -d '[:space:]')
+    idx_bytes=$(wc -c < "$index" 2>/dev/null | tr -d '[:space:]')
+    [ -n "$files" ] || files=0
+    [ -n "$idx_bytes" ] || idx_bytes=0
 
     # (a) dead index link: a referenced .md file that no longer exists.
     while IFS= read -r ref; do
@@ -373,9 +383,7 @@ if [ -f "$index" ]; then
 
     # (b) orphans: memory files not represented in the index.
     if [ "$needs_tidy" -eq 0 ]; then
-        files=$(find "$memdir" -maxdepth 1 -type f -name '*.md' ! -name 'MEMORY.md' 2>/dev/null | wc -l | tr -d '[:space:]')
         idx=$(grep -cE '^[[:space:]]*-[[:space:]]*\[' "$index" 2>/dev/null)
-        [ -n "$files" ] || files=0
         [ -n "$idx" ] || idx=0
         [ "$((files - idx))" -gt "$orphan_max" ] && needs_tidy=1
 
@@ -385,7 +393,20 @@ if [ -f "$index" ]; then
         fi
     fi
 
-    [ "$needs_tidy" -eq 1 ] && printf 'NOTE: memory needs tidying — run /checkpoint --tidy.\n'
+    # (d) VOLUME — the trigger this check was missing (register issue 2, fixed
+    # 2026-08-11). (a)-(c) are all SHAPE checks, and shape says nothing about
+    # size: a cage holding 127 notes scored perfectly on all three, so tidy
+    # bailed early every single time and the pile only ever grew. Volume is the
+    # one fact shape cannot see, so it gets its own trigger and its own wording —
+    # a well-sectioned directory that is simply too big needs PRUNING, which is
+    # different work from reorganizing.
+    if [ "$needs_tidy" -eq 0 ] \
+       && { [ "$files" -gt "$note_max" ] || [ "$idx_bytes" -gt "$index_max" ]; } 2>/dev/null; then
+        needs_tidy=1
+        volume_note=" — ${files} notes, ${idx_bytes} B index (over ${note_max} / ${index_max}): PRUNE, do not merely reorganize"
+    fi
+
+    [ "$needs_tidy" -eq 1 ] && printf 'NOTE: memory needs tidying — run /checkpoint --tidy%s.\n' "$volume_note"
 fi
 
 exit 0

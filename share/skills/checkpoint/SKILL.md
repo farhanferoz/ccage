@@ -403,6 +403,20 @@ obvious duplicate/stale notes (and the SessionStart check did **not** flag `memo
 needs tidying`), say so and stop — don't spend tokens reorganizing a tidy dir.
 Only do the work below when there is real disorganization.
 
+**VOLUME IS NOT SHAPE — the bail-early clause does not apply to it.** If the
+SessionStart NOTE reported a note count or index size over budget, a tidy-looking
+directory is exactly what you will find, and stopping there is the failure: one
+cage reached **127 notes** while scoring perfectly on every shape check, so this
+step bailed early every time and the pile only grew (register issue 2). Over
+budget means the work is **reduction**, not reorganization:
+
+- Merge notes covering the same fact and delete the loser; fold thin notes into
+  a related one; delete notes that later work has made wrong or moot.
+- Report the count **before and after**. "Reorganized the index" is not an answer
+  to "there are too many notes".
+- If you genuinely cannot get under budget, name the notes you considered and why
+  each must stay. That is a real answer; "it looks tidy" is not.
+
 Then, using judgment:
 
 - **Group `MEMORY.md` into `## ` sections** (e.g. by topic: user, feedback,
