@@ -161,10 +161,35 @@ COMMIT = re.compile(
     r")\b",
     re.I,
 )
-# If the turn ended by asking the user something, stopping is CORRECT.
+# If the turn ended by asking the user something, or by NAMING WHAT IT IS WAITING
+# ON, stopping is CORRECT.
+#
+# MEASURED 2026-08-11: trigger 5 fired FIVE times in one conversation, and in
+# three of those the message opened with "I am waiting on you for two things:" /
+# "Waiting on you for one thing:". None matched. The old pattern accepted a
+# trailing question mark or one of nine fixed phrasings — "waiting on your" hit,
+# "waiting on you for" missed by one word — so the guard told the reader its
+# message "does not say what you are waiting for" when what it had actually
+# tested was "did not end in '?' and used none of nine wordings". A guard whose
+# stated trigger and real trigger differ teaches that its reasons are noise, and
+# keying on phrasing rather than fact is the failure D7 exists to stop.
+#
+# This trigger is irreducibly textual — "did this turn hand a decision back?" has
+# no mechanical ground truth the way a live subagent or a file size does. So the
+# pattern is widened to the ways a person actually writes it, and, more
+# importantly, trigger 5's message below now states what it really checked.
 ASKED_USER = re.compile(
-    r"(?:\?\s*$)|\b(?:which do you want|your call|let me know|want me to|shall i|"
-    r"should i|do you want|confirm before|waiting on your)\b",
+    r"(?:\?\s*$)"
+    r"|\b(?:which do you want|your call|let me know|want me to|shall i|"
+    r"should i|do you want|confirm before)\b"
+    # Naming the blocker, in the forms people actually use.
+    r"|\bwaiting (?:on|for)\b"
+    r"|\bblocked (?:on|by)\b"
+    r"|\bneeds? your\b"
+    r"|\byour (?:go-?ahead|approval|decision|answer|sign-?off)\b"
+    r"|\b(?:say|just say) (?:go|the word)\b"
+    r"|\bcan(?:no|')t proceed\b"
+    r"|\bawaiting\b",
     re.I,
 )
 
@@ -375,14 +400,15 @@ if reason is None:
     open_tasks = open_task_count()
     if open_tasks and not asked:
         reason = (
-            "You are ending the turn with %d task(s) still open, and your final "
-            "message does not say what you are waiting for.\n"
-            "Stopping may well be right — handing back is often correct. But going "
-            "quiet is not: silence looks identical whether you are blocked or idle, "
-            "and the reader has to guess which.\n"
-            "DO NOW, whichever is true: continue with the next open task, OR name "
-            "the one thing you are waiting on (a decision, an approval, an external "
-            "result). Either ends the turn cleanly."
+            "You are ending the turn with %d task(s) still open, and nothing in "
+            "your final message matched a question or a phrase naming what you are "
+            "waiting on.\n"
+            "That is a TEXT MATCH, not a judgment: if you did name a blocker and "
+            "this still fired, the pattern missed it — say so plainly and stop, "
+            "rather than rewording the same message until it passes.\n"
+            "Otherwise, whichever is true: continue with the next open task, OR "
+            "name the one thing you are waiting on (a decision, an approval, an "
+            "external result)."
             % open_tasks
         )
 
