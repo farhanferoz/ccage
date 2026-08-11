@@ -1,18 +1,10 @@
 ---
 name: checkpoint
 description: >-
-  Save session state into RESUME.md (rolling older detail into CHANGELOG.md) so
-  it survives /clear — ccage's SessionStart hook auto-reads RESUME.md back on the
-  next start, with no copy/paste. Also snapshots the task list and live
-  jobs/monitors so they can be re-armed on resume. Use before /clear or a
-  compaction, or when the user says "checkpoint", "save progress", "snapshot
-  state", or "update RESUME"; bootstraps RESUME.md + CHANGELOG.md in a repo that
-  has none. Flags: --final marks the session genuinely done (writes the
-  .ccage-session-done marker so /keepwarm and ccage-auto stand down); --tidy also
-  tidies this cage's memory dir; --merge-slots collapses parallel
-  RESUME.<slot>.md files into the plain trunk; --from-session recovers a PREVIOUS
-  session that ended without a checkpoint, by compressing its on-disk transcript
-  with `ccage handoff` and merging the brief in.
+  Save session state into RESUME.md so it survives /clear; bootstraps RESUME.md +
+  CHANGELOG.md in a repo that has none. Use before /clear or a compaction, or
+  when the user says "checkpoint", "save progress", "snapshot state", or "update
+  RESUME". Flags: --final, --tidy, --merge-slots, --from-session.
 ---
 
 # /checkpoint
@@ -213,6 +205,13 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    Skipping a needless re-read saves a full-context round-trip.
 2. **Keep carried state verbatim.** Every thread, decision, and open question this
    session did *not* change stays exactly as written.
+2a. **Ground every state-claim before you write it** — invoke the
+   `ground-before-summarizing` skill. Any short-hand label, method codename or
+   "we decided X" that is not spelled out in this session's context gets resolved
+   against source (`corpus-search search-all "<query>"`, the plan doc, git log)
+   BEFORE it goes into RESUME. Measured 2026-08-10: enumerating from memory
+   silently dropped four live items — a checkpoint written from recall is how
+   wrong state becomes next session's ground truth.
 3. **Update the structured lines in place** — `### Now / ### Next / ### Threads /
    ### Decisions / ### Open questions / ### Plan / ### Live jobs & tasks` — for
    whatever moved this session. When a plan doc governs the work, fill

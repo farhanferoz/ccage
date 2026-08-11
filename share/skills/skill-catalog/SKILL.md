@@ -1,6 +1,11 @@
 ---
 name: skill-catalog
-description: Search every skill installed on this machine, including ones NOT in your current available-skills list, and activate one on demand for immediate use. Use whenever you want a capability that no listed skill covers, before concluding "there is no skill for this" or writing the functionality yourself — this cage may be scoped to a small core while the rest sit on disk, unlisted. Also use when the user asks what skills exist, whether a skill exists for some task, or names a skill you cannot see. Triggers, "is there a skill for", "what skills do I have", "search skills", "find a skill", "activate a skill", "that skill isn't listed".
+description: >-
+  Search every skill installed on this machine, including ones NOT in your current
+  available-skills list, and activate one on demand. Use before concluding "there is
+  no skill for this" or writing the functionality yourself. Triggers: "is there a
+  skill for", "what skills do I have", "search skills", "find a skill", "activate a
+  skill", "that skill isn't listed".
 allowed-tools: Bash
 ---
 

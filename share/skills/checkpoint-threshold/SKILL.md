@@ -1,15 +1,13 @@
 ---
 name: checkpoint-threshold
 description: >-
-  Retune ccage-auto's auto-checkpoint behaviour live, mid-session, without
-  restarting: raise or lower the soft (advisory nudge) or hard (forced backstop)
-  context-occupancy percentage, pause auto-checkpointing entirely during
-  delicate work, resume it, reset to the launch values, or show the current
-  settings. Use when the user says "/checkpoint-threshold", "raise/lower the
-  checkpoint threshold", "checkpoint at N%", "checkpoint later/sooner", "give me
-  more room before checkpointing", "pause / hold off auto-checkpoint", "resume
-  auto-checkpoint", or asks what the auto-checkpoint threshold currently is.
-  Only affects a session launched under `ccage-auto`.
+  Retune ccage-auto's auto-checkpoint thresholds live, mid-session: raise or lower
+  the soft or hard percentage, pause, resume, reset to launch values, or show current
+  settings. Use on "/checkpoint-threshold", "raise/lower the checkpoint threshold",
+  "checkpoint at N%", "checkpoint later/sooner", "give me more room before
+  checkpointing", "pause / hold off auto-checkpoint", "resume auto-checkpoint". Only
+  affects a session under `ccage-auto`.
+
 ---
 
 # /checkpoint-threshold

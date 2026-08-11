@@ -17,9 +17,51 @@
 
 set -uo pipefail
 
+# SECOND MECHANISM, added 2026-08-11: a skill can also be switched off in
+# settings.json (`skillOverrides: {"name": "off"}`), which is how the 80
+# never-invoked skills were culled. That is INDEPENDENT of the symlink: an
+# overridden skill stays invisible no matter what this script links in. Without
+# the checks below, `--add` would symlink it, print "activated", and the skill
+# would still not appear -- a silent false success, which is precisely the
+# failure class this tool exists to prevent.
 MASTER="${CCAGE_SHARE_FROM:-$HOME/.claude}/skills"
 CAGE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 CAGE_SKILLS="$CAGE_DIR/skills"
+CAGE_SETTINGS="$CAGE_DIR/settings.json"
+
+# Is this skill switched off in settings? Prints the override value, or nothing.
+skill_override() {
+    [ -r "$CAGE_SETTINGS" ] || return 0
+    python3 - "$CAGE_SETTINGS" "$1" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    s = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+v = (s.get("skillOverrides") or {}).get(sys.argv[2])
+if v in ("off", "user-invocable-only"):
+    print(v)
+PY
+}
+
+# Clear the override so an explicitly requested skill can actually appear.
+# Asking for it by name IS the intent to re-enable it.
+clear_override() {
+    python3 - "$CAGE_SETTINGS" "$1" <<'PY'
+import json, shutil, sys, time
+p, name = sys.argv[1], sys.argv[2]
+s = json.load(open(p))
+ov = s.get("skillOverrides") or {}
+if name not in ov:
+    sys.exit(0)
+shutil.copy2(p, "%s.bak-%s" % (p, time.strftime("%Y%m%d-%H%M%S")))
+del ov[name]
+if not ov:
+    s.pop("skillOverrides", None)
+json.dump(s, open(p, "w"), indent=2)
+json.load(open(p))          # re-parse or the cage is broken
+PY
+}
 
 usage() {
     cat <<'EOF'
@@ -28,7 +70,9 @@ usage: skill-catalog.sh <query>...      search all skills on disk
        skill-catalog.sh --add <name>    activate a skill in this cage now
        skill-catalog.sh --selftest      verify the catalog can parse the master dir
 
-A skill activated with --add is usable immediately -- no session restart.
+--add symlinks the skill in, which is live immediately. If the skill is also
+switched OFF in settings.json (shown as [OFF]), --add clears that too, but the
+override is read at launch -- so that part needs the next session to take effect.
 EOF
 }
 
@@ -78,10 +122,27 @@ scoping_enabled() {
 }
 
 cmd_add() {
-    local want="$1" f name
+    local want="$1" f name ov
+    # UNSCOPED no longer implies "everything is listed" (2026-08-11): 80 skills
+    # are hidden by settings overrides instead of by symlink, and every cage was
+    # returned to the plain master symlink. Bailing out here made `--add` a
+    # no-op in the ONLY configuration we now run. So in the unscoped case the
+    # override IS the whole job -- do it, and only refuse when there is
+    # genuinely nothing to change.
     if ! scoping_enabled; then
-        printf 'skill-catalog: this cage is UNSCOPED (%s is a symlink to the master dir).\n' "$CAGE_SKILLS" >&2
-        printf '  Every skill is already listed, so there is nothing to activate.\n' >&2
+        ov="$(skill_override "$want")"
+        if [ -z "$ov" ]; then
+            printf 'skill-catalog: %s is already listed in this cage (%s is the master symlink)\n' \
+                "$want" "$CAGE_SKILLS" >&2
+            printf '  and carries no override, so there is nothing to activate.\n' >&2
+            return 1
+        fi
+        if clear_override "$want"; then
+            printf 'cleared the "%s" override for %s in %s\n' "$ov" "$want" "$CAGE_SETTINGS"
+            printf 'It appears at the NEXT session start -- the override is read at launch.\n'
+            return 0
+        fi
+        printf 'skill-catalog: failed to clear the "%s" override for %s\n' "$ov" "$want" >&2
         return 1
     fi
     while IFS= read -r f; do
@@ -95,7 +156,21 @@ cmd_add() {
             fi
             ln -sfn "$src" "$CAGE_SKILLS/$want" || return 1
             printf 'activated: %s -> %s\n' "$want" "$src"
-            printf 'It is usable now, in this session -- invoke it with the Skill tool.\n'
+            ov="$(skill_override "$want")"
+            if [ -n "$ov" ]; then
+                if clear_override "$want"; then
+                    printf 'ALSO cleared its "%s" override in %s.\n' "$ov" "$CAGE_SETTINGS"
+                    printf 'That part takes effect at the NEXT session start, not now --\n'
+                    printf 'the symlink is live immediately but the override is read at launch.\n'
+                else
+                    printf 'WARNING: it is set to "%s" in %s and clearing that failed.\n' \
+                        "$ov" "$CAGE_SETTINGS" >&2
+                    printf 'The symlink alone will NOT make it visible. Remove the entry by hand.\n' >&2
+                    return 1
+                fi
+            else
+                printf 'It is usable now, in this session -- invoke it with the Skill tool.\n'
+            fi
             return 0
         fi
     done < <(all_skill_files)
@@ -120,7 +195,9 @@ cmd_search() {
         done
         [ "$hit" = 1 ] || continue
         found=$((found + 1))
-        if is_active "$name"; then
+        if [ -n "$(skill_override "$name")" ]; then
+            printf '%-34s [OFF]     %.120s\n' "$name" "$desc"
+        elif is_active "$name"; then
             printf '%-34s [ACTIVE]  %.120s\n' "$name" "$desc"
         else
             printf '%-34s [add]     %.120s\n' "$name" "$desc"
