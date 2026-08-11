@@ -218,6 +218,43 @@ if [ -f "$resume" ]; then
     fi
 fi
 
+# ---- 1a. inject the RATIFIED DECISIONS (in-force only) ----
+# WHY (2026-08-11, user-reported as recurring across sessions): a decision
+# ratified one day was re-opened the next and re-derived from scratch — the
+# measured case proposed new code against a ratified "reuse the existing readers,
+# NOT new code", and proposed re-measuring a per-tier cost average that the guard
+# beside it already calls invalid. The mechanism is mechanical, not forgetfulness:
+# RESUME kept a POINTER ("full text in CHANGELOG") and nothing reads CHANGELOG at
+# session start, so the budget advice below ("roll Decisions into CHANGELOG") is
+# precisely what evicted the evidence. A pointer does not survive a fresh context;
+# content does.
+#
+# Injected HERE rather than in CLAUDE.md / .claude/rules deliberately: that whole
+# hierarchy loads into EVERY subagent, and this file grows over time, so it would
+# re-inflate worker context that was just cut 5,218 -> 2,909 tokens. A SessionStart
+# hook's stdout reaches the MAIN session only — the same asymmetry RESUME already
+# relies on. MEMORY.md was rejected for the opposite reason: it is capped at 200
+# lines / 25 KB with the harness actively nagging to merge or drop entries, i.e.
+# the very eviction pressure that caused this bug.
+#
+# The file holds IN-FORCE decisions only; retired ones move to CHANGELOG.md, which
+# nothing auto-loads. resume_budget_check.sh enforces that direction: a live entry
+# cannot be dropped, a retired one cannot linger. Bounded here like RESUME so a
+# runaway file degrades instead of flooding every session start.
+decisions="$base/DECISIONS.md"
+dec_budget="${CCAGE_DECISIONS_BUDGET_LINES:-120}"
+if [ -f "$decisions" ]; then
+    printf '\nRATIFIED DECISIONS (in force — do NOT re-derive or re-open; cite what changed instead):\n'
+    # Block-level HTML comments are stripped, mirroring what Claude Code already
+    # does for CLAUDE.md: the file's own editing rules are for whoever maintains
+    # it, and paying for them in every session start is exactly the waste this
+    # file is supposed to bound.
+    sed '/<!--/,/-->/d' "$decisions" 2>/dev/null | head -n "$dec_budget"
+    if [ "$(sed '/<!--/,/-->/d' "$decisions" 2>/dev/null | wc -l | tr -d '[:space:]')" -gt "$dec_budget" ] 2>/dev/null; then
+        printf '\nNOTE: DECISIONS truncated at %d lines for injection — retire spent decisions to CHANGELOG.md.\n' "$dec_budget"
+    fi
+fi
+
 # ---- 1b. plan-doc pointers: the plan must be READ, not summarized from ----
 # Measured failure (2026-07-16, user-reported, recurring): a resumed session
 # acts on RESUME's summary bullets, never opens the plan doc they point to —
@@ -352,7 +389,7 @@ if [ -f "$resume" ]; then
     [ -n "$blocks" ] || blocks=0
     [ -n "$bytes" ] || bytes=0
     if { [ "$lines" -gt "$budget" ] || [ "$blocks" -gt 3 ] || [ "$bytes" -gt "$budget_bytes" ]; } 2>/dev/null; then
-        printf 'NOTE: RESUME is over budget — run /checkpoint to trim (roll shipped Threads/Decisions to CHANGELOG).\n'
+        printf 'NOTE: RESUME is over budget — run /checkpoint to trim (shipped Threads to CHANGELOG; ### Decisions to DECISIONS.md, which is auto-loaded — never to CHANGELOG).\n'
     fi
 fi
 

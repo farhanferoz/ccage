@@ -241,10 +241,30 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    block yet). This keeps repeated same-day checkpoints from growing `$resume`.
    - **Promote before you overwrite.** `$resume` is git-excluded — there is no
      version history to recover from — so anything still load-bearing in the block
-     you're about to condense must first move to a durable line (`### Decisions` /
-     `### Open questions`) or to `$changelog`. The block's narrative is meant to be
-     ephemeral "where things stand"; durable facts must not die in it.
-5. **Roll to CHANGELOG only when over budget — don't archive proactively.** After
+     you're about to condense must first move to a durable line (`DECISIONS.md`
+     for anything ratified, `### Open questions`) or to `$changelog`. The block's
+     narrative is meant to be ephemeral "where things stand"; durable facts must
+     not die in it.
+5. **One-time migration — ALWAYS, regardless of budget.** If `$resume` has a
+   `### Decisions` section and `DECISIONS.md` does not exist, move those bullets
+   into a new `DECISIONS.md` now and leave a one-line pointer behind. This is the
+   *only* unconditional move in this skill, and it is deliberate: the pruning in
+   the next step fires solely when the byte budget trips, so on a project whose RESUME is
+   comfortably under budget the migration would never happen — leaving ratified
+   decisions unstructured until the day the file bloats, which is the worst
+   moment to be making one-by-one judgment calls about them. Measured 2026-08-11:
+   **28 of 40 projects with a RESUME hold ~184 decision bullets and none had a
+   `DECISIONS.md`.** Cost is one extra edit, once per project, ever.
+
+   Format each as `- **D<n>** (date) decision. *Revisit if:* condition.` Where the
+   revisit condition genuinely isn't knowable from the bullet, write
+   `*Revisit if:* unstated` — never invent one; an honest gap beats a fabricated
+   trigger. Keep only what is still **in force**: a decision already embodied in
+   shipped code or a design doc does not belong in a file that every session
+   pays for — it belongs at the site that carries it. The test is whether a
+   future session could re-open it *without touching the code that embodies it*.
+
+6. **Roll to CHANGELOG only when over budget — don't archive proactively.** After
    the update, if `$resume` now has more than **3** `## Session` blocks, exceeds
    ~250 lines, **or exceeds ~14 KB** (`wc -c` — a dense file bloats under the line
    cap), move the **oldest** block(s) into `$changelog` as a dated, newest-first
@@ -256,17 +276,27 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    session blocks alone won't fix it — prune the structured sections too: (a) a
    `### Threads` bullet whose work has **shipped/closed** moves to `$changelog`
    as a dated prose line (lossless move, keep any still-open sub-question in
-   `### Next`/`### Open questions`); (b) a `### Decisions` bullet already
-   captured in a memory note collapses to its one-line `[[memory-slug]]`
-   pointer; (c) never prune a bullet that is the only record of something
-   still open.
-6. **Apply everything surgically — `Edit`, never a full rewrite.** The in-place line
+   `### Next`/`### Open questions`); (b) a `### Decisions` bullet **moves to
+   `DECISIONS.md`** (create it if absent — `resume_autoload.sh` injects it into
+   every session, workers excluded), one line, with the condition that should
+   prompt revisiting it; (c) never prune a bullet that is the only record of
+   something still open.
+
+   **A DECISION NEVER BECOMES A POINTER.** Until 2026-08-11 rule (b) said to
+   collapse a decision to its `[[memory-slug]]`, and the same instinct put
+   "ratified (a)-(d), full text in CHANGELOG" in RESUME. Both replace content
+   with a reference, and a reference does not survive a fresh context — measured
+   the next morning, when a ratified decision was re-derived from scratch and
+   argued against. A decision leaves `DECISIONS.md` only as SUPERSEDED or
+   EMBODIED, via one line in `$changelog`; `resume_budget_check.sh` blocks any
+   other removal, matching on the decision id rather than on a count.
+7. **Apply everything surgically — `Edit`, never a full rewrite.** The in-place line
    updates plus the single same-day block edit are a handful of targeted `Edit`s; a
    CHANGELOG roll is one more. Only fall back to a full `Write` when bootstrapping
    (§2) or when a budget-overflow trim genuinely restructures most of the file.
    Regenerating a ~150-line RESUME every checkpoint is the main avoidable cost — and
    the slow part.
-7. **Update the done-marker (one Bash call).** After RESUME is written, reconcile
+8. **Update the done-marker (one Bash call).** After RESUME is written, reconcile
    the `.ccage-session-done` marker (§6). The rule is decided by **one thing only —
    whether `--final` is present**, never by the other flags:
    - **`--final` in the invocation** (alone or with `--tidy`) → run
@@ -277,7 +307,7 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
 
    This is what makes `/keepwarm` and `ccage-auto` stand down on `--final` and keep
    going otherwise. Skip gracefully if the helper is missing.
-8. **End by telling the user:** `RESUME updated — safe to /clear.` (append
+9. **End by telling the user:** `RESUME updated — safe to /clear.` (append
    `, CHANGELOG rolled` only if step 5 actually moved a block; append
    `, marked done` on `--final`).
 
@@ -475,7 +505,7 @@ again. It does not checkpoint the caller; do that first if you have unsaved stat
    for f in "${slot_resumes[@]}" "${slot_logs[@]}"; do rm -- "$f"; done
    ```
    If any write failed, leave **every** slot file in place and stop.
-6. **Enforce the budget** on the merged trunk exactly as in §3 step 5 (≤3
+6. **Enforce the budget** on the merged trunk exactly as in §3 step 6 (≤3
    `## Session` blocks, ~250 lines, ~14 KB; overflow → CHANGELOG).
 7. **Tell the user:**
    `Merged <N> slot(s) into RESUME.md (+ CHANGELOG). Slot files removed — safe to start slotless.`
@@ -498,7 +528,7 @@ durable: a small file at the project root, written **only** by `/checkpoint
   down — stops its checkpoint→clear→resume loop instead of running all night after
   the task is actually complete.
 
-**Why a plain checkpoint must clear it (§3 step 7).** `ccage-auto` drives ordinary
+**Why a plain checkpoint must clear it (§3 step 8).** `ccage-auto` drives ordinary
 `/checkpoint` calls as *maintenance* (save RESUME, then `/clear`, then keep
 working) — those are **not** "done." If a stale marker lingered, the very next
 maintenance checkpoint would look terminal and everything would stop early. So the
@@ -506,7 +536,7 @@ rule is strict: **`--final` writes the marker; every other checkpoint clears it;
 the SessionStart hook clears it on a genuinely new session.** The marker is present
 if and only if the last checkpoint was a `--final`.
 
-You never write or delete this file by hand — §3 step 7 calls
+You never write or delete this file by hand — §3 step 8 calls
 `checkpoint-init.sh mark-done` / `clear-done`, which also keeps it out of git. It
 is deliberately **not** slot-scoped: it's a coarse per-directory "helpers may stand
 down" signal, and one fixed name keeps every consumer trivially simple.

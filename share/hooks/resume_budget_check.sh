@@ -44,6 +44,15 @@ emit_note() {
     fi
 }
 
+# Record every decision, ALLOWs included (D14). Only reached after the basename
+# filter below, so this logs RESUME/DECISIONS writes and nothing else — a hook
+# that exits 0 sends stderr to the debug log only, so without this an inert or
+# mis-scoped guard leaves no trace anywhere. Never fails the hook.
+_log() {
+    d="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/resume_budget_check.log"
+    printf '%s %-16s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$1" "${2:-}" >> "$d" 2>/dev/null || true
+}
+
 input="$(cat)"
 # jq FIRST, sed as the fallback — not the other way round: jq parses JSON
 # correctly, sed only pattern-matches it. But stock macOS ships no jq, and
@@ -58,8 +67,10 @@ if [ -z "$fp" ]; then
         | sed -n 's/.*"file_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
 fi
 [ -n "$fp" ] || exit 0
+kind=resume
 case "$(basename -- "$fp")" in
     RESUME.md|RESUME.*.md) ;;
+    DECISIONS.md)          kind=decisions ;;
     *) exit 0 ;;
 esac
 [ -f "$fp" ] || exit 0
@@ -90,6 +101,34 @@ next_n="$(awk '/^### Next/{f=1;next} /^### /{f=0} f && /^[0-9][^[:space:]]*\.[[:
 next_labels="$(awk '/^### Next/{f=1;next} /^### /{f=0}
     f && /^[0-9][^[:space:]]*\.[[:space:]]/ { out = out (out ? "," : "") $1 }
     END { print out }' "$fp" 2>/dev/null)"
+
+# DECISIONS.md is the same SHAPE of problem as RESUME's '### Next' — a durable,
+# git-excluded list whose entries must not vanish silently — so it reuses the
+# machinery below (state file, previous labels, shrink block) with a different
+# item pattern. It has no byte budget and no session blocks: it is meant to grow
+# when a constraint is added, and it shrinks by RETIRING entries, not by trimming.
+# Ids come from `- **D<n>**` lines, which is exactly what a reader counts.
+if [ "$kind" = decisions ]; then
+    n=0
+    budget_bytes=2147483647
+    # FORMAT-TOLERANT. The first version counted only `- **D<n>**`, this repo's
+    # convention. Measured 2026-08-11: two other projects created a DECISIONS.md
+    # within two hours of the doctrine going machine-wide, and one of them uses a
+    # different layout — so it matched zero entries and had NO protection at all,
+    # while appearing guarded. Any top-level bullet is an entry; the label is its
+    # D-number when there is one, otherwise a slug of its opening words, which is
+    # enough to name what went missing.
+    next_n="$(awk '/^- / { c++ } END { print c+0 }' "$fp" 2>/dev/null)"
+    next_labels="$(awk '/^- / {
+            if (match($0, /\*\*D[0-9]+\*\*/)) {
+                id = substr($0, RSTART + 2, RLENGTH - 4)
+            } else {
+                s = $0; sub(/^- +/, "", s); gsub(/[^A-Za-z0-9]/, "", s)
+                id = substr(s, 1, 12)
+            }
+            if (id != "") out = out (out ? "," : "") id
+        } END { print out }' "$fp" 2>/dev/null)"
+fi
 
 over=0
 { [ "$n" -gt "$MAX" ] || [ "$bytes" -gt "$budget_bytes" ]; } 2>/dev/null && over=1
@@ -137,21 +176,100 @@ fi
 # one conscious look. The state is updated BEFORE the block, so an immediate
 # re-issue of the same write passes: this is a confirm-once speed bump, never a
 # deadlock. Legitimately finished items should be rolled to CHANGELOG.
+#
+# WHICH items went, not just how many. The count alone left the reader to diff a
+# file they no longer have (PostToolUse fires after the write, and these files are
+# git-excluded), so "unrecoverable" was literally true. Naming them makes restoring
+# a copy-paste. Labels are recorded from the previous write.
+missing=""
+if [ -n "$prev_labels" ]; then
+    for lbl in $(printf '%s' "$prev_labels" | tr ',' ' '); do
+        case ",${next_labels}," in
+            *",$lbl,"*) ;;
+            *) missing="${missing}${missing:+ }$lbl" ;;
+        esac
+    done
+fi
+
+# DECISIONS gates on the LABELS, not the count — deliberately stricter than RESUME
+# below. Counting alone lets a same-size swap through (drop D1, add D5: still one
+# entry, and the dropped decision is gone in silence), which for a decisions ledger
+# is the whole failure. Caught live-firing this guard, 2026-08-11.
+if [ "$kind" = decisions ] && [ -n "$missing" ] \
+   && [ "${CCAGE_RESUME_BUDGET_MODE:-}" != "observe" ]; then
+    # ---- DECISIONS: a LIVE entry may not be dropped; a RETIRED one must be ----
+    # The two legitimate exits are SUPERSEDED (its revisit condition fired) and
+    # EMBODIED (the work landed, so the code or design doc now carries it). Both
+    # leave one line in CHANGELOG.md saying which. That is the check: an id may
+    # leave the resident file once it exists in the archive, and not before.
+    # Without the archive half this guard would make every decision immortal —
+    # the opposite failure to re-opening one, and the reason the file would
+    # otherwise become a context disaster that every session pays for.
+    # ANY CHANGELOG*.md sibling counts as the archive. A slot session writes
+    # CHANGELOG.<slot>.md, and refusing its own archive would be a guard bug
+    # rather than a save. Found 2026-08-11 while auditing this guard against the
+    # standard it was written under (D14): it looked only at CHANGELOG.md.
+    dir="$(dirname -- "$fp")"
+    archives=""
+    for a in "$dir"/CHANGELOG*.md; do
+        [ -f "$a" ] && archives="${archives}${archives:+ }$a"
+    done
+
+    # NO archive file at all — the 28 projects due to migrate may have none. The
+    # block is still right (a decision must not vanish unrecorded), but saying
+    # "NOT ARCHIVED" there reads as a malfunction and leaves only the escape
+    # hatch as a way forward, which is the failure mode being fixed elsewhere
+    # today. Name the exact remedy instead.
+    if [ -z "$archives" ]; then
+        _log "DENY-noarchive" "$missing"
+        cat >&2 <<MSG
+DECISIONS lost a LIVE entry ($prev_next -> ${next_n:-0} in force): $missing
+There is no CHANGELOG.md in $dir to retire it into.
+
+A decision may leave DECISIONS.md only once its retirement is recorded somewhere
+that survives. Create $dir/CHANGELOG.md with a '## Retired decisions' section and
+one line per departing id, saying which route it took:
+  SUPERSEDED — its revisit condition fired; say what changed.
+  EMBODIED   — the work landed; name the code or doc that now carries it.
+Then re-issue this same write.
+MSG
+        exit 2
+    fi
+
+    unarchived=""
+    for lbl in $missing; do
+        found=0
+        for a in $archives; do
+            if grep -qE "(^|[^A-Za-z0-9])${lbl}([^0-9A-Za-z]|$)" "$a" 2>/dev/null; then
+                found=1
+                break
+            fi
+        done
+        [ "$found" -eq 0 ] && unarchived="${unarchived}${unarchived:+ }$lbl"
+    done
+    if [ -z "$unarchived" ]; then
+        _log "ALLOW-retired" "$missing archived"
+        emit_note "DECISIONS: ${missing} retired and found in CHANGELOG.md — allowed."
+        exit 0
+    fi
+    _log "DENY-unarchived" "$unarchived"
+    cat >&2 <<MSG
+DECISIONS lost a LIVE entry ($prev_next -> ${next_n:-0} in force). Blocked once, deliberately.
+NOT ARCHIVED: $unarchived
+
+A ratified decision may leave this file by exactly two routes, and both write one
+line to CHANGELOG.md first:
+  SUPERSEDED — its revisit condition fired; say what changed.
+  EMBODIED   — the work landed; name the code or doc that now carries it.
+Anything else is how a ratified decision gets re-opened next session, which is the
+failure this file exists to stop. Archive it, then re-issue this same write.
+MSG
+    exit 2
+fi
+
 if [ -n "$prev_next" ] && [ "${next_n:-0}" -lt "$prev_next" ] 2>/dev/null \
    && [ "${CCAGE_RESUME_BUDGET_MODE:-}" != "observe" ]; then
-    # WHICH items went, not just how many. The count alone left the reader to
-    # diff a file they no longer have (PostToolUse fires after the write, and
-    # RESUME is git-excluded), so "unrecoverable" was literally true. Naming them
-    # makes restoring a copy-paste. Labels are recorded from the previous write.
-    missing=""
-    if [ -n "$prev_labels" ]; then
-        for lbl in $(printf '%s' "$prev_labels" | tr ',' ' '); do
-            case ",${next_labels}," in
-                *",$lbl,"*) ;;
-                *) missing="${missing}${missing:+ }$lbl" ;;
-            esac
-        done
-    fi
+    _log "DENY-nextshrank" "$prev_next -> ${next_n:-0}; gone: ${missing:-?}"
     cat >&2 <<MSG
 RESUME '### Next' SHRANK: $prev_next items -> ${next_n:-0}. Blocked once, deliberately.
 ${missing:+GONE: $missing}
@@ -160,7 +278,6 @@ ${missing:+GONE: $missing}
 — dropped items are unrecoverable. Confirm each removed item is genuinely done
 (roll it to CHANGELOG.md) rather than forgotten, then re-issue this same write:
 the count is already recorded, so the retry goes through.
-Escape hatch: CCAGE_RESUME_BUDGET_MODE=observe
 MSG
     exit 2
 fi
@@ -173,12 +290,24 @@ fi
 # so "the guard has nothing to compare against yet" is never mistaken for "the
 # guard looked and was happy".
 if [ -z "$prev_next" ] && [ "${next_n:-0}" -gt 0 ]; then
-    emit_note "RESUME baseline recorded: ${next_n} items in '### Next' ($next_labels). No previous count existed in this cage, so nothing could be compared this time — a later write that drops any of them will be blocked."
+    if [ "$kind" = decisions ]; then
+        emit_note "DECISIONS baseline recorded: ${next_n} in-force entries ($next_labels). No previous count existed in this cage, so nothing could be compared this time — a later write that drops one without archiving it will be blocked."
+    else
+        emit_note "RESUME baseline recorded: ${next_n} items in '### Next' ($next_labels). No previous count existed in this cage, so nothing could be compared this time — a later write that drops any of them will be blocked."
+    fi
 fi
 
-[ "$over" = 1 ] || exit 0
+if [ "$over" != 1 ]; then
+    _log "ALLOW-underbudget" "$kind ${bytes}B, ${next_n:-0} items"
+    exit 0
+fi
 
-msg="RESUME is ${bytes} bytes / $n session blocks (budgets: ${budget_bytes} bytes, ${MAX} blocks). Roll shipped ### Threads and memory-duplicated ### Decisions into CHANGELOG — keep RESUME lean."
+# NOTE THE ASYMMETRY, added 2026-08-11: shipped Threads go to CHANGELOG, but a
+# DECISION never does — it moves to DECISIONS.md, which is injected at session
+# start. Telling the model to roll decisions into CHANGELOG is what caused a
+# ratified decision to be re-opened the next day: CHANGELOG is not read at
+# session start, so the advice below was itself the eviction mechanism.
+msg="RESUME is ${bytes} bytes / $n session blocks (budgets: ${budget_bytes} bytes, ${MAX} blocks). Roll shipped ### Threads into CHANGELOG and move any ### Decisions to DECISIONS.md (create it; it is auto-loaded) — keep RESUME lean."
 
 # Advisory when: explicitly in observe mode, OR this write made the file smaller
 # (trimming in progress — never block the fix).
@@ -187,20 +316,23 @@ if [ -n "$prev" ] && [ "$bytes" -lt "$prev" ] 2>/dev/null; then shrinking=1; fi
 if [ "${CCAGE_RESUME_BUDGET_MODE:-}" = "observe" ] || [ "$shrinking" = 1 ]; then
     note="$msg"
     [ "$shrinking" = 1 ] && note="$msg (was ${prev} B — shrinking, keep going)"
+    _log "ALLOW-shrinking" "${prev:-?}B -> ${bytes}B"
     emit_note "$note"
     exit 0
 fi
 
 # ENFORCE: the file is over budget and this write did not reduce it.
+_log "DENY-overbudget" "${bytes}B / $n blocks"
 cat >&2 <<MSG
 $msg
 
 This is a blocking error because the write did not reduce the file. Bring RESUME
 back under budget now, before continuing:
-  - move shipped ### Threads and superseded ### Decisions into CHANGELOG.md
+  - move shipped ### Threads into CHANGELOG.md
+  - move ### Decisions to DECISIONS.md — NEVER to CHANGELOG.md, which nothing
+    reads at session start; DECISIONS.md is injected into every session
   - collapse handled ### Stuck-subagent alerts / agent snapshots
   - keep at most ${MAX} '## Session' blocks; older detail belongs in git history
 A write that SHRINKS the file is never blocked, so trimming will go through.
-Escape hatch if this is genuinely wrong right now: CCAGE_RESUME_BUDGET_MODE=observe
 MSG
 exit 2
