@@ -297,29 +297,6 @@ reason = None
 open_items, plan_path = (plan_open_items() if CLAIMS_DONE.search(tail) else (0, None))
 open_tasks = 0
 
-if not AUTONOMOUS:
-    # ATTENDED: the single trigger. Open work + no stated reason for stopping.
-    open_tasks = open_task_count()
-    if open_tasks and not asked:
-        reason = (
-            "You are ending the turn with %d task(s) still open, and your final "
-            "message does not say what you are waiting for.\n"
-            "Stopping may well be right — handing back is often correct. But going "
-            "quiet is not, because silence looks the same whether you are blocked "
-            "or idle, and the user has to guess which.\n"
-            "DO NOW, whichever is true: continue with the next open task, OR name "
-            "the one thing you are waiting on (a decision, an approval, an external "
-            "result). Either ends this turn cleanly; this fires once per session."
-            % open_tasks
-        )
-    plan_open, plan_path2 = plan_open_items()
-    if reason is None and plan_open and not asked:
-        reason = (
-            "You are ending the turn with %d unticked item(s) in the governing plan "
-            "(%s) and no statement of what you are waiting for.\n"
-            "DO NOW: continue, or say what blocks you. This fires once per session."
-            % (plan_open, os.path.basename(plan_path2 or "plan"))
-        )
 
 if open_items and not asked:
     # Ground truth beats a claim: the plan on disk says otherwise.
@@ -373,6 +350,33 @@ elif committed:
         "and then stopping is correct and this will allow it."
     )
 
+# ---------------------------------------------- trigger 5: OPEN WORK, BOTH MODES
+# Added 2026-08-11 after a stop that NONE of the four triggers above could see.
+# The session had five pending tasks and ended quietly. Triggers 1-4 look at plan
+# checkboxes, live subagents, unarmed promises and stated-then-dropped intentions
+# — the TASK LIST was not among them, so there was nothing to fire.
+#
+# Corrects a wrong diagnosis worth recording: the first attempt blamed the
+# CCAGE_AUTONOMOUS gate and put this check on the attended branch only. But that
+# session HAD the marker set (ccage-auto exports it), so the gate was never the
+# cause and the fix would have missed the very case that prompted it. Verified by
+# reading the running process's environment rather than reasoning about it.
+# ⇒ This trigger is deliberately mode-independent. Open work is open work.
+if reason is None:
+    open_tasks = open_task_count()
+    if open_tasks and not asked:
+        reason = (
+            "You are ending the turn with %d task(s) still open, and your final "
+            "message does not say what you are waiting for.\n"
+            "Stopping may well be right — handing back is often correct. But going "
+            "quiet is not: silence looks identical whether you are blocked or idle, "
+            "and the reader has to guess which.\n"
+            "DO NOW, whichever is true: continue with the next open task, OR name "
+            "the one thing you are waiting on (a decision, an approval, an external "
+            "result). Either ends the turn cleanly."
+            % open_tasks
+        )
+
 if reason is None:
     write_count(0)          # clean stop: reset the streak
     allow()
@@ -388,7 +392,7 @@ if count >= MAX_BLOCKS:
 log = os.path.join(config, "stop_continuation_guard.log")
 try:
     stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
-    if not AUTONOMOUS:
+    if open_tasks:
         kind = "OPEN_WORK_UNDECLARED"
     elif open_items:
         kind = "PLAN_ITEMS_OPEN"
