@@ -16,7 +16,15 @@ setup() {
     # pass in CI while failing on the developer's machine.
     export CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR/cfg"
     mkdir -p "$CLAUDE_CONFIG_DIR"
+    # The startup-tier check reads $HOME/.claude as well as CLAUDE_CONFIG_DIR —
+    # the real loaders read from there, and in a cage CLAUDE_CONFIG_DIR holds no
+    # CLAUDE.md at all. Without a fake HOME the tier tests would measure the
+    # developer's actual ~/.claude and pass or fail with its size.
+    export HOME="$BATS_TEST_TMPDIR/home"
+    mkdir -p "$HOME/.claude"
     unset "${!CCAGE_RESUME_BUDGET@}"
+    unset "${!CCAGE_TIER@}"
+    unset CCLAUDE_DOCTRINE_FILE
 }
 
 # Feed a synthesized PostToolUse payload referencing $1; hook stdout is captured.
@@ -268,4 +276,169 @@ nextlist() {  # write $1 numbered items under ### Next in file $2
     run emit "$r"
     [ "$(grep -c nonexistent "$s")" -eq 0 ]
     [ "$(grep -c "$r" "$s")" -eq 1 ]
+}
+
+# ---------------------------------------------------------------------------
+# The ALWAYS-LOADED STARTUP TIER (CLAUDE.md + main-session-doctrine.md +
+# rules/*.md, under $HOME/.claude and CLAUDE_CONFIG_DIR). Gated on GROWTH OF THE
+# TOTAL past one budget — the tier regrows by adding a file as readily as by
+# fattening one, and a session pays the sum.
+# ---------------------------------------------------------------------------
+
+fill() { head -c "$1" /dev/zero | tr '\0' x > "$2"; }   # $1 bytes of filler -> $2
+
+@test "tier: a FIRST write announces the baseline instead of going quiet" {
+    fill 400 "$HOME/.claude/CLAUDE.md"
+    run emit "$HOME/.claude/CLAUDE.md"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"baseline recorded"* ]]
+}
+
+@test "tier: under budget is silent after the baseline" {
+    fill 400 "$HOME/.claude/CLAUDE.md"
+    run emit "$HOME/.claude/CLAUDE.md"           # baseline
+    fill 500 "$HOME/.claude/CLAUDE.md"
+    run emit "$HOME/.claude/CLAUDE.md"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "tier: growth past the UNCONFIGURED DEFAULT budget BLOCKS (D8)" {
+    fill 20000 "$HOME/.claude/CLAUDE.md"
+    run emit "$HOME/.claude/CLAUDE.md"           # baseline, 20000 < 26000 default
+    fill 27000 "$HOME/.claude/CLAUDE.md"
+    run emit "$HOME/.claude/CLAUDE.md"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"grew past its budget"* ]]
+    [[ "$output" == *"26000"* ]]
+}
+
+@test "tier: the block LISTS the resident files with their sizes" {
+    fill 1000 "$HOME/.claude/CLAUDE.md"
+    fill 1000 "$HOME/.claude/main-session-doctrine.md"
+    CCAGE_TIER_BUDGET_BYTES=2500 run emit "$HOME/.claude/CLAUDE.md"
+    fill 2000 "$HOME/.claude/CLAUDE.md"
+    CCAGE_TIER_BUDGET_BYTES=2500 run emit "$HOME/.claude/CLAUDE.md"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"main-session-doctrine.md"* ]]
+    [[ "$output" == *"2000 B"* ]]
+    [[ "$output" == *"-> 3000 bytes"* ]]
+}
+
+@test "tier: the refusal names remedies, never its own escape hatch (D15)" {
+    fill 1000 "$HOME/.claude/CLAUDE.md"
+    CCAGE_TIER_BUDGET_BYTES=1500 run emit "$HOME/.claude/CLAUDE.md"
+    fill 2000 "$HOME/.claude/CLAUDE.md"
+    CCAGE_TIER_BUDGET_BYTES=1500 run emit "$HOME/.claude/CLAUDE.md"
+    [ "$status" -eq 2 ]
+    [[ "$output" != *"CCAGE_TIER_BUDGET_BYTES"* ]]
+    [[ "$output" != *"CCAGE_RESUME_BUDGET_MODE"* ]]
+    [[ "$output" == *"hook that fires when the action happens"* ]]
+    [[ "$output" == *"claudeMdExcludes"* ]]
+}
+
+@test "tier: over budget but NOT growing is advised, never blocked" {
+    fill 3000 "$HOME/.claude/CLAUDE.md"
+    CCAGE_TIER_BUDGET_BYTES=1500 run emit "$HOME/.claude/CLAUDE.md"
+    fill 2000 "$HOME/.claude/CLAUDE.md"
+    CCAGE_TIER_BUDGET_BYTES=1500 run emit "$HOME/.claude/CLAUDE.md"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"not growing, keep going"* ]]
+}
+
+@test "tier: ADDING a rules file that pushes the total over BLOCKS" {
+    fill 1000 "$HOME/.claude/CLAUDE.md"
+    CCAGE_TIER_BUDGET_BYTES=1500 run emit "$HOME/.claude/CLAUDE.md"
+    mkdir -p "$HOME/.claude/rules"
+    fill 900 "$HOME/.claude/rules/style.md"
+    CCAGE_TIER_BUDGET_BYTES=1500 run emit "$HOME/.claude/rules/style.md"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"rules/style.md"* ]]
+}
+
+@test "tier: a PROJECT CLAUDE.md is not a member — silent no-op" {
+    fill 40000 "$BATS_TEST_TMPDIR/proj/CLAUDE.md" 2>/dev/null || {
+        mkdir -p "$BATS_TEST_TMPDIR/proj"; fill 40000 "$BATS_TEST_TMPDIR/proj/CLAUDE.md"; }
+    CCAGE_TIER_BUDGET_BYTES=100 run emit "$BATS_TEST_TMPDIR/proj/CLAUDE.md"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "tier: an unrelated */rules/*.md outside the tier dirs is a no-op" {
+    mkdir -p "$BATS_TEST_TMPDIR/proj/rules"
+    fill 40000 "$BATS_TEST_TMPDIR/proj/rules/x.md"
+    CCAGE_TIER_BUDGET_BYTES=100 run emit "$BATS_TEST_TMPDIR/proj/rules/x.md"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "tier: observe mode downgrades the block to a note" {
+    fill 1000 "$HOME/.claude/CLAUDE.md"
+    CCAGE_TIER_BUDGET_BYTES=1500 run emit "$HOME/.claude/CLAUDE.md"
+    fill 2000 "$HOME/.claude/CLAUDE.md"
+    CCAGE_TIER_BUDGET_BYTES=1500 CCAGE_RESUME_BUDGET_MODE=observe \
+        run emit "$HOME/.claude/CLAUDE.md"
+    [ "$status" -eq 0 ]
+}
+
+@test "tier: CCLAUDE_DOCTRINE_FILE is followed, not the default path" {
+    fill 1000 "$HOME/.claude/CLAUDE.md"
+    fill 900 "$BATS_TEST_TMPDIR/elsewhere-doctrine.md"
+    CCLAUDE_DOCTRINE_FILE="$BATS_TEST_TMPDIR/elsewhere-doctrine.md" \
+        CCAGE_TIER_BUDGET_BYTES=1500 run emit "$HOME/.claude/CLAUDE.md"
+    [[ "$output" == *"1900"* ]]
+}
+
+@test "tier: the total is remembered MACHINE-WIDE, not per cage" {
+    # Keyed per cage, the first tier write in each of this machine's 76 cages
+    # would find no baseline and be unblockable. Found by live-firing, not here.
+    fill 1000 "$HOME/.claude/CLAUDE.md"
+    CCAGE_TIER_BUDGET_BYTES=1500 run emit "$HOME/.claude/CLAUDE.md"
+    [ "$(cat "$HOME/.claude/.tier_budget_state")" = "1000" ]
+    fill 2000 "$HOME/.claude/CLAUDE.md"
+    CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR/other-cage" \
+        CCAGE_TIER_BUDGET_BYTES=1500 run emit "$HOME/.claude/CLAUDE.md"
+    [ "$status" -eq 2 ]                  # a different cage still sees the growth
+}
+
+@test "tier: a blocked write is confirm-once — the immediate re-issue passes" {
+    fill 1000 "$HOME/.claude/CLAUDE.md"
+    CCAGE_TIER_BUDGET_BYTES=1500 run emit "$HOME/.claude/CLAUDE.md"
+    fill 2000 "$HOME/.claude/CLAUDE.md"
+    CCAGE_TIER_BUDGET_BYTES=1500 run emit "$HOME/.claude/CLAUDE.md"
+    [ "$status" -eq 2 ]
+    CCAGE_TIER_BUDGET_BYTES=1500 run emit "$HOME/.claude/CLAUDE.md"
+    [ "$status" -eq 0 ]
+}
+
+@test "tier: the RESUME state file is untouched by a tier write" {
+    fill 400 "$HOME/.claude/CLAUDE.md"
+    run emit "$HOME/.claude/CLAUDE.md"
+    local r="$BATS_TEST_TMPDIR/RESUME.md"
+    printf '# R\n\n### Next\n1. a\n2. b\n' > "$r"
+    run emit "$r"
+    run emit "$HOME/.claude/CLAUDE.md"
+    printf '# R\n\n### Next\n1. a\n' > "$r"     # dropped an item
+    run emit "$r"
+    [ "$status" -eq 2 ]                            # RESUME guard still armed
+}
+
+@test "tier: every decision is logged, ALLOWs included (D14)" {
+    fill 400 "$HOME/.claude/CLAUDE.md"
+    run emit "$HOME/.claude/CLAUDE.md"
+    run emit "$HOME/.claude/CLAUDE.md"
+    grep -q "ALLOW-tierbaseline" "$CLAUDE_CONFIG_DIR/resume_budget_check.log"
+    grep -q "ALLOW-tierunder"    "$CLAUDE_CONFIG_DIR/resume_budget_check.log"
+}
+
+@test "tier: works without jq, instead of silently switching off" {
+    local shim="$BATS_TEST_TMPDIR/nojq" c; mkdir -p "$shim"
+    for c in bash cat grep awk wc tr basename printf mv rm sed head date command; do
+        ln -sf "$(command -v "$c")" "$shim/$c" 2>/dev/null || true
+    done
+    fill 1000 "$HOME/.claude/CLAUDE.md"
+    PATH="$shim" CCAGE_TIER_BUDGET_BYTES=1500 run emit "$HOME/.claude/CLAUDE.md"
+    fill 2000 "$HOME/.claude/CLAUDE.md"
+    PATH="$shim" CCAGE_TIER_BUDGET_BYTES=1500 run emit "$HOME/.claude/CLAUDE.md"
+    [ "$status" -eq 2 ]
 }

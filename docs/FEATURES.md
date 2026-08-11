@@ -486,6 +486,7 @@ It also calls `ccage-watch reap` first, when that command is installed. A watche
 | `CCAGE_NO_BUDGET_HOOK` | unset | Skip seeding the PostToolUse budget hook. |
 | `CCAGE_RESUME_BUDGET_LINES` | `250` | Line budget before the auto-read hook / doctor flag a bloated RESUME. |
 | `CCAGE_RESUME_BUDGET_BYTES` | `14000` | Byte budget (alongside the line/block budgets) — a dense file can bloat well under the line cap. |
+| `CCAGE_TIER_BUDGET_BYTES` | `26000` | Byte budget for the whole **always-loaded startup tier** (`CLAUDE.md` + `main-session-doctrine.md` + `rules/*.md`, under `$HOME/.claude` and `CLAUDE_CONFIG_DIR`). The same PostToolUse hook blocks a write that grows the *total* past this; a write that does not increase it is never blocked. Machine-wide: the last-seen total lives in `~/.claude/.tier_budget_state`, not per cage. |
 | `CCAGE_MEMORY_ORPHAN_MAX` | `3` | Un-indexed memory files tolerated before flagging the dir as messy. |
 | `CCAGE_HOOKS_DIR` | `~/.claude/hooks` | Where the hook scripts are installed and referenced from. |
 

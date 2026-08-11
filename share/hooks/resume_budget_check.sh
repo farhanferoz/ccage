@@ -24,7 +24,17 @@
 # reflex this change exists to break. So a write that SHRINKS the file is only
 # ever advised, never blocked; the last-seen size is kept in a small state file.
 #
-# Escape hatch: CCAGE_RESUME_BUDGET_MODE=observe restores advisory-only.
+# THREE KINDS OF FILE, one mechanism (state file, previous value, never-punish-
+# progress rule). Each has a different notion of "too big":
+#   RESUME.md     byte budget + session-block cap, and '### Next' must not shrink
+#   DECISIONS.md  no size budget; a live entry may not vanish unarchived
+#   startup tier  ONE byte budget for the whole always-loaded set (see below)
+#
+# Escape hatches (for a human reading this source, per D15 — the refusals below
+# deliberately do not advertise them):
+#   CCAGE_RESUME_BUDGET_MODE=observe   restores advisory-only, all three kinds
+#   CCAGE_RESUME_BUDGET_BYTES          RESUME byte budget      (default 14000)
+#   CCAGE_TIER_BUDGET_BYTES            startup-tier budget     (default 26000)
 # Deliberately no `set -e`: a hook that aborts on a parse hiccup is worse than
 # one that no-ops.
 MAX=3
@@ -71,9 +81,68 @@ kind=resume
 case "$(basename -- "$fp")" in
     RESUME.md|RESUME.*.md) ;;
     DECISIONS.md)          kind=decisions ;;
+    # Cheap pre-filter only — a project's own CLAUDE.md and any other */rules/*.md
+    # share these names. Membership in the real tier is settled by tier_files()
+    # below, which lists paths, not names.
+    CLAUDE.md|main-session-doctrine.md) kind=tier ;;
+    *.md) case "$fp" in */rules/*) kind=tier ;; *) exit 0 ;; esac ;;
     *) exit 0 ;;
 esac
 [ -f "$fp" ] || exit 0
+
+# ---- the ALWAYS-LOADED STARTUP TIER ----------------------------------------
+# What every MAIN session pays for before the user types anything, and pays again
+# in full on every /clear. RESUME.md and DECISIONS.md belong to that tier too but
+# are budgeted above on their own terms; this covers the rest of it.
+#
+# MEASURED 2026-08-11 on this machine: CLAUDE.md 11,587 B + main-session-doctrine
+# 12,339 B = 23,926 B, none of it under any check at all — so the shrink done that
+# same day could unwind one reasonable-looking edit at a time, with nothing to
+# notice. That is the whole defect this closes; it is a ratchet, not a diet.
+#
+# ONE TOTAL, NOT A PER-FILE CAP: the tier's cost is the sum, and a per-file cap is
+# satisfied by splitting one file in two. That is not hypothetical — the 2026-08-11
+# split of CLAUDE.md into CLAUDE.md + main-session-doctrine.md cut what WORKERS
+# inherit (5,218 -> 2,909 tokens, which was the point), but a main session loads
+# both, so the tier itself did not shrink by a byte.
+#
+# DELIBERATELY NOT INCLUDED, so the gaps are decisions and not oversights:
+# MEMORY.md (per-cage, and /checkpoint --tidy's volume trigger already governs it)
+# and any PROJECT CLAUDE.md (per-project — one machine-wide number cannot judge it).
+tier_files() {
+    # BOTH anchors, because neither alone is right. $HOME/.claude is where the
+    # loaders actually read from here (the doctrine hook hard-codes it, and this
+    # cage's CLAUDE_CONFIG_DIR — measured: /home/ff235/.claude-ccage — contains no
+    # CLAUDE.md whatsoever, so keying off it alone would match nothing and this
+    # guard would be inert from birth). CLAUDE_CONFIG_DIR is the right answer on a
+    # machine with no ccage. Identical strings collapse in the dedupe below; a file
+    # symlinked between the two dirs is the documented limit, and it inflates the
+    # total rather than hiding growth.
+    for d in "$HOME/.claude" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; do
+        # rules/*.md is a REAL loader path, not an assumption: verified in the
+        # 2.1.227 bundle, where `claudeMdExcludes` documents excluding
+        # "**/some-dir/.claude/rules/**" and an internal walker takes a rulesDir.
+        for f in "$d/CLAUDE.md" "$d/main-session-doctrine.md" "$d"/rules/*.md; do
+            [ -f "$f" ] && printf '%s\n' "$f"
+        done
+    done
+    # The doctrine hook honours CCLAUDE_DOCTRINE_FILE; follow the same variable
+    # rather than assume the default path is the one in force.
+    [ -n "${CCLAUDE_DOCTRINE_FILE:-}" ] && [ -f "$CCLAUDE_DOCTRINE_FILE" ] && \
+        printf '%s\n' "$CCLAUDE_DOCTRINE_FILE"
+    return 0
+}
+
+tier_list=""; tier_total=0
+if [ "$kind" = tier ]; then
+    tier_list="$(tier_files | awk '!seen[$0]++')"
+    # Not a member: a project CLAUDE.md, someone else's rules dir. Exit quietly —
+    # this is the common case and must stay cheap.
+    printf '%s\n' "$tier_list" | grep -qxF -- "$fp" || exit 0
+    tier_total="$(printf '%s\n' "$tier_list" \
+        | while IFS= read -r f; do [ -n "$f" ] && wc -c < "$f"; done \
+        | awk '{s+=$1} END {print s+0}')"
+fi
 
 # Read via stdin redirection so a file_path beginning with '-' can't be parsed
 # as a grep option (Claude Code supplies absolute paths, but be defensive).
@@ -101,6 +170,14 @@ next_n="$(awk '/^### Next/{f=1;next} /^### /{f=0} f && /^[0-9][^[:space:]]*\.[[:
 next_labels="$(awk '/^### Next/{f=1;next} /^### /{f=0}
     f && /^[0-9][^[:space:]]*\.[[:space:]]/ { out = out (out ? "," : "") $1 }
     END { print out }' "$fp" 2>/dev/null)"
+
+# A tier file has no session blocks and no '### Next'. Zero the RESUME-shaped
+# measurements so only the tier check can act on it — otherwise an ordinary
+# numbered list in CLAUDE.md would be recorded as an item count and, worse, could
+# later look like it "shrank".
+if [ "$kind" = tier ]; then
+    n=0; budget_bytes=2147483647; next_n=0; next_labels=""
+fi
 
 # DECISIONS.md is the same SHAPE of problem as RESUME's '### Next' — a durable,
 # git-excluded list whose entries must not vanish silently — so it reuses the
@@ -136,7 +213,7 @@ over=0
 # --- last-seen size, so a shrinking write is recognised as progress ----------
 state_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 state="$state_dir/.resume_budget_state"
-prev=""; prev_next=""; prev_labels=""
+prev=""; prev_next=""; prev_labels=""; prev_total=""
 if [ -r "$state" ]; then
     # ALL previous values must be read BEFORE the rewrite below — reading
     # prev_next afterwards compares the new value against itself, which silently
@@ -145,6 +222,21 @@ if [ -r "$state" ]; then
     prev_next="$(awk -F'\t' -v p="$fp" '$1 == p { v = $3 } END { print v }' "$state" 2>/dev/null)"
     prev_labels="$(awk -F'\t' -v p="$fp" '$1 == p { v = $4 } END { print v }' "$state" 2>/dev/null)"
 fi
+
+# The tier's last-seen TOTAL lives in its own file under $HOME/.claude, NOT in the
+# per-cage state above. Two reasons, the second found by live-firing this on the
+# real machine rather than in the test sandbox:
+#   * it is a total, not a per-path size — growth by ADDING a file (a new
+#     rules/*.md) has no previous per-file size to compare against, and that is
+#     the largest single way this tier regrows;
+#   * the tier is MACHINE-WIDE while the state file is per-cage. Keyed per cage,
+#     the first tier write in each of this machine's 76 cages would find no
+#     baseline and be unblockable — 76 free regrowths, one per cage.
+# Unwritable $HOME/.claude degrades to re-announcing the baseline: noisy, never
+# wrong.
+tier_state="$HOME/.claude/.tier_budget_state"
+prev_total=""
+[ -r "$tier_state" ] && prev_total="$(tr -dc '0-9' < "$tier_state" 2>/dev/null)"
 if [ -d "$state_dir" ] && [ -w "$state_dir" ]; then
     tmp="$state.$$"
     # Entries for files that no longer exist are dropped on every rewrite. The
@@ -162,6 +254,69 @@ if [ -d "$state_dir" ] && [ -w "$state_dir" ]; then
       printf '%s\t%s\t%s\t%s\n' "$fp" "$bytes" "$next_n" "$next_labels"
     } > "$tmp" 2>/dev/null && mv -f "$tmp" "$state" 2>/dev/null
     rm -f "$tmp" 2>/dev/null
+fi
+
+# ---- the ALWAYS-LOADED TIER must not silently REGROW ------------------------
+# Gates on GROWTH OF THE TOTAL, not on this file's size: the tier regrows just as
+# easily by adding a file as by fattening one, and the sum is what a session pays.
+if [ "$kind" = tier ]; then
+    tier_budget="${CCAGE_TIER_BUDGET_BYTES:-26000}"
+    tier_names="$(printf '%s\n' "$tier_list" | while IFS= read -r f; do
+        [ -n "$f" ] && printf '  %8s B  %s\n' \
+            "$(wc -c < "$f" 2>/dev/null | tr -d '[:space:]')" "$f"
+    done)"
+
+    # Recorded BEFORE any decision below, exactly as RESUME's count is: the same
+    # confirm-once contract. A genuinely-intended growth costs one blocked write
+    # and the immediate re-issue goes through — a speed bump that forces one
+    # conscious look, never a deadlock.
+    printf '%s\n' "$tier_total" > "$tier_state" 2>/dev/null || true
+
+    # FIRST WRITE on this machine: no previous total exists, so growth cannot be
+    # detected this time. Announce the baseline instead of exiting silently — a
+    # guard with nothing to compare must never be mistaken for a guard that looked
+    # and was happy. Same reason RESUME announces its own baseline.
+    if [ -z "$prev_total" ]; then
+        _log "ALLOW-tierbaseline" "${tier_total}B / ${tier_budget}"
+        emit_note "Startup-tier baseline recorded: ${tier_total} B always-loaded, budget ${tier_budget} B. No previous total existed on this machine, so nothing could be compared this time — a later write that grows the tier past budget will be blocked."
+        exit 0
+    fi
+    if [ "$tier_total" -le "$tier_budget" ] 2>/dev/null; then
+        _log "ALLOW-tierunder" "${tier_total}B / ${tier_budget}"
+        exit 0
+    fi
+    # Over budget, but this write did not add to it. NEVER block that: the fix for
+    # an over-budget tier is a write to one of these very files, and blocking the
+    # fix is how a guard teaches the reflex to ignore it.
+    if [ "$tier_total" -le "$prev_total" ] 2>/dev/null \
+       || [ "${CCAGE_RESUME_BUDGET_MODE:-}" = "observe" ]; then
+        _log "ALLOW-tiernogrowth" "${prev_total}B -> ${tier_total}B, budget ${tier_budget}"
+        emit_note "Startup tier is ${tier_total} B against a ${tier_budget} B budget (was ${prev_total} B — not growing, keep going)."
+        exit 0
+    fi
+    _log "DENY-tiergrew" "${prev_total}B -> ${tier_total}B, budget ${tier_budget}"
+    cat >&2 <<MSG
+The ALWAYS-LOADED startup tier grew past its budget: ${prev_total} -> ${tier_total} bytes (budget ${tier_budget}).
+$tier_names
+
+Every MAIN session loads all of this before you type a word, and loads it again in
+full after every /clear. It was cut deliberately, and nothing but this check stops
+that cut from unwinding one reasonable-looking edit at a time.
+
+Bring the total back down before continuing. In payoff order:
+  - a rule that must BIND belongs in a hook that fires when the action happens.
+    Adherence to a session-start instruction measurably decays as a session runs;
+    a hook does not. Moving it costs the tier nothing and gains enforcement.
+  - reference material, as opposed to a standing rule, belongs in a skill or a
+    doc that loads on demand.
+  - a rule some hook already enforces can go outright — the tier is paying for
+    prose whose job is already done mechanically.
+  - a whole file that should stop being resident can be dropped from loading with
+    the native \`claudeMdExcludes\` setting (globs or absolute paths).
+If this growth is genuinely right, say so and ask — do not route around this.
+A write that does not increase the total is never blocked, so trimming goes through.
+MSG
+    exit 2
 fi
 
 # ---- ### Next must not silently SHRINK ------------------------------------
