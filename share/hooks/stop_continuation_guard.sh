@@ -249,7 +249,10 @@ if open_items and not asked:
         "DO NOW: either do them, or tick them off with the evidence that they are "
         "done, or state explicitly which are deferred and why — a deferral declared "
         "out loud is fine; a silently dropped item is the failure this exists to "
-        "catch. Then stopping is correct and this will allow it."
+        "catch. Then stopping is correct and this will allow it.\n"
+        "EVIDENCE, not recollection: run the verification command and show its "
+        "output before ticking anything (`verification-before-completion` skill). "
+        "Five shipped bugs got past tests their own author called green."
         % (os.path.basename(plan_path), open_items)
     )
 elif agents and not asked:
