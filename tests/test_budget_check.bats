@@ -203,3 +203,69 @@ nextlist() {  # write $1 numbered items under ### Next in file $2
     CCAGE_RESUME_BUDGET_MODE=observe run emit "$r"
     [ "$status" -eq 0 ]
 }
+
+# ===== the five defects found by live-firing this guard, 2026-08-11 =====
+# Every one of them was on a path the tests above configure away.
+
+@test "next-guard: items with letter suffixes and dash ranges COUNT" {
+    # `7b.` and `1–3.` are how a real RESUME splits and merges items, and the
+    # original `^[0-9]+\.` could not see either — 8 of 11 in the live file. A
+    # deletion of one was therefore invisible to the one check meant to catch it.
+    local r="$BATS_TEST_TMPDIR/RESUME.md"
+    printf '# R\n\n### Next\n1–3. merged\n7. plain\n7b. suffixed\n' > "$r"
+    run emit "$r"; [ "$status" -eq 0 ]
+    printf '# R\n\n### Next\n1–3. merged\n7. plain\n' > "$r"      # drop 7b only
+    run emit "$r"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"3 items -> 2"* ]]
+}
+
+@test "next-guard: the block NAMES the items that went" {
+    local r="$BATS_TEST_TMPDIR/RESUME.md"
+    printf '# R\n\n### Next\n1. a\n2. b\n3. c\n' > "$r"; run emit "$r"
+    printf '# R\n\n### Next\n1. a\n' > "$r"
+    run emit "$r"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"GONE:"* ]]
+    [[ "$output" == *"2."* ]]
+    [[ "$output" == *"3."* ]]
+}
+
+@test "next-guard: a FIRST write announces the baseline instead of going quiet" {
+    # No state file yet, so nothing can be compared — which used to be silent and
+    # therefore indistinguishable from "compared, all good".
+    local r="$BATS_TEST_TMPDIR/RESUME.md"
+    printf '# R\n\n### Next\n1. a\n2. b\n' > "$r"
+    run emit "$r"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"baseline recorded"* ]]
+    [[ "$output" == *"2 items"* ]]
+    run emit "$r"                        # second write: baseline exists, quiet
+    [[ "$output" != *"baseline recorded"* ]]
+}
+
+@test "next-guard: works without jq, instead of silently switching off" {
+    local bin="$BATS_TEST_TMPDIR/nojq" b
+    mkdir -p "$bin"
+    for b in bash cat grep awk wc tr basename printf mv rm sed head command; do
+        ln -sf "$(command -v "$b")" "$bin/$b" 2>/dev/null || true
+    done
+    local r="$BATS_TEST_TMPDIR/RESUME.md"
+    printf '# R\n\n### Next\n1. a\n2. b\n' > "$r"
+    PATH="$bin" run emit "$r"
+    printf '# R\n\n### Next\n1. a\n' > "$r"
+    PATH="$bin" run emit "$r"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"SHRANK"* ]]
+}
+
+@test "state file drops entries for files that no longer exist" {
+    local r="$BATS_TEST_TMPDIR/RESUME.md" s="$CLAUDE_CONFIG_DIR/.resume_budget_state"
+    printf '# R\n\n### Next\n1. a\n' > "$r"
+    run emit "$r"
+    printf '/nonexistent/one/RESUME.md\t10\t2\ta.,b.\n' >> "$s"
+    printf '/nonexistent/two/RESUME.md\t10\t2\ta.,b.\n' >> "$s"
+    run emit "$r"
+    [ "$(grep -c nonexistent "$s")" -eq 0 ]
+    [ "$(grep -c "$r" "$s")" -eq 1 ]
+}
