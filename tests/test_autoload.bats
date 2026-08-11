@@ -645,3 +645,65 @@ Prose only. Several things remain to be done, described in sentences.
     run run_hook
     [[ "$output" != *"PLAN STATE"* ]]
 }
+
+# ---- watcher reap wiring (added 2026-08-11) --------------------------------
+# ccage-watch writes to RESUME only when its condition fires or its TTL expires;
+# killed any other way it writes nothing, so a death used to be indistinguishable
+# from never having armed one. These pin the WIRING — that reap is called, that
+# its output lands ahead of the RESUME body it annotates, that silence stays
+# silent, and that a machine without ccage-watch is unaffected. What reap decides
+# is ccage-watch's own suite's job, so the command is stubbed here.
+
+# Run the hook with a controlled PATH and HOME (the hook falls back to
+# ~/.local/bin/ccage-watch when the command is not on PATH).
+run_hook_env() { ( cd "$REPO" && PATH="$1" HOME="$2" "$HOOK" ); }
+
+stub_bin() {
+    mkdir -p "$BATS_TEST_TMPDIR/bin"
+    cat > "$BATS_TEST_TMPDIR/bin/ccage-watch"
+    chmod +x "$BATS_TEST_TMPDIR/bin/ccage-watch"
+    printf '%s/bin:%s' "$BATS_TEST_TMPDIR" "$PATH"
+}
+
+@test "a watcher that died is reported, ahead of the RESUME body it annotates" {
+    local p
+    p=$(stub_bin <<'EOF'
+#!/bin/sh
+[ "$1" = "reap" ] || exit 0
+echo "WATCHERS (ccage-watch, survives sessions):"
+echo "  - DIED deadbeef00: waiting on the overnight job — never reported"
+EOF
+)
+    printf '# Resume\n\nthe resume body\n' > "$REPO/RESUME.md"
+    run run_hook_env "$p" "$HOME"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"DIED deadbeef00"* ]]
+    # Order is the point: the death must be in context before the state it corrects.
+    [[ "${output%%the resume body*}" == *"DIED deadbeef00"* ]]
+}
+
+@test "no watcher armed: reap contributes nothing to session start" {
+    local p
+    p=$(stub_bin <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+)
+    printf 'the resume body\n' > "$REPO/RESUME.md"
+    run run_hook_env "$p" "$HOME"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"the resume body"* ]]
+    # Not "no output" — this RESUME has no ### Plan section, so the plan-state
+    # block speaks. The claim is narrower: the watcher path adds nothing.
+    [[ "$output" != *"WATCHERS"* ]]
+    [[ "$output" != *"DIED"* ]]
+}
+
+@test "ccage-watch not installed at all: session start is unaffected" {
+    mkdir -p "$BATS_TEST_TMPDIR/empty" "$BATS_TEST_TMPDIR/nohome"
+    printf 'the resume body\n' > "$REPO/RESUME.md"
+    run run_hook_env "$BATS_TEST_TMPDIR/empty:/usr/bin:/bin" "$BATS_TEST_TMPDIR/nohome"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"the resume body"* ]]
+    [[ "$output" != *"WATCHERS"* ]]
+}

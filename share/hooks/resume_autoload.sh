@@ -173,6 +173,38 @@ if [ "$src" = "startup" ] || [ "$src" = "resume" ]; then
     fi
 fi
 
+# ---- 0c. armed watchers: a death must never be silent ----
+# ccage-watch outlives the session that armed it, but it only ever writes to
+# RESUME on two events: the condition fired, or the TTL expired. Killed any
+# other way — a reboot, an OOM, a stray kill — it writes nothing at all, so
+# "armed and died" reads exactly like "never armed". That is the tool's own
+# failure mode one level up, and it was live-fired on 2026-08-11: nothing read
+# the watch dir at session start, and no hook but the Stop guard even mentioned
+# ccage-watch. `reap` records a death in RESUME the same way a firing is
+# recorded, and names every watcher still armed so a pending one is not mistaken
+# for done. It runs BEFORE the injection below so a death recorded now is part
+# of this session's context, and it prints nothing when no watcher is armed —
+# a project that never uses watchers pays no session-start context for this.
+watch_bin=""
+if command -v ccage-watch >/dev/null 2>&1; then
+    watch_bin="ccage-watch"
+elif [ -x "$HOME/.local/bin/ccage-watch" ]; then
+    watch_bin="$HOME/.local/bin/ccage-watch"
+fi
+# Bounded like the stdin read above, and for the same reason: this hook must
+# never be what delays a session start. `timeout` is absent on stock macOS, so
+# the fallback is a plain call — reap's own probes are individually bounded.
+if [ -n "$watch_bin" ]; then
+    (
+        cd "$base" 2>/dev/null || exit 0
+        if command -v timeout >/dev/null 2>&1; then
+            timeout 10 "$watch_bin" reap 2>/dev/null || exit 0
+        else
+            "$watch_bin" reap 2>/dev/null || exit 0
+        fi
+    )
+fi
+
 # ---- 1. inject RESUME into context ----
 # Bounded: a runaway RESUME (the exact failure the budget NOTE below nags about)
 # must degrade instead of flooding every session start. 2× budget is generous —

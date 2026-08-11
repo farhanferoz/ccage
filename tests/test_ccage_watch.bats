@@ -151,6 +151,81 @@ specs() { ls "$CLAUDE_CONFIG_DIR"/watch/*.json 2>/dev/null | wc -l | tr -d ' '; 
     [ "$status" -ne 0 ]
 }
 
+# ---------------------------------------------------------------------------
+# The five tests below cover the UNCONFIGURED default path — the one every test
+# above configures away. All three defects they pin were found on 2026-08-11 by
+# running the shipped tool with nothing set up, not by any test.
+# ---------------------------------------------------------------------------
+
+@test "a watcher killed without reporting is reaped into RESUME, not silent" {
+    python3 "$WATCH" arm --cond "false" --note "the long job" \
+        --interval 1 --ttl 600 >/dev/null
+    local pid
+    pid=$(python3 -c "import json,glob;print(json.load(open(glob.glob('$CLAUDE_CONFIG_DIR/watch/*.json')[0]))['pid'])")
+    kill -9 "$pid"
+    local i=0
+    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 40 ]; do sleep 0.2; i=$((i + 1)); done
+
+    run python3 "$WATCH" reap
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"DIED"* ]]
+    grep -qF "WATCH DIED" RESUME.md
+    grep -qF "not as success" RESUME.md      # a death must never read as done
+    grep -qF "the long job" RESUME.md        # what it was bridging is named
+    [ "$(specs)" -eq 0 ]
+}
+
+@test "a failed RESUME write keeps the spec, so reap still reports it" {
+    # RESUME.md unwritable: the append fails. The spec is the only trace of the
+    # watcher, so deleting it here would leave nothing for any future session.
+    printf '# RESUME\n' > RESUME.md
+    chmod 0444 RESUME.md
+    python3 "$WATCH" arm --cond "true" --interval 1 --ttl 30 >/dev/null
+    local pid i=0
+    pid=$(python3 -c "import json,glob;print(json.load(open(glob.glob('$CLAUDE_CONFIG_DIR/watch/*.json')[0]))['pid'])")
+    # wait for the daemon to finish its (failing) write and exit
+    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
+    [ "$(specs)" -eq 1 ]                      # evidence kept, not swallowed
+    chmod 0644 RESUME.md
+    run python3 "$WATCH" reap
+    [[ "$output" == *"DIED"* ]]
+    grep -qF "WATCH DIED" RESUME.md
+}
+
+@test "reap is silent when no watcher is armed" {
+    run python3 "$WATCH" reap
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ ! -f RESUME.md ]
+}
+
+@test "read-only commands never create a config dir" {
+    export CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR/absent-cage"
+    run python3 "$WATCH" list
+    [ "$status" -eq 0 ]
+    run python3 "$WATCH" reap
+    [ "$status" -eq 0 ]
+    [ ! -e "$BATS_TEST_TMPDIR/absent-cage" ]
+}
+
+@test "armed from a subdirectory, the outcome lands at the project root" {
+    git init -q . 2>/dev/null || skip "git required"
+    printf '# RESUME\n' > RESUME.md
+    mkdir -p deep/nested
+    cd deep/nested || return 1
+    run python3 "$WATCH" arm --cond "true" --interval 1 --ttl 30
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"$PROJ/RESUME.md"* ]]     # the target is named at arm time
+    wait_for "$PROJ/RESUME.md" 20 "WATCH FIRED"
+    [ ! -f RESUME.md ]                         # no stray file in the subdirectory
+}
+
+@test "a slotted cage is reported into the RESUME file it actually reads" {
+    CCAGE_SLOT=b python3 "$WATCH" arm --cond "true" --interval 1 --ttl 30 >/dev/null
+    wait_for RESUME.b.md 20 "WATCH FIRED"
+    [ ! -f RESUME.md ]
+}
+
 @test "selftest passes" {
     run python3 "$WATCH" selftest
     [ "$status" -eq 0 ]

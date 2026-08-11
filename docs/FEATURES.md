@@ -448,6 +448,8 @@ Closes the loop between the structural `ccage handoff` brief and a repo's durabl
 
 > Auto-read, **not** auto-clear. `/clear` stays a deliberate user action (consistent with the PHASE-6 non-goal). The hook only re-injects state; it never clears for you.
 
+It also calls `ccage-watch reap` first, when that command is installed. A watcher armed by a previous session writes to `RESUME.md` only when its condition fires or its TTL expires; killed any other way (reboot, OOM, a stray `kill`) it wrote nothing at all, so "armed and died" read exactly like "never armed" — found by live-firing the unconfigured path, 2026-08-11. `reap` records a death in `RESUME.md` the same way a firing is recorded, names any watcher still live so a pending one is never mistaken for done, and prints nothing when none is armed. It runs *before* the injection below it, so a death recorded now is part of the same session's context.
+
 > **Trust note.** `RESUME.md` is normally a *personal, locally-authored* file (it's added to `.git/info/exclude`, so it never travels with the repo). But if you clone a repo that ships a `RESUME.md`, the auto-read hook will inject that attacker-authored text into your session context at every `SessionStart` — a prompt-injection surface. This is no worse than Claude Code already reading repo files, but it happens automatically; treat an inherited `RESUME.md` as untrusted repo content.
 
 ### Budget guard hook (PostToolUse)

@@ -341,10 +341,19 @@ elif (PROMISED_LATER.search(tail) and not watcher_armed()
         "handoff in RESUME '### Next' yourself. Do not leave it implicit."
     )
 elif committed:
+    # The rationale must match the mode it is delivered in. This trigger fires in
+    # BOTH (2026-08-11), but the text said "during an autonomous run there is
+    # nobody to prompt you to continue" — plainly false when a user is sitting
+    # there, and a guard that states something the reader can see is untrue
+    # teaches that its reasons are boilerplate. Caught by the one test that still
+    # asserted the pre-2026-08-11 behaviour, which is itself the tell.
+    why = ("During an autonomous run there is nobody to prompt you to continue."
+           if AUTONOMOUS else
+           "Stating an action and then stopping leaves the user to re-ask for "
+           "what you already said you would do.")
     reason = (
         "Your final message states an action you were about to take, and then the "
-        "turn ended without taking it. During an autonomous run there is nobody to "
-        "prompt you to continue.\n"
+        f"turn ended without taking it. {why}\n"
         "DO NOW: take that action. If it turns out to be blocked, say what blocks it "
         "— an external dependency, not a question you could answer from the plan — "
         "and then stopping is correct and this will allow it."

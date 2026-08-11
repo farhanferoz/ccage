@@ -1133,11 +1133,26 @@ path_sans_ccage_watch() {
     printf '%s' "$out"
 }
 
-@test "stop-guard: inert (silent, exit 0) without the autonomous marker" {
+# Until 2026-08-11 this asserted SILENCE without the autonomous marker, and it
+# went on asserting it after the guard was deliberately extended to attended
+# sessions — a test pinning the behaviour that had just been declared wrong. It
+# now pins the intended rule: unkept intent is caught in BOTH modes, and the
+# reason given must fit the mode it is delivered in (the attended text must not
+# claim nobody is watching).
+@test "stop-guard: unkept intent is caught WITHOUT the autonomous marker too" {
     run bash -c "echo '{\"session_id\":\"a\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Next I will run the suite.\"}' \
         | env -u CCAGE_AUTONOMOUS CLAUDE_CONFIG_DIR='$CAGE' bash '$STOPG'"
     [ "$status" -eq 0 ]
-    [ -z "$output" ]
+    [[ "$output" == *'"decision": "block"'* ]]
+    [[ "$output" == *"states an action you were about to take"* ]]
+    [[ "$output" != *"nobody to prompt you"* ]]
+}
+
+@test "stop-guard: the autonomous reason is used when the marker IS set" {
+    run bash -c "echo '{\"session_id\":\"a\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Next I will run the suite.\"}' \
+        | env CCAGE_AUTONOMOUS=1 CLAUDE_CONFIG_DIR='$CAGE' bash '$STOPG'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"nobody to prompt you"* ]]
 }
 
 @test "stop-guard: a clean completion is allowed" {
