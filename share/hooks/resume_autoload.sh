@@ -278,6 +278,24 @@ EOF
             printf 'An item whose write set is unstated cannot be dispatched safely; state it or\n'
             printf 'ask, rather than guessing. Counts come from checkboxes only.\n'
         fi
+    else
+        # NO PLAN DOC REGISTERED — say so, do not go quiet (fixed 2026-08-11).
+        #
+        # This block used to emit NOTHING here, on the reasoning above that "a
+        # session that isn't plan-driven gets no directive". That reasoning holds
+        # for a DIRECTIVE and fails for a FACT: silence is indistinguishable from
+        # "checked, nothing open". The user asked a fresh session in another
+        # project for a status report and got no plan information at all, and
+        # correctly read that as the feature not working.
+        #
+        # It is the same false pass the no-checkboxes case was written to prevent,
+        # one level up: there we refused to report "0 open" for an unverifiable
+        # plan; here we were reporting nothing at all for an unregistered one.
+        # An absent answer must look absent.
+        printf '\nPLAN STATE: no plan doc registered in the RESUME "### Plan" section, so completeness is\n'
+        printf 'UNVERIFIABLE — this is NOT "no open work". If work here follows a plan or design\n'
+        printf 'doc, name its exact path under "### Plan" at the next checkpoint; until then no\n'
+        printf 'status report from this session can claim how much of it is done.\n'
     fi
 fi
 

@@ -620,8 +620,28 @@ Prose only. Several things remain to be done, described in sentences.
     [[ "$output" != *"items OPEN"* ]]
 }
 
-@test "plan readiness: silent when RESUME has no ### Plan section" {
+# REWRITTEN 2026-08-11. This test used to assert the OPPOSITE — that a RESUME
+# with no ### Plan section produced no PLAN STATE line at all — and it passed,
+# green, for a day. It was written by the same reasoning that wrote the code, so
+# it encoded the code's blind spot as the specification.
+#
+# The cost was real: a fresh session in another project was asked for a status
+# report, said nothing about plan completeness, and read as "nothing to report"
+# rather than "I cannot verify this". Silence and a clean bill of health are
+# indistinguishable to a reader, which is the precise failure the sibling test
+# ("a plan with NO checkboxes is UNVERIFIABLE, never a false pass") exists to
+# prevent one level down. An absent answer must look absent.
+@test "plan readiness: NO ### Plan section reports UNVERIFIABLE, never silence" {
     printf '# RESUME\n\n### Next\n1. do a thing\n' > "$REPO/RESUME.md"
+    run run_hook
+    [[ "$output" == *"PLAN STATE"* ]]
+    [[ "$output" == *"UNVERIFIABLE"* ]]
+    # It must not be readable as "checked, nothing open".
+    [[ "$output" == *"NOT"* ]]
+}
+
+@test "plan readiness: no RESUME.md at all stays silent" {
+    rm -f "$REPO/RESUME.md"
     run run_hook
     [[ "$output" != *"PLAN STATE"* ]]
 }
