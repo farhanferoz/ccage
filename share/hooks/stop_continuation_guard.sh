@@ -71,9 +71,24 @@ def allow():
 if MODE == "off":
     allow()
 
-# Autonomous runs only. An attended session must never pay this cost.
-if os.environ.get("CCAGE_AUTONOMOUS", "") not in ("1", "true", "yes"):
-    allow()
+# ATTENDED SESSIONS ARE NO LONGER EXEMPT (2026-08-11). This used to return here
+# unless CCAGE_AUTONOMOUS was set, on the reasoning that "an attended session must
+# never pay this cost". The user then caught an attended session sitting idle with
+# five pending tasks and nothing watching -- the exact failure this file exists to
+# catch, in the half of the world it had been switched off for. Scoping a fix to
+# where the failures happened to be MEASURED left the other half uncovered.
+#
+# The two halves get different treatment, because the right behaviour differs:
+#   * AUTONOMOUS: all four triggers, up to MAX_BLOCKS pushes. Nobody is watching,
+#     so the guard is the only thing that can restart the work.
+#   * ATTENDED: ONE trigger and ONE push -- open work with no stated reason for
+#     stopping. Handing back to the user is legitimate and often correct; what is
+#     not legitimate is going quiet, because silence reads identically whether the
+#     turn is blocked or merely idle. So the remedy is cheap and always available:
+#     say what you are waiting for. ASKED_USER already detects exactly that.
+AUTONOMOUS = os.environ.get("CCAGE_AUTONOMOUS", "") in ("1", "true", "yes")
+if not AUTONOMOUS:
+    MAX_BLOCKS = 1          # nudge once, never nag an attended user
 
 try:
     p = json.loads(sys.argv[1])
@@ -233,6 +248,46 @@ def ccage_watch_available():
     return False
 
 
+# ------------------------------------------------------- trigger 5 (attended)
+# Tasks still open. The task list is NOT persisted anywhere readable (the
+# tasks/ dirs are empty), so reconstruct it from this session's own transcript:
+# TaskCreate results carry "Task #N created", TaskUpdate inputs carry the status
+# changes. Last status wins; anything never updated is still pending.
+def open_task_count():
+    slug = re.sub(r"[^A-Za-z0-9]", "-", cwd) if cwd else ""
+    path = os.path.join(config, "projects", slug, session_id + ".jsonl")
+    if not os.path.isfile(path):
+        return 0
+    created, status = set(), {}
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                if "Task" not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                content = row.get("message", {}).get("content")
+                if not isinstance(content, list):
+                    continue
+                for c in content:
+                    if not isinstance(c, dict):
+                        continue
+                    if c.get("type") == "tool_use" and c.get("name") == "TaskUpdate":
+                        inp = c.get("input") or {}
+                        if inp.get("taskId") and inp.get("status"):
+                            status[str(inp["taskId"])] = str(inp["status"])
+                    elif c.get("type") == "tool_result":
+                        for m in re.finditer(r"Task #(\d+) created",
+                                             json.dumps(c.get("content"))):
+                            created.add(m.group(1))
+    except OSError:
+        return 0
+    return sum(1 for t in created
+               if status.get(t, "pending") in ("pending", "in_progress"))
+
+
 tail = last_msg[-1200:] if last_msg else ""
 asked = bool(ASKED_USER.search(tail))
 committed = bool(COMMIT.search(tail)) and not asked
@@ -240,6 +295,31 @@ agents = live_agents()
 
 reason = None
 open_items, plan_path = (plan_open_items() if CLAIMS_DONE.search(tail) else (0, None))
+open_tasks = 0
+
+if not AUTONOMOUS:
+    # ATTENDED: the single trigger. Open work + no stated reason for stopping.
+    open_tasks = open_task_count()
+    if open_tasks and not asked:
+        reason = (
+            "You are ending the turn with %d task(s) still open, and your final "
+            "message does not say what you are waiting for.\n"
+            "Stopping may well be right — handing back is often correct. But going "
+            "quiet is not, because silence looks the same whether you are blocked "
+            "or idle, and the user has to guess which.\n"
+            "DO NOW, whichever is true: continue with the next open task, OR name "
+            "the one thing you are waiting on (a decision, an approval, an external "
+            "result). Either ends this turn cleanly; this fires once per session."
+            % open_tasks
+        )
+    plan_open, plan_path2 = plan_open_items()
+    if reason is None and plan_open and not asked:
+        reason = (
+            "You are ending the turn with %d unticked item(s) in the governing plan "
+            "(%s) and no statement of what you are waiting for.\n"
+            "DO NOW: continue, or say what blocks you. This fires once per session."
+            % (plan_open, os.path.basename(plan_path2 or "plan"))
+        )
 
 if open_items and not asked:
     # Ground truth beats a claim: the plan on disk says otherwise.
@@ -308,7 +388,9 @@ if count >= MAX_BLOCKS:
 log = os.path.join(config, "stop_continuation_guard.log")
 try:
     stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
-    if open_items:
+    if not AUTONOMOUS:
+        kind = "OPEN_WORK_UNDECLARED"
+    elif open_items:
         kind = "PLAN_ITEMS_OPEN"
     elif agents:
         kind = "AGENTS_IDLE"
