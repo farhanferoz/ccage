@@ -1336,6 +1336,89 @@ PY
     [[ "$output" == *'"decision"'* ]]
 }
 
+# --- UNARMED_PROMISE keys on a FACT, not only on wording (2026-08-13) --------
+# Correction B asked for "a background job is running and no watcher is armed";
+# what shipped needed a promise SENTENCE, so a silent turn-end over a live job
+# fired nothing. These pin the fact path. The tasks dir the guard reads is
+# <tmp>/claude-<uid>/<cwd-slug>/<session>/tasks/<id>.output, and a finished job
+# carries a literal "[exited with code N]".
+
+bgjob() {   # bgjob <session> <id> <body>
+    local d; d="$(dirname "$(mktemp -u)")/claude-$(id -u)/$(oracle_slug "$REPO")/$1/tasks"
+    mkdir -p "$d"; printf '%s' "$3" > "$d/$2.output"
+}
+
+@test "stop-guard: a live background job with no watcher armed is caught" {
+    bgjob bg1 job-a 'still going...'
+    stopg_with_path "{\"session_id\":\"bg1\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All done here.\"}" \
+        "$(dirname "$(command -v ccage-watch)"):$PATH"
+    [[ "$output" == *'"decision"'* ]]
+    [[ "$output" == *"background job"* ]]
+}
+
+@test "stop-guard: a FINISHED background job is not a reason to block" {
+    bgjob bg2 job-b 'output...
+[exited with code 0]'
+    stopg_with_path "{\"session_id\":\"bg2\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All done here.\"}" \
+        "$(dirname "$(command -v ccage-watch)"):$PATH"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: no tasks dir at all fails open" {
+    stopg_with_path "{\"session_id\":\"bg3\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All done here.\"}" \
+        "$(dirname "$(command -v ccage-watch)"):$PATH"
+    [ -z "$output" ]
+}
+
+# --- trigger 6: work CI has never seen (2026-08-13) --------------------------
+
+# A repo with CI configured, a real upstream, and <n> commits the remote has
+# never seen. The upstream matters: a repo with NO remote cannot be pushed
+# anywhere, so the guard correctly stays silent there — the first version of
+# this fixture omitted it and the test failed for that reason, not a code bug.
+mkrepo_with_ci() {   # mkrepo_with_ci <n-unpushed-commits>
+    local r="$REPO/gitci" o="$REPO/gitci-origin"
+    rm -rf "$r" "$o"; mkdir -p "$r/.github/workflows"
+    git init -q --bare "$o"
+    printf 'on: push\n' > "$r/.github/workflows/ci.yml"
+    git -C "$r" init -q
+    git -C "$r" config user.email t@t; git -C "$r" config user.name t
+    git -C "$r" add -A; git -C "$r" commit -qm base
+    git -C "$r" branch -M main
+    git -C "$r" remote add origin "$o"
+    git -C "$r" push -q -u origin main
+    local i; for i in $(seq 1 "$1"); do
+        printf '%s\n' "$i" > "$r/f$i"; git -C "$r" add -A
+        git -C "$r" commit -qm "c$i"
+    done
+    printf '%s' "$r"
+}
+
+@test "stop-guard: a big unpushed backlog on a CI repo is flagged" {
+    local r; r="$(mkrepo_with_ci 12)"
+    stopg "{\"session_id\":\"ci1\",\"cwd\":\"$r\",\"last_assistant_message\":\"All done here.\"}"
+    [[ "$output" == *'"decision"'* ]]
+    [[ "$output" == *"never been pushed"* ]]
+}
+
+@test "stop-guard: ordinary WIP under the threshold is not flagged" {
+    local r; r="$(mkrepo_with_ci 3)"
+    stopg "{\"session_id\":\"ci2\",\"cwd\":\"$r\",\"last_assistant_message\":\"All done here.\"}"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: a repo with no CI config is never flagged" {
+    local r; r="$(mkrepo_with_ci 12)"; rm -rf "$r/.github"
+    stopg "{\"session_id\":\"ci3\",\"cwd\":\"$r\",\"last_assistant_message\":\"All done here.\"}"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: naming what you wait on beats the unpushed trigger" {
+    local r; r="$(mkrepo_with_ci 12)"
+    stopg "{\"session_id\":\"ci4\",\"cwd\":\"$r\",\"last_assistant_message\":\"I am waiting on your merge decision.\"}"
+    [ -z "$output" ]
+}
+
 @test "unit: write_guard_settings registers the Stop hook alongside the ask guard" {
     run python3 - "$AUTO" "$SDIR" <<'PY'
 import importlib.machinery, importlib.util, json, sys

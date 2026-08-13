@@ -50,7 +50,9 @@ import datetime
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import time
 
 MODE = os.environ.get("CCLAUDE_STOPGUARD_MODE", "enforce")
@@ -359,6 +361,43 @@ def ccage_watch_available():
     return False
 
 
+def live_background_jobs():
+    """Background Bash jobs this session started that have not reported an exit.
+
+    Correction B (2026-08-10) asked for a FACT -- "a background job is running
+    and no watcher is armed" -- and what shipped keyed on a promise PHRASE
+    instead, so a turn that ends silently over a live job fired nothing. That is
+    a D7 violation inside the guard family that produced D7, and it was recorded
+    as a known limit on 2026-08-13 rather than fixed. This is the fix.
+
+    The fact is on disk: the harness writes each backgrounded job to
+    <scratchpad>/tasks/<id>.output and appends a literal `[exited with code N]`
+    when it finishes. No marker + touched within LIVE_WINDOW_S = still running.
+    Fail-open: no tasks dir, or an unreadable one, returns [] -- an unmeasurable
+    condition must never manufacture a block."""
+    tasks = os.path.join(tempfile.gettempdir(), "claude-%d" % os.getuid(),
+                         re.sub(r"[^A-Za-z0-9]", "-", cwd) if cwd else "",
+                         session_id, "tasks")
+    live, now = [], time.time()
+    try:
+        names = os.listdir(tasks)
+    except OSError:
+        return []
+    for name in names:
+        if not name.endswith(".output"):
+            continue
+        path = os.path.join(tasks, name)
+        try:
+            if now - os.path.getmtime(path) > LIVE_WINDOW_S:
+                continue                       # stale: long finished or abandoned
+            with open(path, errors="replace") as f:
+                if "[exited with code" not in f.read()[-400:]:
+                    live.append(name[:-len(".output")])
+        except OSError:
+            continue
+    return live
+
+
 # ------------------------------------------------------- trigger 5 (attended)
 # Tasks still open. The task list is NOT persisted anywhere readable (the
 # tasks/ dirs are empty), so reconstruct it from this session's own transcript:
@@ -450,21 +489,30 @@ elif agents and not asked and not serial_gate_active() and not ATTENDED:
         "return before you can proceed — then stopping is correct and this will "
         "allow it." % (len(agents), ", ".join(agents[:4]))
     )
-elif (PROMISED_LATER.search(tail) and not watcher_armed()
-        and ccage_watch_available()):
+elif ((PROMISED_LATER.search(tail) or live_background_jobs())
+        and not watcher_armed() and ccage_watch_available()):
     # Issue 5 is inert without this: a watcher that survives the session is
     # useless if the session never arms one, and arming is exactly the kind of
     # judgment call that has failed every time it was left to judgment.
+    #
+    # TWO WAYS IN, and the second is the one Correction B actually asked for.
+    # The phrase match catches a stated promise; `live_background_jobs()` catches
+    # the FACT, so a turn that ends silently over a running job no longer slips
+    # through. Keying only on wording is the D7 failure both foreground guards
+    # were walked past on — recorded as a known limit 2026-08-13, fixed here.
+    _jobs = live_background_jobs()
     reason = (
-        "Your final message promises something will happen after this turn — a "
-        "notification, a job continuing — but NO watcher is armed.\n"
+        "You are ending this turn with %s, and NO watcher is armed.\n"
         "Measured: an in-harness background watcher is killed 50-131s after the "
-        "session ends, so that promise silently evaporates and the user returns "
-        "hours later to nothing.\n"
+        "session ends, so anything you are counting on to finish afterwards "
+        "silently evaporates and the user returns hours later to nothing.\n"
         "DO NOW: arm one — `ccage-watch arm --cond '<cmd, exit 0 = done>' --note "
         "'<what this bridges>'` — which survives the session and writes the outcome "
         "into RESUME for the next one. Or withdraw the promise and record the "
         "handoff in RESUME '### Next' yourself. Do not leave it implicit."
+        % ("%d background job(s) still running (%s)"
+           % (len(_jobs), ", ".join(_jobs[:3])) if _jobs
+           else "a promise that something happens after this turn")
     )
 elif committed:
     # The rationale must match the mode it is delivered in. This trigger fires in
@@ -511,6 +559,68 @@ if reason is None:
             "name the one thing you are waiting on (a decision, an approval, an "
             "external result)."
             % open_tasks
+        )
+
+# ------------------------------------------- trigger 6: WORK CI HAS NEVER SEEN
+# MEASURED 2026-08-13: this branch reached 24 commits ahead of main with ZERO CI
+# runs; the first push turned the macOS leg red with 28 failures, none of them
+# new — every one latent since the day it was written. Local verification here is
+# Linux-only, so the whole BSD/bash-3.2 class is invisible until a push happens,
+# and nothing prompted the push. The rule already existed in the handoff plan
+# ("Linux locally, then macOS via the branch's CI leg before merge") and 23
+# commits went past it, which per D12 means it needs a mechanical shadow.
+#
+# DELIBERATELY HIGH THRESHOLD, and last in the chain. A per-turn nag on ordinary
+# work-in-progress is the failure mode that killed the fan-out-size gate (issue
+# 13(b)): it fired on a quarter of correct work and taught its own dismissal. Ten
+# unpushed commits on a branch whose repo runs CI is not ordinary WIP — it is a
+# backlog of unverified work, and it fires at most MAX_BLOCKS times per session.
+def unpushed_vs_ci():
+    """(count, branch) of commits the remote has never seen, or (0, None).
+
+    Fail-open everywhere: not a repo, no upstream, no CI config, git missing or
+    slow -> (0, None). An unmeasurable condition must not manufacture a block."""
+    if not cwd or not os.path.isdir(os.path.join(cwd, ".git")):
+        return 0, None
+    wf = os.path.join(cwd, ".github", "workflows")
+    try:
+        if not any(f.endswith((".yml", ".yaml")) for f in os.listdir(wf)):
+            return 0, None
+    except OSError:
+        return 0, None                      # no CI configured: nothing to miss
+    def git(*a):
+        try:
+            p = subprocess.run(("git", "-C", cwd) + a, capture_output=True,
+                               text=True, timeout=5)
+            return p.stdout.strip() if p.returncode == 0 else ""
+        except Exception:
+            return ""
+    branch = git("rev-parse", "--abbrev-ref", "HEAD")
+    if not branch or branch == "HEAD":
+        return 0, None
+    # @{u} is the branch's own upstream; absent for a never-pushed branch, in
+    # which case every commit since the default branch is unseen.
+    n = git("rev-list", "--count", "@{u}..HEAD") or git(
+        "rev-list", "--count", "origin/main..HEAD")
+    try:
+        return int(n), branch
+    except ValueError:
+        return 0, None
+
+
+if reason is None and not asked:
+    _n, _branch = unpushed_vs_ci()
+    if _n >= int(os.environ.get("CCLAUDE_UNPUSHED_MAX", "10")):
+        reason = (
+            "%d commits on `%s` have never been pushed, so CI has never run on any "
+            "of them.\n"
+            "Measured on this machine: a branch reached 24 unpushed commits and the "
+            "first CI run went red with 28 failures — none new, all latent since the "
+            "day they were written. Local runs here are Linux-only, so every "
+            "macOS/BSD defect is invisible until a push.\n"
+            "DO NOW: push the branch (a draft PR is enough — it only needs to run "
+            "CI, not to be reviewed). If this work is deliberately unpublished, say "
+            "so and stopping is correct." % (_n, _branch)
         )
 
 if reason is None:
