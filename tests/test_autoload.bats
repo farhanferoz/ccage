@@ -557,21 +557,20 @@ pidfile_for() {  # pidfile_for PID -- write a liveness record for a real, live p
     [ "$elapsed_ms" -lt 300 ]
 }
 
-@test "pid-reuse guard parses ps -o etime= (a BSD-shaped elapsed string), and a regression to etimes= makes it fail" {
-    # Real macOS defect: ps -o etimes= is a Linux/procps extension, confirmed
-    # absent from the BSD/Darwin ps keyword table -- only etime (singular,
-    # [[DD-]hh:]mm:ss) is common to both. On a host where etimes= silently
-    # produces nothing, the old code's guard just never engaged (no error,
-    # the pid-reuse check always skipped). This test stubs `ps` to answer a
-    # canned BSD-format string ONLY for an exact `etime=` argument -- NOT for
-    # `etimes=`, which is a different string despite the substring overlap --
-    # so it exercises the hook's own embedded awk parser rather than
-    # reimplementing it, and would fail on THIS Linux CI leg too if the
-    # script reverted to etimes= (the stub would stop intercepting, the real
-    # host ps would answer with actual seconds instead of the synthetic
-    # 93615, the comparison would miss, and the marker would wrongly clear).
-    : > "$REPO/.ccage-session-done"
-    local real_ps stub_bin
+# Stubs `ps` to answer one canned BSD-shaped elapsed string for exactly
+# `ps -o etime= -p <PID>`, delegating every other invocation to the real ps;
+# echoes the directory to prepend to PATH. A canned elapsed time is what makes
+# the tolerance tests below exact: the hook derives the running process's start
+# as `now - elapsed`, so with `elapsed` pinned, the difference it compares
+# against the recorded token is whatever the caller chose, not this machine's
+# real process ages. The only slack left is the two `date +%s` calls (the
+# caller's and the hook's) straddling a second boundary, worth +/-1s -- every
+# offset below is picked so that slack cannot change the verdict.
+PS_STUB_ETIME="1-02:00:15"    # 1d 2h 0m 15s, as [[DD-]hh:]mm:ss
+PS_STUB_ELAPSED=93615         # the same duration in seconds
+
+ps_stub_for() {   # ps_stub_for PID -- echoes a dir to prepend to PATH
+    local pid="$1" real_ps stub_bin
     real_ps="$(command -v ps)"
     stub_bin="$BATS_TEST_TMPDIR/psstub"
     mkdir -p "$stub_bin"
@@ -582,7 +581,7 @@ match_pid=0
 next_is_pid=0
 for a in "\$@"; do
     if [ "\$next_is_pid" = "1" ]; then
-        [ "\$a" = "$$" ] && match_pid=1
+        [ "\$a" = "$pid" ] && match_pid=1
         next_is_pid=0
         continue
     fi
@@ -590,20 +589,88 @@ for a in "\$@"; do
     [ "\$a" = "-p" ] && next_is_pid=1
 done
 if [ "\$match_etime" = "1" ] && [ "\$match_pid" = "1" ]; then
-    echo "1-02:00:15"
+    echo "$PS_STUB_ETIME"
     exit 0
 fi
 exec "$real_ps" "\$@"
 STUB
     chmod +x "$stub_bin/ps"
+    printf '%s\n' "$stub_bin"
+}
 
-    # Matches the stub's canned "1-02:00:15" (1d 2h 0m 15s = 93615s).
-    local wstart=$(( $(date +%s) - 93615 ))
+@test "pid-reuse guard parses ps -o etime= (a BSD-shaped elapsed string), and a regression to etimes= makes it fail" {
+    # Real macOS defect: ps -o etimes= is a Linux/procps extension, confirmed
+    # absent from the BSD/Darwin ps keyword table -- only etime (singular,
+    # [[DD-]hh:]mm:ss) is common to both. On a host where etimes= silently
+    # produces nothing, the old code's guard just never engaged (no error,
+    # the pid-reuse check always skipped). The stub answers ONLY for an exact
+    # `etime=` argument -- NOT for `etimes=`, which is a different string
+    # despite the substring overlap -- so this exercises the hook's own
+    # embedded awk parser rather than reimplementing it, and would fail on
+    # THIS Linux CI leg too if the script reverted to etimes= (the stub would
+    # stop intercepting, the real host ps would answer with actual seconds
+    # instead of the synthetic 93615, the comparison would miss, and the
+    # marker would wrongly clear).
+    : > "$REPO/.ccage-session-done"
+    local stub_bin; stub_bin="$(ps_stub_for "$$")"
+
+    local wstart=$(( $(date +%s) - PS_STUB_ELAPSED ))
     printf 'pid=%d\nstart=%d\n' "$$" "$wstart" > "$REPO/.ccage-autock.pid.$$"
 
     PATH="$stub_bin:$PATH" run run_hook_src startup
     [ "$status" -eq 0 ]
     [ -e "$REPO/.ccage-session-done" ]   # start times agree -> "watcher elsewhere" -> preserved
+}
+
+# ---- the +/-2s pid-reuse tolerance itself (W5 gap 2) ------------------------
+#
+# Mutation-measured at fddf504: widening the tolerance from 2s to 100000s (~28h,
+# which makes the check meaningless) left the whole suite green. The only test
+# touching this path recorded start=1 -- about 1.7 BILLION seconds out, so far
+# adrift that a sane window and a useless one both reject it. The guard's actual
+# constant was therefore free to drift, and the failure it protects against is
+# the one it was written for: a LIVE watcher's .ccage-session-done /
+# .ccage-autock.conf deleted under it, originally seen as "--set silently
+# reverted". These two pin the constant from both sides.
+
+@test "pid-reuse tolerance: a 60s start-time mismatch is an impostor (kills a widened tolerance)" {
+    # Recorded start is 60s EARLIER than the running process actually started:
+    # a plausible pid-reuse gap, not an absurd one. 60 is comfortably outside
+    # the real 2s window (so this passes today, +/-1s of clock slack included)
+    # and comfortably INSIDE any widened one, so any tolerance of 60s or more
+    # -- 100000s included -- fails here instead of shipping silently.
+    : > "$REPO/.ccage-session-done"
+    : > "$REPO/.ccage-autock.conf"
+    local stub_bin; stub_bin="$(ps_stub_for "$$")"
+
+    local wstart=$(( $(date +%s) - PS_STUB_ELAPSED - 60 ))
+    printf 'pid=%d\nstart=%d\n' "$$" "$wstart" > "$REPO/.ccage-autock.pid.$$"
+
+    PATH="$stub_bin:$PATH" run run_hook_src startup
+    [ "$status" -eq 0 ]
+    [ ! -e "$REPO/.ccage-session-done" ]   # impostor -> not a live watcher -> cleared
+    [ ! -e "$REPO/.ccage-autock.conf" ]
+}
+
+@test "pid-reuse tolerance: a 2s start-time mismatch is still the same watcher (kills a narrowed tolerance)" {
+    # The boundary case, from the permissive side. Recorded start is 2s LATER
+    # than the running process started, so the hook computes a difference of
+    # exactly 2 -- or 1 if the two `date +%s` calls straddle a second. Both are
+    # within the real window, so correct code ALWAYS preserves here and this
+    # can never flake red; a tolerance narrowed to 1s or 0s clears instead and
+    # fails. That matters because over-tightening reintroduces the same
+    # symptom from the other direction: a live watcher's state deleted.
+    : > "$REPO/.ccage-session-done"
+    : > "$REPO/.ccage-autock.conf"
+    local stub_bin; stub_bin="$(ps_stub_for "$$")"
+
+    local wstart=$(( $(date +%s) - PS_STUB_ELAPSED + 2 ))
+    printf 'pid=%d\nstart=%d\n' "$$" "$wstart" > "$REPO/.ccage-autock.pid.$$"
+
+    PATH="$stub_bin:$PATH" run run_hook_src startup
+    [ "$status" -eq 0 ]
+    [ -e "$REPO/.ccage-session-done" ]   # within tolerance -> live watcher -> preserved
+    [ -e "$REPO/.ccage-autock.conf" ]
 }
 
 # ---- plan readiness (register issue 4) -------------------------------------
