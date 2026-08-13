@@ -1362,10 +1362,22 @@ bgjob() {   # bgjob <session> <id> <body>
     mkdir -p "$d"; printf '%s' "$3" > "$d/$2.output"
 }
 
+# The trigger is inert unless ccage-watch is on PATH, so these STUB it the same
+# way the UNARMED_PROMISE tests above do. The first version used the real
+# installed binary via `command -v` — which passes on a developer box and fails
+# in CI, where ccage is not installed at all. A test that depends on the host
+# having the product installed is not testing the product.
+fakewatch() {
+    mkdir -p "$BATS_TEST_TMPDIR/fakebin"
+    printf '#!/bin/sh\n' > "$BATS_TEST_TMPDIR/fakebin/ccage-watch"
+    chmod +x "$BATS_TEST_TMPDIR/fakebin/ccage-watch"
+    printf '%s' "$BATS_TEST_TMPDIR/fakebin"
+}
+
 @test "stop-guard: a live background job with no watcher armed is caught" {
     bgjob bg1 job-a 'still going...'
-    stopg_with_path "{\"session_id\":\"bg1\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All done here.\"}" \
-        "$(dirname "$(command -v ccage-watch)"):$PATH"
+    stopg "{\"session_id\":\"bg1\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All done here.\"}" \
+        "$(fakewatch)"
     [[ "$output" == *'"decision"'* ]]
     [[ "$output" == *"background job"* ]]
 }
@@ -1373,14 +1385,14 @@ bgjob() {   # bgjob <session> <id> <body>
 @test "stop-guard: a FINISHED background job is not a reason to block" {
     bgjob bg2 job-b 'output...
 [exited with code 0]'
-    stopg_with_path "{\"session_id\":\"bg2\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All done here.\"}" \
-        "$(dirname "$(command -v ccage-watch)"):$PATH"
+    stopg "{\"session_id\":\"bg2\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All done here.\"}" \
+        "$(fakewatch)"
     [ -z "$output" ]
 }
 
 @test "stop-guard: no tasks dir at all fails open" {
-    stopg_with_path "{\"session_id\":\"bg3\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All done here.\"}" \
-        "$(dirname "$(command -v ccage-watch)"):$PATH"
+    stopg "{\"session_id\":\"bg3\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All done here.\"}" \
+        "$(fakewatch)"
     [ -z "$output" ]
 }
 
