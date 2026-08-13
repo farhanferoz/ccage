@@ -62,6 +62,11 @@ except ValueError:
 # recently. Mirrors the mtime liveness test used elsewhere in this setup.
 LIVE_WINDOW_S = 180
 
+# Freshness window for a session-declared serial gate (see the shape B
+# exemption below) -- longer than LIVE_WINDOW_S because a gate is declared
+# once and then waited on, not refreshed every heartbeat.
+SERIAL_GATE_WINDOW_S = 2700  # 45 minutes
+
 
 def allow():
     """Let the turn end. The only safe default."""
@@ -144,6 +149,20 @@ def live_agents():
     except OSError:
         return []
     return live
+
+
+def serial_gate_active():
+    """True if this session has a fresh marker declaring a serial wait.
+
+    Mirrors live_agents()'s slug computation -- same session, same directory
+    layout, just a different leaf file.
+    """
+    slug = re.sub(r"[^A-Za-z0-9]", "-", cwd) if cwd else ""
+    marker = os.path.join(config, "projects", slug, session_id, "serial-gate")
+    try:
+        return (time.time() - os.path.getmtime(marker)) <= SERIAL_GATE_WINDOW_S
+    except OSError:
+        return False
 
 
 # ---------------------------------------------------------------- shape A
@@ -337,7 +356,22 @@ if open_items and not asked:
         "Five shipped bugs got past tests their own author called green."
         % (os.path.basename(plan_path), open_items)
     )
-elif agents and not asked:
+# SHAPE B EXEMPTION, serial gate. MEASURED 2026-08-12: this trigger fired
+# EIGHT times in one session while it was correctly sitting out a
+# deliberately SERIAL evidence gate -- a research-report gate whose whole
+# design forbids drafting until it closes. That is a legitimate reason to
+# idle, not the failure this file exists to catch, and ground truth alone
+# (live subagent transcripts) cannot tell the two apart -- both look like
+# "subagents running, root doing nothing." The repeated pressure contributed
+# to a rushed draft.
+#
+# So shape B can be told, out loud, "this wait is serial by design": touch
+# <config>/projects/<slug>/<session_id>/serial-gate and this trigger stands
+# down for SERIAL_GATE_WINDOW_S. Freshness-gated for the same reason
+# LIVE_WINDOW_S is -- an un-refreshed marker from a wait that is long over
+# must decay back to the default behaviour, not sit there disabling the
+# guard forever.
+elif agents and not asked and not serial_gate_active():
     reason = (
         "You are ending this turn with %d subagent(s) still running (%s) during an "
         "AUTONOMOUS run, and your final message contains no work of your own.\n"
