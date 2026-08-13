@@ -85,7 +85,19 @@ case "$(basename -- "$fp")" in
     # share these names. Membership in the real tier is settled by tier_files()
     # below, which lists paths, not names.
     CLAUDE.md|main-session-doctrine.md) kind=tier ;;
-    *.md) case "$fp" in */rules/*) kind=tier ;; *) exit 0 ;; esac ;;
+    *.md) case "$fp" in
+              */rules/*) kind=tier ;;
+              # A plan doc under plans/ is the programme's source of truth and
+              # was the ONLY member of the always-loaded set with nothing
+              # defending it. Measured 2026-08-13: the governing register drifted
+              # for two days (four sections describing a superseded state, items
+              # marked open that had shipped) and only a hand audit caught it.
+              # No byte budget here -- a plan SHOULD grow. The one mechanical
+              # failure worth catching is the same one `### Next` has: items
+              # disappearing rather than being ticked.
+              */plans/*) kind=plan ;;
+              *) exit 0 ;;
+          esac ;;
     *) exit 0 ;;
 esac
 [ -f "$fp" ] || exit 0
@@ -185,6 +197,29 @@ fi
 # item pattern. It has no byte budget and no session blocks: it is meant to grow
 # when a constraint is added, and it shrinks by RETIRING entries, not by trimming.
 # Ids come from `- **D<n>**` lines, which is exactly what a reader counts.
+# A PLAN doc is the third instance of the same shape: a durable, git-excluded
+# list of work whose entries must not vanish silently. Its items are CHECKBOXES
+# — the same tokens `resume_autoload` §1c counts to report "N of M open" at
+# session start, so the guard defends exactly the list a reader sees. Ticking is
+# always allowed (an item moves `[ ]` -> `[x]`, the TOTAL is unchanged); what is
+# blocked is the total falling, i.e. an item deleted rather than completed.
+# No byte budget: a plan is meant to grow.
+if [ "$kind" = plan ]; then
+    n=0
+    budget_bytes=2147483647
+    next_n="$(grep -cE '^[[:space:]]*[-*][[:space:]]+\[[ xX]\]' "$fp" 2>/dev/null)"
+    [ -n "$next_n" ] || next_n=0
+    # Label each item by its position and first words, so a deletion can be named
+    # rather than merely counted — a plan is git-excluded, so a dropped item is
+    # unrecoverable and "you lost one" is not a useful thing to be told.
+    next_labels="$(awk '/^[[:space:]]*[-*][[:space:]]+\[[ xX]\]/ {
+            i++; s = $0
+            sub(/^[[:space:]]*[-*][[:space:]]+\[[ xX]\][[:space:]]*/, "", s)
+            gsub(/[^A-Za-z0-9]/, "", s)
+            out = out (out ? "," : "") i ":" substr(s, 1, 12)
+        } END { print out }' "$fp" 2>/dev/null)"
+fi
+
 if [ "$kind" = decisions ]; then
     n=0
     budget_bytes=2147483647
@@ -418,6 +453,26 @@ line to CHANGELOG.md first:
   EMBODIED   — the work landed; name the code or doc that now carries it.
 Anything else is how a ratified decision gets re-opened next session, which is the
 failure this file exists to stop. Archive it, then re-issue this same write.
+MSG
+    exit 2
+fi
+
+if [ "$kind" = plan ] && [ -n "$prev_next" ] \
+   && [ "${next_n:-0}" -lt "$prev_next" ] 2>/dev/null \
+   && [ "${CCAGE_RESUME_BUDGET_MODE:-}" != "observe" ]; then
+    _log "DENY-planshrank" "$prev_next -> ${next_n:-0}"
+    cat >&2 <<MSG
+PLAN LOST ITEMS: $prev_next checkboxes -> ${next_n:-0}. Blocked once, deliberately.
+
+Ticking an item is always fine — `[ ]` becomes `[x]` and the TOTAL is unchanged.
+A falling total means items were DELETED, and this file is the programme's source
+of truth: it is git-excluded, it is what `resume_autoload` counts to report
+"N of M open" at session start, and a dropped item is unrecoverable.
+
+Confirm each removed item is genuinely finished (tick it) or genuinely dropped
+(say so in the doc, and in CHANGELOG.md if it was ratified) rather than lost in an
+edit, then re-issue this same write — the count is already recorded, so the retry
+goes through.
 MSG
     exit 2
 fi
