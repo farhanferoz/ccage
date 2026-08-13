@@ -464,10 +464,10 @@ if [ "$kind" = plan ] && [ -n "$prev_next" ] \
     cat >&2 <<MSG
 PLAN LOST ITEMS: $prev_next checkboxes -> ${next_n:-0}. Blocked once, deliberately.
 
-Ticking an item is always fine — `[ ]` becomes `[x]` and the TOTAL is unchanged.
-A falling total means items were DELETED, and this file is the programme's source
-of truth: it is git-excluded, it is what `resume_autoload` counts to report
-"N of M open" at session start, and a dropped item is unrecoverable.
+Ticking an item is always fine: an unticked box becomes a ticked one and the TOTAL
+is unchanged. A falling total means items were DELETED, and this file is the
+programme's source of truth: it is git-excluded, it is what resume_autoload counts
+to report "N of M open" at session start, and a dropped item is unrecoverable.
 
 Confirm each removed item is genuinely finished (tick it) or genuinely dropped
 (say so in the doc, and in CHANGELOG.md if it was ratified) rather than lost in an

@@ -1343,15 +1343,41 @@ PY
 # <tmp>/claude-<uid>/<cwd-slug>/<session>/tasks/<id>.output, and a finished job
 # carries a literal "[exited with code N]".
 
+# The tasks dir, computed by the SAME rule the hook uses rather than by a shell
+# approximation of it. `dirname "$(mktemp -u)"` was the first version and it
+# failed on macOS only: python's tempfile.gettempdir() and the shell's view of
+# $TMPDIR disagree there ($TMPDIR carries a trailing slash, and /var is a symlink
+# to /private/var — hazard-table row one). Same defect class as the slug bug
+# fixed earlier the same day: a test that re-derives a rule instead of asking for
+# it agrees with the implementation only where the environment is forgiving.
+tasks_dir() {   # tasks_dir <session>
+    python3 -c "import os,re,sys,tempfile
+print(os.path.join(tempfile.gettempdir(), 'claude-%d' % os.getuid(),
+                   re.sub(r'[^A-Za-z0-9]', '-', sys.argv[1]), sys.argv[2], 'tasks'))" \
+        "$REPO" "$1"
+}
+
 bgjob() {   # bgjob <session> <id> <body>
-    local d; d="$(dirname "$(mktemp -u)")/claude-$(id -u)/$(oracle_slug "$REPO")/$1/tasks"
+    local d; d="$(tasks_dir "$1")"
     mkdir -p "$d"; printf '%s' "$3" > "$d/$2.output"
+}
+
+# The trigger is inert unless ccage-watch is on PATH, so these STUB it the same
+# way the UNARMED_PROMISE tests above do. The first version used the real
+# installed binary via `command -v` — which passes on a developer box and fails
+# in CI, where ccage is not installed at all. A test that depends on the host
+# having the product installed is not testing the product.
+fakewatch() {
+    mkdir -p "$BATS_TEST_TMPDIR/fakebin"
+    printf '#!/bin/sh\n' > "$BATS_TEST_TMPDIR/fakebin/ccage-watch"
+    chmod +x "$BATS_TEST_TMPDIR/fakebin/ccage-watch"
+    printf '%s' "$BATS_TEST_TMPDIR/fakebin"
 }
 
 @test "stop-guard: a live background job with no watcher armed is caught" {
     bgjob bg1 job-a 'still going...'
-    stopg_with_path "{\"session_id\":\"bg1\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All done here.\"}" \
-        "$(dirname "$(command -v ccage-watch)"):$PATH"
+    stopg "{\"session_id\":\"bg1\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All done here.\"}" \
+        "$(fakewatch)"
     [[ "$output" == *'"decision"'* ]]
     [[ "$output" == *"background job"* ]]
 }
@@ -1359,14 +1385,14 @@ bgjob() {   # bgjob <session> <id> <body>
 @test "stop-guard: a FINISHED background job is not a reason to block" {
     bgjob bg2 job-b 'output...
 [exited with code 0]'
-    stopg_with_path "{\"session_id\":\"bg2\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All done here.\"}" \
-        "$(dirname "$(command -v ccage-watch)"):$PATH"
+    stopg "{\"session_id\":\"bg2\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All done here.\"}" \
+        "$(fakewatch)"
     [ -z "$output" ]
 }
 
 @test "stop-guard: no tasks dir at all fails open" {
-    stopg_with_path "{\"session_id\":\"bg3\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All done here.\"}" \
-        "$(dirname "$(command -v ccage-watch)"):$PATH"
+    stopg "{\"session_id\":\"bg3\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All done here.\"}" \
+        "$(fakewatch)"
     [ -z "$output" ]
 }
 
