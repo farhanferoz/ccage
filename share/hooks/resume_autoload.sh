@@ -27,6 +27,8 @@
 budget="${CCAGE_RESUME_BUDGET_LINES:-250}"
 budget_bytes="${CCAGE_RESUME_BUDGET_BYTES:-14000}"
 orphan_max="${CCAGE_MEMORY_ORPHAN_MAX:-3}"
+note_max="${CCAGE_MEMORY_MAX_NOTES:-40}"
+index_max="${CCAGE_MEMORY_MAX_INDEX_BYTES:-8192}"
 base="${CLAUDE_PROJECT_DIR:-$PWD}"
 
 # SessionStart delivers its trigger source (startup|resume|clear|compact) as JSON
@@ -173,6 +175,38 @@ if [ "$src" = "startup" ] || [ "$src" = "resume" ]; then
     fi
 fi
 
+# ---- 0c. armed watchers: a death must never be silent ----
+# ccage-watch outlives the session that armed it, but it only ever writes to
+# RESUME on two events: the condition fired, or the TTL expired. Killed any
+# other way — a reboot, an OOM, a stray kill — it writes nothing at all, so
+# "armed and died" reads exactly like "never armed". That is the tool's own
+# failure mode one level up, and it was live-fired on 2026-08-11: nothing read
+# the watch dir at session start, and no hook but the Stop guard even mentioned
+# ccage-watch. `reap` records a death in RESUME the same way a firing is
+# recorded, and names every watcher still armed so a pending one is not mistaken
+# for done. It runs BEFORE the injection below so a death recorded now is part
+# of this session's context, and it prints nothing when no watcher is armed —
+# a project that never uses watchers pays no session-start context for this.
+watch_bin=""
+if command -v ccage-watch >/dev/null 2>&1; then
+    watch_bin="ccage-watch"
+elif [ -x "$HOME/.local/bin/ccage-watch" ]; then
+    watch_bin="$HOME/.local/bin/ccage-watch"
+fi
+# Bounded like the stdin read above, and for the same reason: this hook must
+# never be what delays a session start. `timeout` is absent on stock macOS, so
+# the fallback is a plain call — reap's own probes are individually bounded.
+if [ -n "$watch_bin" ]; then
+    (
+        cd "$base" 2>/dev/null || exit 0
+        if command -v timeout >/dev/null 2>&1; then
+            timeout 10 "$watch_bin" reap 2>/dev/null || exit 0
+        else
+            "$watch_bin" reap 2>/dev/null || exit 0
+        fi
+    )
+fi
+
 # ---- 1. inject RESUME into context ----
 # Bounded: a runaway RESUME (the exact failure the budget NOTE below nags about)
 # must degrade instead of flooding every session start. 2× budget is generous —
@@ -181,6 +215,43 @@ if [ -f "$resume" ]; then
     head -n $((budget * 2)) "$resume"
     if [ "$(wc -l < "$resume" 2>/dev/null | tr -d '[:space:]')" -gt "$((budget * 2))" ] 2>/dev/null; then
         printf '\nNOTE: RESUME truncated at %d lines for injection — run /checkpoint to trim it.\n' "$((budget * 2))"
+    fi
+fi
+
+# ---- 1a. inject the RATIFIED DECISIONS (in-force only) ----
+# WHY (2026-08-11, user-reported as recurring across sessions): a decision
+# ratified one day was re-opened the next and re-derived from scratch — the
+# measured case proposed new code against a ratified "reuse the existing readers,
+# NOT new code", and proposed re-measuring a per-tier cost average that the guard
+# beside it already calls invalid. The mechanism is mechanical, not forgetfulness:
+# RESUME kept a POINTER ("full text in CHANGELOG") and nothing reads CHANGELOG at
+# session start, so the budget advice below ("roll Decisions into CHANGELOG") is
+# precisely what evicted the evidence. A pointer does not survive a fresh context;
+# content does.
+#
+# Injected HERE rather than in CLAUDE.md / .claude/rules deliberately: that whole
+# hierarchy loads into EVERY subagent, and this file grows over time, so it would
+# re-inflate worker context that was just cut 5,218 -> 2,909 tokens. A SessionStart
+# hook's stdout reaches the MAIN session only — the same asymmetry RESUME already
+# relies on. MEMORY.md was rejected for the opposite reason: it is capped at 200
+# lines / 25 KB with the harness actively nagging to merge or drop entries, i.e.
+# the very eviction pressure that caused this bug.
+#
+# The file holds IN-FORCE decisions only; retired ones move to CHANGELOG.md, which
+# nothing auto-loads. resume_budget_check.sh enforces that direction: a live entry
+# cannot be dropped, a retired one cannot linger. Bounded here like RESUME so a
+# runaway file degrades instead of flooding every session start.
+decisions="$base/DECISIONS.md"
+dec_budget="${CCAGE_DECISIONS_BUDGET_LINES:-120}"
+if [ -f "$decisions" ]; then
+    printf '\nRATIFIED DECISIONS (in force — do NOT re-derive or re-open; cite what changed instead):\n'
+    # Block-level HTML comments are stripped, mirroring what Claude Code already
+    # does for CLAUDE.md: the file's own editing rules are for whoever maintains
+    # it, and paying for them in every session start is exactly the waste this
+    # file is supposed to bound.
+    sed '/<!--/,/-->/d' "$decisions" 2>/dev/null | head -n "$dec_budget"
+    if [ "$(sed '/<!--/,/-->/d' "$decisions" 2>/dev/null | wc -l | tr -d '[:space:]')" -gt "$dec_budget" ] 2>/dev/null; then
+        printf '\nNOTE: DECISIONS truncated at %d lines for injection — retire spent decisions to CHANGELOG.md.\n' "$dec_budget"
     fi
 fi
 
@@ -204,15 +275,25 @@ fi
 # block emits nothing (a session that isn't plan-driven gets no directive).
 if [ -f "$resume" ]; then
     plan_note=""
+    plan_docs=""
     # awk carves out the `### Plan` block (up to the next ## / ### heading);
     # grep then pulls any .md path token from it — filename-agnostic on purpose.
+    # LISTING ORDER IS PRESERVED (the governing doc is listed first by
+    # convention), existence is checked BEFORE the cap so a missing ref or a
+    # prose token cannot displace a real doc, and anything past the cap is
+    # announced by name — MEASURED 2026-08-13: `sort -u | head -5` here
+    # silently dropped BOTH governing docs of the live programme behind two
+    # reference docs and a prose `CLAUDE.md` token. A silent cap reads as
+    # "this is everything", which is the exact failure §1c exists to prevent.
     plan_refs="$(awk '
             /^###[[:space:]]+Plan[[:space:]]*$/ { inplan=1; next }
             inplan && /^##/                     { inplan=0 }
             inplan
         ' "$resume" 2>/dev/null \
         | grep -oE '[~/A-Za-z0-9._-][A-Za-z0-9._/~-]*\.md' 2>/dev/null \
-        | sort -u | head -5)"
+        | awk '!seen[$0]++')"
+    plan_kept=0
+    plan_dropped=""
     for ref in $plan_refs; do
         # shellcheck disable=SC2088  # the "~/" pattern matches literal text from RESUME; no expansion intended
         case "$ref" in
@@ -220,17 +301,89 @@ if [ -f "$resume" ]; then
             /*)    cand="$ref" ;;
             *)     cand="$base/$ref" ;;
         esac
-        if [ -f "$cand" ]; then
+        [ -f "$cand" ] || continue
+        if [ "$plan_kept" -lt 5 ]; then
+            plan_kept=$((plan_kept + 1))
             plan_note="${plan_note}  - ${cand}
 "
+            plan_docs="${plan_docs}${cand}
+"
+        else
+            plan_dropped="${plan_dropped} ${cand##*/}"
         fi
     done
+    if [ -n "$plan_dropped" ]; then
+        plan_note="${plan_note}  (cap: first 5 in listing order; NOT shown or counted:${plan_dropped})
+"
+    fi
     if [ -n "$plan_note" ]; then
         printf '\nNOTE: RESUME references the plan doc(s) below (verified present on disk).\n'
         printf 'RESUME is a summary, never the plan: READ each doc before executing any task\n'
         printf 'it governs. An execution-level plan with independent remaining tasks means\n'
         printf 'DISPATCHER mode — partition into dependency waves and dispatch concurrently;\n'
         printf 'never execute the list sequentially inline.\n%s' "$plan_note"
+    fi
+
+    # ---- 1c. plan readiness: OPEN ITEMS as FACTS, never as another directive --
+    # The block above is a directive, and directives are exactly what this whole
+    # setup has measured not to bind. What does bind is a checkable fact stated
+    # at the moment it matters, so this reports COUNTS the session can verify —
+    # how much of the plan is still open, and whether the open items say enough
+    # to be delegated (rung 3 of the delegation ladder is unanswerable without a
+    # write set). Two hard rules: a plan with no checkboxes reports UNVERIFIABLE
+    # and never a false pass, and the whole block stays a few lines, because
+    # resume_autoload is the largest single hook injection we ship (measured
+    # 2026-08-11: 15.9 KB per session) and this must not make that worse.
+    if [ -n "$plan_docs" ]; then
+        readiness=""
+        while IFS= read -r doc; do
+            [ -n "$doc" ] || continue
+            open_n="$(grep -cE '^[[:space:]]*[-*][[:space:]]+\[[[:space:]]\]' "$doc" 2>/dev/null || true)"
+            done_n="$(grep -cE '^[[:space:]]*[-*][[:space:]]+\[[xX]\]' "$doc" 2>/dev/null || true)"
+            [ -n "$open_n" ] || open_n=0
+            [ -n "$done_n" ] || done_n=0
+            if [ "$((open_n + done_n))" -eq 0 ]; then
+                readiness="${readiness}  - ${doc##*/}: no checkboxes — completeness UNVERIFIABLE (never read as done)
+"
+                continue
+            fi
+            # An open item is delegable only if it names something concrete: a
+            # path, or a backticked token. Anything else has no stated write set.
+            vague="$(grep -E '^[[:space:]]*[-*][[:space:]]+\[[[:space:]]\]' "$doc" 2>/dev/null \
+                | grep -cvE '`|/' 2>/dev/null || true)"
+            [ -n "$vague" ] || vague=0
+            readiness="${readiness}  - ${doc##*/}: ${open_n} of $((open_n + done_n)) items OPEN"
+            if [ "$vague" -gt 0 ] && [ "$open_n" -gt 0 ]; then
+                readiness="${readiness}; ${vague} name no file — write set unstated"
+            fi
+            readiness="${readiness}
+"
+        done <<EOF
+$plan_docs
+EOF
+        if [ -n "$readiness" ]; then
+            printf '\nPLAN STATE (facts, checkable — not an instruction):\n%s' "$readiness"
+            printf 'An item whose write set is unstated cannot be dispatched safely; state it or\n'
+            printf 'ask, rather than guessing. Counts come from checkboxes only.\n'
+        fi
+    else
+        # NO PLAN DOC REGISTERED — say so, do not go quiet (fixed 2026-08-11).
+        #
+        # This block used to emit NOTHING here, on the reasoning above that "a
+        # session that isn't plan-driven gets no directive". That reasoning holds
+        # for a DIRECTIVE and fails for a FACT: silence is indistinguishable from
+        # "checked, nothing open". The user asked a fresh session in another
+        # project for a status report and got no plan information at all, and
+        # correctly read that as the feature not working.
+        #
+        # It is the same false pass the no-checkboxes case was written to prevent,
+        # one level up: there we refused to report "0 open" for an unverifiable
+        # plan; here we were reporting nothing at all for an unregistered one.
+        # An absent answer must look absent.
+        printf '\nPLAN STATE: no plan doc registered in the RESUME "### Plan" section, so completeness is\n'
+        printf 'UNVERIFIABLE — this is NOT "no open work". If work here follows a plan or design\n'
+        printf 'doc, name its exact path under "### Plan" at the next checkpoint; until then no\n'
+        printf 'status report from this session can claim how much of it is done.\n'
     fi
 fi
 
@@ -253,7 +406,7 @@ if [ -f "$resume" ]; then
     [ -n "$blocks" ] || blocks=0
     [ -n "$bytes" ] || bytes=0
     if { [ "$lines" -gt "$budget" ] || [ "$blocks" -gt 3 ] || [ "$bytes" -gt "$budget_bytes" ]; } 2>/dev/null; then
-        printf 'NOTE: RESUME is over budget — run /checkpoint to trim (roll shipped Threads/Decisions to CHANGELOG).\n'
+        printf 'NOTE: RESUME is over budget — run /checkpoint to trim (shipped Threads to CHANGELOG; ### Decisions to DECISIONS.md, which is auto-loaded — never to CHANGELOG).\n'
     fi
 fi
 
@@ -267,6 +420,14 @@ memdir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$slug/memory"
 index="$memdir/MEMORY.md"
 if [ -f "$index" ]; then
     needs_tidy=0
+    volume_note=""
+
+    # Counted up front: the volume check (d) needs these even when an earlier
+    # check has already fired, so the NOTE can carry the numbers.
+    files=$(find "$memdir" -maxdepth 1 -type f -name '*.md' ! -name 'MEMORY.md' 2>/dev/null | wc -l | tr -d '[:space:]')
+    idx_bytes=$(wc -c < "$index" 2>/dev/null | tr -d '[:space:]')
+    [ -n "$files" ] || files=0
+    [ -n "$idx_bytes" ] || idx_bytes=0
 
     # (a) dead index link: a referenced .md file that no longer exists.
     while IFS= read -r ref; do
@@ -276,9 +437,7 @@ if [ -f "$index" ]; then
 
     # (b) orphans: memory files not represented in the index.
     if [ "$needs_tidy" -eq 0 ]; then
-        files=$(find "$memdir" -maxdepth 1 -type f -name '*.md' ! -name 'MEMORY.md' 2>/dev/null | wc -l | tr -d '[:space:]')
         idx=$(grep -cE '^[[:space:]]*-[[:space:]]*\[' "$index" 2>/dev/null)
-        [ -n "$files" ] || files=0
         [ -n "$idx" ] || idx=0
         [ "$((files - idx))" -gt "$orphan_max" ] && needs_tidy=1
 
@@ -288,7 +447,20 @@ if [ -f "$index" ]; then
         fi
     fi
 
-    [ "$needs_tidy" -eq 1 ] && printf 'NOTE: memory needs tidying — run /checkpoint --tidy.\n'
+    # (d) VOLUME — the trigger this check was missing (register issue 2, fixed
+    # 2026-08-11). (a)-(c) are all SHAPE checks, and shape says nothing about
+    # size: a cage holding 127 notes scored perfectly on all three, so tidy
+    # bailed early every single time and the pile only ever grew. Volume is the
+    # one fact shape cannot see, so it gets its own trigger and its own wording —
+    # a well-sectioned directory that is simply too big needs PRUNING, which is
+    # different work from reorganizing.
+    if [ "$needs_tidy" -eq 0 ] \
+       && { [ "$files" -gt "$note_max" ] || [ "$idx_bytes" -gt "$index_max" ]; } 2>/dev/null; then
+        needs_tidy=1
+        volume_note=" — ${files} notes, ${idx_bytes} B index (over ${note_max} / ${index_max}): PRUNE, do not merely reorganize"
+    fi
+
+    [ "$needs_tidy" -eq 1 ] && printf 'NOTE: memory needs tidying — run /checkpoint --tidy%s.\n' "$volume_note"
 fi
 
 exit 0

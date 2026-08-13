@@ -150,3 +150,13 @@ locate_in_proj() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"zid5678-session.jsonl" ]]
 }
+
+@test "pricing: the shipping Opus resolves by name in the resume table too" {
+    # Companion to the same assertion in test_handoff.bats. The two pricing
+    # tables are hand-synced (a documented limitation), so a model added to one
+    # and not the other is the exact drift this pins down. claude-opus-5 used to
+    # match nothing here and fall to the catch-all, which is the Opus rate --
+    # correct only by coincidence.
+    [ "$(_ccage_resume_price_input claude-opus-5)" = 5 ]
+    [ "$(_ccage_resume_price_input 'claude-opus-5[1m]')" = 5 ]
+}

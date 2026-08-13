@@ -10,6 +10,7 @@
 #   <prefix>/share/ccage/ccage-enable-mcp.sh — enable-mcp/disable-mcp library
 #   <prefix>/bin/ccage            — CLI dispatcher (uses the libraries)
 #   <prefix>/bin/ccage-auto       — autonomous context manager (python3 pty wrapper)
+#   <prefix>/bin/ccage-watch      — session-bridging condition watcher (python3)
 #   <prefix>/share/ccage/lib/ccb_types.py      — circuit-breaker types/config lib
 #   <prefix>/share/ccage/lib/subagent_watch.py — circuit-breaker watcher lib
 #   <prefix>/bin/ccb-report       — circuit-breaker ledger evaluation report CLI
@@ -145,6 +146,13 @@ if [ "$install_cli" = 1 ]; then
     install_file "$REPO_ROOT/bin/ccage"                 "$prefix/bin/ccage"  0755
     install_file "$REPO_ROOT/bin/ccage-auto"            "$prefix/bin/ccage-auto" 0755
 
+    # ccage-watch — session-bridging condition watcher. This line is load-bearing
+    # beyond installing a tool: stop_continuation_guard's UNARMED_PROMISE trigger
+    # probes PATH for `ccage-watch` and stays deliberately INERT while it is
+    # absent, so that it can never demand a remedy the machine cannot perform.
+    # Installing this is what switches that trigger on.
+    install_file "$REPO_ROOT/bin/ccage-watch"           "$prefix/bin/ccage-watch" 0755
+
     # Circuit-breaker (subagent watchdog) lib + report tool. ccage-auto's
     # _load_ccb() finds the lib at share/ccage/lib in an installed layout;
     # absent (e.g. --no-cli) it degrades to a no-op, never affecting the core
@@ -159,6 +167,13 @@ if [ "$install_cli" = 1 ]; then
     # unless a watched ccage-auto run registers it via a per-run --settings file.
     install_file "$REPO_ROOT/share/hooks/autonomous_ask_guard.sh" \
         "${CCAGE_HOOKS_DIR:-$HOME/.claude/hooks}/autonomous_ask_guard.sh" 0755
+
+    # Stop-continuation guard — same fixed-path treatment and the same per-run
+    # registration path as the ask-guard above (ccage-auto's _hook_path resolves
+    # a checkout copy first, then here). Without this line the installed
+    # ccage-auto finds nothing and the guard silently never fires.
+    install_file "$REPO_ROOT/share/hooks/stop_continuation_guard.sh" \
+        "${CCAGE_HOOKS_DIR:-$HOME/.claude/hooks}/stop_continuation_guard.sh" 0755
 
     # Weekly-limit floor sensor (CCAGE_AUTOCK_WEEKLY_FLOOR) — same fixed-path
     # treatment as the ask-guard above. Inert until a cage's statusLine is
@@ -195,6 +210,13 @@ if [ "$install_session_docs" = 1 ]; then
     share_from="${CCAGE_SHARE_FROM:-$HOME/.claude}"
     install_file "$REPO_ROOT/share/skills/checkpoint/SKILL.md"           "$share_from/skills/checkpoint/SKILL.md"
     install_file "$REPO_ROOT/share/skills/checkpoint/checkpoint-init.sh" "$share_from/skills/checkpoint/checkpoint-init.sh" 0755
+
+    # skill-catalog — searches every skill on disk and activates one on demand.
+    # Inert in an unscoped cage (skills/ symlinked to master): it refuses --add
+    # there and simply reports what is already listed. It only earns its keep
+    # once a cage is scoped to a core set.
+    install_file "$REPO_ROOT/share/skills/skill-catalog/SKILL.md"        "$share_from/skills/skill-catalog/SKILL.md"
+    install_file "$REPO_ROOT/share/skills/skill-catalog/skill-catalog.sh" "$share_from/skills/skill-catalog/skill-catalog.sh" 0755
 
     # CLAUDE.md anchor — short always-on note, marker-guarded so re-runs are safe.
     claude_md="$HOME/.claude/CLAUDE.md"

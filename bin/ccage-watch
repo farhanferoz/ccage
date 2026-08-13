@@ -1,0 +1,706 @@
+#!/usr/bin/env python3
+# ccage-watch — a condition watcher that OUTLIVES the Claude session that armed it.
+#
+# WHY THIS EXISTS (measured, not hypothesised). plans/2026-07-23-trackb-forensics-
+# autocast.md: 3/3 sessions ended correctly, armed a Bash(run_in_background)
+# watcher to bridge to the next session ("you'll get a notification"), and the
+# harness killed that watcher 50-131 s after the last assistant turn. Human gaps
+# of 8h23m and 13h56m were observed with nothing re-driving anything. No watcher
+# living inside the harness can survive the session; this one is an OS process
+# parented to init, so it can.
+#
+# Prior art was checked 2026-08-10 and nothing native covers this — CronCreate is
+# session-only (`durable` is a documented no-op), Monitor is session-scoped, the
+# SessionEnd hook cannot block, and anthropics/claude-code#28229 (native daemon
+# mode) was closed `not_planned`. Do not re-check. Full design:
+# plans/2026-07-23-ccage-watch-design.md.
+#
+# WHAT IT DELIBERATELY DOES NOT DO: it never launches, resumes or relaunches a
+# session. That capability was CUT, not defaulted-off, on the user's reasoning:
+# closing a session is itself a decision — often made precisely BECAUSE a job is
+# long-running — so relaunching behind the user overrides a deliberate choice.
+# User-initiated session closure is intent, not an accident to repair. There are
+# also no API calls and no model invocations: the condition is a shell command
+# and the action is a file append, the same jq-only philosophy as `ccage handoff`.
+#
+# DEVIATION FROM THE DESIGN, STATED NOT HIDDEN. The design says to insert the
+# outcome as the first item under RESUME's `### Next`, and also says appends must
+# be atomic and must never rewrite the file. Those two cannot both hold: inserting
+# mid-file is read-modify-write, and a live session running /checkpoint writes
+# RESUME through the Edit tool without taking any lock we could share, so an
+# insert can be silently clobbered. Losing the write is precisely the failure this
+# tool exists to prevent ("silence must never be indistinguishable from success"),
+# so we use O_APPEND — atomic for a single small write — and append a loud,
+# distinctively-marked block at end of file. RESUME is auto-read in full at
+# session start, so visibility is preserved; only the position differs.
+
+import argparse
+import enum
+import errno
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shlex
+import signal
+import subprocess
+import sys
+import time
+
+DEFAULT_INTERVAL_S = 600
+DEFAULT_TTL_S = 24 * 60 * 60
+CONDITION_TIMEOUT_S = 120          # a probe that hangs must not wedge the watcher
+ID_LEN = 12                        # chars of sha1 used as the watcher id
+SETTLE_S = 0.2                     # parent's grace for the daemon to write state
+EXIT_OK = 0
+
+MARK_BEGIN = "<!-- ccage-watch:begin -->"
+MARK_END = "<!-- ccage-watch:end -->"
+SECTION = "## Watch results (from ccage-watch — unmerged)"
+PROC_TIMEOUT_S = 5                 # liveness probes must never wedge a session start
+
+
+class Liveness(enum.Enum):
+    """A watcher process is live, gone, or unprovable — and the third is NOT the
+    second. Reporting an unprovable watcher as dead would fabricate a death; the
+    reap path prints it as UNKNOWN and leaves the spec alone."""
+
+    LIVE = "live"
+    DEAD = "dead"
+    UNKNOWN = "unknown"
+
+DURATION = re.compile(r"^(\d+(?:\.\d+)?)([smhd]?)$")
+UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "": 1}
+SLOT_SAFE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def resume_name():
+    """The RESUME file a session in THIS cage actually reads. A slotted cage
+    (CCAGE_SLOT) reads RESUME.<slot>.md, so writing plain RESUME.md there files
+    the outcome in a file nobody opens. Unsafe slot → plain file, mirroring
+    _ccage_config_dir_for and the autoload hook rather than inventing a rule."""
+    slot = os.environ.get("CCAGE_SLOT", "")
+    if slot and SLOT_SAFE.match(slot):
+        return f"RESUME.{slot}.md"
+    return "RESUME.md"
+
+
+def parse_duration(text):
+    m = DURATION.match(str(text).strip())
+    if not m:
+        raise argparse.ArgumentTypeError(
+            f"bad duration {text!r} — use e.g. 600, 30m, 24h, 2d")
+    return int(float(m.group(1)) * UNITS[m.group(2)])
+
+
+def config_dir(cwd):
+    """The cage's CLAUDE_CONFIG_DIR for this cwd.
+
+    Inside a cage the wrapper exports it into every subprocess, which is the only
+    case that matters here (arming happens from inside a session). Falling back to
+    ccage-auto's resolver keeps `list`/`disarm` working from a bare shell."""
+    cc = os.environ.get("CLAUDE_CONFIG_DIR")
+    if cc:
+        return cc
+    auto = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ccage-auto")
+    if os.path.isfile(auto):
+        try:
+            import importlib.machinery
+            import importlib.util
+            loader = importlib.machinery.SourceFileLoader("ccageauto", auto)
+            spec = importlib.util.spec_from_loader("ccageauto", loader)
+            mod = importlib.util.module_from_spec(spec)
+            loader.exec_module(mod)
+            return mod.resolve_config_dir(cwd)
+        except Exception:
+            pass
+    return os.path.expanduser("~/.claude")
+
+
+def watch_dir(cwd, create=False):
+    """Only `arm` may create this. A read-only command that creates directories
+    manufactures a whole config dir for whatever directory you happen to stand
+    in — `list` in an unrelated folder produced ~/.claude-<basename>/watch/,
+    found by live-firing the unconfigured path 2026-08-11."""
+    d = os.path.join(config_dir(cwd), "watch")
+    if create:
+        os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _git_top(cwd):
+    try:
+        p = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd,
+                           capture_output=True, text=True, timeout=PROC_TIMEOUT_S)
+        if p.returncode == EXIT_OK and p.stdout.strip():
+            return p.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def report_root(cwd):
+    """Where the outcome must be reported: the RESUME.md a session will actually
+    read, not whatever directory the arming shell happened to be in.
+
+    The Bash tool keeps its working directory between calls, so a single earlier
+    `cd` into a subfolder silently filed the report in a stray subdir RESUME.md
+    that nothing reads at session start (found by live-firing, 2026-08-11).
+    Nearest RESUME.md at or above cwd, bounded by the git root so the search can
+    never wander into $HOME; failing that the git root; failing that cwd, which
+    is the old behaviour and the only option outside a repo."""
+    name = resume_name()
+    top = _git_top(cwd)
+    d = os.path.realpath(cwd)
+    stop = os.path.realpath(top) if top else d
+    while True:
+        if os.path.isfile(os.path.join(d, name)):
+            return d
+        if d == stop or os.path.dirname(d) == d:
+            return stop
+        d = os.path.dirname(d)
+
+
+def log_path(cwd):
+    return os.path.join(config_dir(cwd), "ccage-watch.log")
+
+
+def log(cwd, msg):
+    line = f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {msg}\n"
+    try:
+        with open(log_path(cwd), "a") as fh:
+            fh.write(line)
+    except OSError:
+        pass
+
+
+def watch_id(cwd, cond):
+    """Stable per (cwd, condition) — which is what makes re-arming replace."""
+    h = hashlib.sha1(f"{os.path.realpath(cwd)}\0{cond}".encode()).hexdigest()
+    return h[:ID_LEN]
+
+
+def spec_path(cwd, wid):
+    return os.path.join(watch_dir(cwd), f"{wid}.json")
+
+
+def read_spec(path):
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def liveness(pid):
+    """LIVE / DEAD / UNKNOWN for a recorded watcher pid.
+
+    `kill(pid, 0)` alone is not enough once we act on a death: pids are recycled,
+    and an unrelated process wearing a dead watcher's pid would read as LIVE —
+    restoring exactly the silence the reap path exists to break. So a signalable
+    pid is confirmed against the process's own command line."""
+    if not pid:
+        return Liveness.DEAD
+    try:
+        os.kill(pid, 0)
+    except OSError as e:
+        if e.errno != errno.EPERM:
+            return Liveness.DEAD
+    try:                                        # Linux
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            return (Liveness.LIVE if b"ccage-watch" in fh.read()
+                    else Liveness.DEAD)
+    except OSError:
+        pass
+    try:                                        # macOS and anything else with ps
+        p = subprocess.run(["ps", "-o", "args=", "-p", str(pid)],
+                           capture_output=True, text=True, timeout=PROC_TIMEOUT_S)
+        if p.returncode == EXIT_OK:
+            return (Liveness.LIVE if "ccage-watch" in p.stdout
+                    else Liveness.DEAD)
+    except Exception:
+        pass
+    return Liveness.UNKNOWN
+
+
+def alive(pid):
+    """Signalable and provably still a watcher. UNKNOWN counts as alive here so
+    that arming and disarming stay conservative; only `reap`, which reports,
+    distinguishes the third state."""
+    return liveness(pid) in (Liveness.LIVE, Liveness.UNKNOWN)
+
+
+def report_target(spec):
+    """The exact file this spec's outcome goes into, resolved at arm time. Specs
+    armed before 2026-08-11 carry neither key, so they keep the old behaviour
+    rather than moving somewhere new without saying so."""
+    return os.path.join(spec.get("report_to") or spec["cwd"],
+                        spec.get("resume_file") or "RESUME.md")
+
+
+def append_resume(path, block):
+    """Append atomically to the session's RESUME file. Never rewrites it.
+
+    O_APPEND makes a single small write atomic even against another appender, and
+    because we never read-modify-write we cannot lose a concurrent session's edit
+    (nor it ours). A missing RESUME file is created rather than failing silently."""
+    body = block if block.endswith("\n") else block + "\n"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        need_section = os.lseek(fd, 0, os.SEEK_END) == 0
+        if not need_section:
+            try:
+                with open(path) as fh:
+                    need_section = SECTION not in fh.read()
+            except OSError:
+                need_section = True
+        text = (f"\n{SECTION}\n\n" if need_section else "\n") + body
+        os.write(fd, text.encode())
+    finally:
+        os.close(fd)
+    return path
+
+
+def resume_block(spec, outcome, detail):
+    cond = spec["cond"]
+    note = spec.get("note") or ""
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+    lines = [
+        MARK_BEGIN,
+        f"- **{outcome}** — `ccage-watch` {spec['id']}, armed {spec['armed_at']}, "
+        f"reported {stamp}.",
+        f"  - condition: `{cond}`",
+        f"  - {detail}",
+    ]
+    if note:
+        lines.append(f"  - bridges: {note}")
+    lines.append("  - **This is the first thing to act on** — it is why the "
+                 "previous session stopped.")
+    lines.append(MARK_END)
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------- daemon
+
+def run_condition(cond, cwd):
+    try:
+        p = subprocess.run(cond, shell=True, cwd=cwd, capture_output=True,
+                           text=True, timeout=CONDITION_TIMEOUT_S)
+        return p.returncode
+    except subprocess.TimeoutExpired:
+        return None
+    except Exception:
+        return None
+
+
+def daemon(spec_file):
+    spec = read_spec(spec_file)
+    if not spec:
+        return 1
+    cwd, cond = spec["cwd"], spec["cond"]
+    spec["pid"] = os.getpid()
+    with open(spec_file, "w") as fh:
+        json.dump(spec, fh, indent=2)
+
+    deadline = spec["armed_epoch"] + spec["ttl"]
+    log(cwd, f"ARMED   {spec['id']} pid={os.getpid()} cond={cond!r} "
+             f"interval={spec['interval']}s ttl={spec['ttl']}s")
+    reported = False
+    while True:
+        rc = run_condition(cond, cwd)
+        if rc == EXIT_OK:
+            log(cwd, f"FIRED   {spec['id']} condition met (exit 0)")
+            try:
+                path = append_resume(report_target(spec), resume_block(
+                    spec, "WATCH FIRED",
+                    "the condition returned exit 0 — the thing being waited on is done"))
+                log(cwd, f"WROTE   {spec['id']} -> {path}")
+                reported = True
+            except OSError as e:
+                log(cwd, f"ERROR   {spec['id']} could not write RESUME: {e}")
+            break
+        if time.time() >= deadline:
+            log(cwd, f"EXPIRED {spec['id']} ttl reached without firing")
+            try:
+                append_resume(report_target(spec), resume_block(
+                    spec, "WATCH EXPIRED",
+                    f"the TTL ({spec['ttl']}s) elapsed and the condition never "
+                    f"returned 0 — treat this as UNKNOWN, not as success"))
+                reported = True
+            except OSError as e:
+                log(cwd, f"ERROR   {spec['id']} could not write RESUME: {e}")
+            break
+        time.sleep(spec["interval"])
+
+    # The spec is this watcher's only trace. Removing it after a FAILED write
+    # (RESUME read-only, disk full) would delete the evidence and leave the
+    # cage log as the sole record — silent to every future session. Left in
+    # place, the next `reap` finds a dead pid and reports it, which is exactly
+    # what happened: nothing was ever written.
+    if reported:
+        try:
+            os.remove(spec_file)
+        except OSError:
+            pass
+    return 0
+
+
+def spawn(spec_file):
+    """Double-fork + setsid so the watcher is parented to init and survives both
+    the arming shell and the CLI that ran it."""
+    if os.fork() > 0:
+        return
+    os.setsid()
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    if os.fork() > 0:
+        os._exit(0)
+    devnull = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        try:
+            os.dup2(devnull, fd)
+        except OSError:
+            pass
+    try:
+        daemon(spec_file)
+    finally:
+        os._exit(0)
+
+
+# ------------------------------------------------------------------ commands
+
+def cmd_arm(args):
+    cwd = os.getcwd()
+    watch_dir(cwd, create=True)
+    wid = watch_id(cwd, args.cond)
+    path = spec_path(cwd, wid)
+
+    existing = read_spec(path)
+    if existing and alive(existing.get("pid")):
+        if not args.replace:
+            print(f"already armed: {wid} (same cwd + condition). "
+                  f"Use --replace to restart it, or `ccage-watch disarm {wid}`.")
+            return 0
+        _kill(existing, cwd)
+
+    target = report_root(cwd)
+    spec = {
+        "id": wid,
+        "cwd": cwd,
+        "report_to": target,
+        "resume_file": resume_name(),
+        "cond": args.cond,
+        "note": args.note or "",
+        "interval": args.interval,
+        "ttl": args.ttl,
+        "armed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "armed_epoch": time.time(),
+        "pid": None,
+    }
+    with open(path, "w") as fh:
+        json.dump(spec, fh, indent=2)
+    spawn(path)
+    time.sleep(SETTLE_S)
+    live = read_spec(path)
+    pid = (live or {}).get("pid")
+    print(f"armed {wid}" + (f" (pid {pid})" if pid else "") +
+          f" — checks every {args.interval}s, expires in {args.ttl}s.\n"
+          f"It survives this session. The outcome is appended to "
+          f"{report_target(spec)}; nothing runs while you are "
+          f"away beyond this one shell command.")
+    return 0
+
+
+def _kill(spec, cwd):
+    pid = spec.get("pid")
+    if alive(pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    log(cwd, f"DISARM  {spec.get('id')} pid={pid}")
+    try:
+        os.remove(spec_path(cwd, spec["id"]))
+    except OSError:
+        pass
+
+
+def iter_specs(cwd):
+    """Every spec in this cage's watch dir. A missing dir means none armed —
+    never a reason to create one (that is what manufactured phantom cages)."""
+    d = watch_dir(cwd)
+    rows = []
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return rows
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        spec = read_spec(os.path.join(d, name))
+        if spec:
+            rows.append(spec)
+    return rows
+
+
+def cmd_list(_args):
+    cwd = os.getcwd()
+    rows = iter_specs(cwd)
+    if not rows:
+        print("no watchers armed")
+        return 0
+    now = time.time()
+    print(f"{'id':14} {'pid':>7} {'age':>8} {'left':>8}  condition")
+    for s in rows:
+        age = int(now - s.get("armed_epoch", now))
+        left = int(s.get("armed_epoch", now) + s.get("ttl", 0) - now)
+        state = liveness(s.get("pid"))
+        shown = str(s.get("pid") or "-") if state is Liveness.LIVE else state.value.upper()
+        print(f"{s['id']:14} {shown:>7} {age:>7}s {left:>7}s  {s['cond']}")
+    return 0
+
+
+def cmd_reap(_args):
+    """Session-start report: a watcher that DIED must not be silent.
+
+    The daemon only ever writes to RESUME when it fires or times out. Killed any
+    other way — reboot, OOM, a stray kill — it writes nothing, and the next
+    session cannot tell "armed and died" from "never armed" (audited live
+    2026-08-11; nothing read the watch dir at session start). A death is now
+    recorded in RESUME exactly the way a firing is, and every remaining watcher
+    is named. Prints nothing at all when nothing is armed, so a project that
+    never uses this pays no session-start context for it."""
+    cwd = os.getcwd()
+    now = time.time()
+    lines = []
+    for spec in iter_specs(cwd):
+        state = liveness(spec.get("pid"))
+        # .get, not [...]: a hand-edited or truncated spec must not raise here.
+        # This runs at session start with stderr discarded, so an exception would
+        # be swallowed — reintroducing the silence as an unhandled error.
+        wid = spec.get("id") or "unknown"
+        cond = spec.get("cond") or "<condition not recorded>"
+        if state is Liveness.LIVE:
+            left = int(spec.get("armed_epoch", now) + spec.get("ttl", 0) - now)
+            lines.append(f"  - LIVE {wid}: waiting on `{cond}` "
+                         f"({max(left, 0) // 60} min left). Nothing has fired yet — "
+                         f"do not read this as done.")
+            continue
+        if state is Liveness.UNKNOWN:
+            lines.append(f"  - UNKNOWN {wid}: pid {spec.get('pid')} cannot be "
+                         f"identified, condition `{cond}`. Check it yourself.")
+            continue
+        detail = ("the watcher process is gone and it never reported — the "
+                  "condition was never observed to be met. Treat this as "
+                  "UNKNOWN, not as success: check it yourself.")
+        try:
+            append_resume(report_target(spec), resume_block(spec, "WATCH DIED", detail))
+            where = "recorded in RESUME.md"
+        except OSError as e:
+            where = f"could NOT be recorded in RESUME ({e})"
+        log(cwd, f"REAPED  {wid} died without reporting; {where}")
+        try:
+            os.remove(spec_path(cwd, wid))
+        except OSError:
+            pass
+        lines.append(f"  - DIED {wid}: armed {spec.get('armed_at')}, waiting on "
+                     f"`{cond}` — never reported, {where}.")
+    if lines:
+        print("WATCHERS (ccage-watch, survives sessions):")
+        print("\n".join(lines))
+    return 0
+
+
+def cmd_disarm(args):
+    cwd = os.getcwd()
+    n = 0
+    for spec in iter_specs(cwd):
+        if args.all or spec["id"] == args.id:
+            _kill(spec, cwd)
+            n += 1
+    print(f"disarmed {n}")
+    return 0
+
+
+def _st_run(cage, proj, *argv, **envx):
+    """Arm/list/disarm in a CHILD process that then exits — so that anything
+    still running afterwards has provably outlived its parent."""
+    env = dict(os.environ, CLAUDE_CONFIG_DIR=cage, **envx)
+    return subprocess.run([sys.executable, os.path.abspath(__file__), *argv],
+                          cwd=proj, env=env, capture_output=True, text=True)
+
+
+def cmd_selftest(_args):
+    """Exercise every behaviour the design requires, in a throwaway directory."""
+    import tempfile
+    ok = True
+
+    def check(name, cond, detail=""):
+        nonlocal ok
+        ok = ok and cond
+        print(f"  {'PASS' if cond else 'FAIL'}  {name}" + (f" — {detail}" if detail else ""))
+
+    with tempfile.TemporaryDirectory(prefix="ccage-watch-selftest-") as tmp:
+        cage, proj = os.path.join(tmp, "cage"), os.path.join(tmp, "proj")
+        os.makedirs(cage)
+        os.makedirs(proj)
+        flag = os.path.join(proj, "flag")
+
+        print("1. fires on condition, and survives the process that armed it")
+        r = _st_run(cage, proj, "arm", "--cond", f"test -f {shlex.quote(flag)}",
+                    "--note", "selftest", "--interval", "1", "--ttl", "30")
+        check("arm succeeded", r.returncode == EXIT_OK, r.stderr.strip()[:120])
+        specs = [f for f in os.listdir(os.path.join(cage, "watch"))
+                 if f.endswith(".json")]
+        check("spec written", len(specs) == 1)
+        spec = read_spec(os.path.join(cage, "watch", specs[0])) if specs else None
+        pid = (spec or {}).get("pid")
+        check("watcher outlived its parent", alive(pid), f"pid={pid}")
+
+        print("2. refuses to double-arm the same condition")
+        r2 = _st_run(cage, proj, "arm", "--cond", f"test -f {shlex.quote(flag)}",
+                     "--interval", "1", "--ttl", "30")
+        check("second arm refused", "already armed" in r2.stdout)
+
+        open(flag, "w").close()
+        deadline = time.time() + 20
+        resume = os.path.join(proj, "RESUME.md")
+        while time.time() < deadline and not os.path.exists(resume):
+            time.sleep(0.5)
+        text = open(resume).read() if os.path.exists(resume) else ""
+        check("fired and wrote RESUME.md", "WATCH FIRED" in text)
+        check("RESUME entry is well-formed",
+              MARK_BEGIN in text and MARK_END in text and SECTION in text)
+        check("spec cleaned up after firing",
+              not [f for f in os.listdir(os.path.join(cage, "watch"))
+                   if f.endswith(".json")])
+
+        print("3. expires on TTL, and says so rather than going quiet")
+        _st_run(cage, proj, "arm", "--cond", "false", "--note", "selftest ttl",
+                "--interval", "1", "--ttl", "1")
+        deadline = time.time() + 20
+        while time.time() < deadline and "WATCH EXPIRED" not in (
+                open(resume).read() if os.path.exists(resume) else ""):
+            time.sleep(0.5)
+        text = open(resume).read() if os.path.exists(resume) else ""
+        check("expiry recorded distinctly from success", "WATCH EXPIRED" in text)
+        check("expiry is not mistakable for success", "UNKNOWN, not as success" in text)
+
+        print("4. never claims to start a session")
+        src = open(os.path.abspath(__file__)).read()
+        check("no session-launching machinery",
+              not re.search(r"\b(?:claude|ccage)\s+(?:-r|--resume|--continue)\b", src))
+
+        # 5-7 exist because the three defects below were found by live-firing the
+        # UNCONFIGURED path, not by any test: every test above configures what it
+        # exercises. Each of these asserts the default, set-up-nothing behaviour.
+        print("5. a watcher that dies without reporting is reaped, not silent")
+        os.remove(resume)
+        r5 = _st_run(cage, proj, "arm", "--cond", "false", "--interval", "1",
+                     "--ttl", "600")
+        check("armed for the death test", r5.returncode == EXIT_OK)
+        specs = [f for f in os.listdir(os.path.join(cage, "watch"))
+                 if f.endswith(".json")]
+        spec = read_spec(os.path.join(cage, "watch", specs[0])) if specs else None
+        pid = (spec or {}).get("pid")
+        if pid:
+            os.kill(pid, signal.SIGKILL)
+            for _ in range(40):                 # reaping a not-yet-dead pid proves nothing
+                if liveness(pid) is not Liveness.LIVE:
+                    break
+                time.sleep(0.25)
+        r5b = _st_run(cage, proj, "reap")
+        text = open(resume).read() if os.path.exists(resume) else ""
+        check("reap names the dead watcher", "DIED" in r5b.stdout, r5b.stdout.strip()[:120])
+        check("the death is recorded in RESUME", "WATCH DIED" in text)
+        check("the death cannot read as success", "not as success" in text)
+        check("the dead spec is cleared",
+              not [f for f in os.listdir(os.path.join(cage, "watch"))
+                   if f.endswith(".json")])
+        check("reap is silent when nothing is armed",
+              _st_run(cage, proj, "reap").stdout.strip() == "")
+
+        print("6. the outcome is filed where a session will read it")
+        sub = os.path.join(proj, "deep", "nested")
+        os.makedirs(sub)
+        subprocess.run(["git", "init", "-q"], cwd=proj, capture_output=True)
+        r6 = _st_run(cage, sub, "arm", "--cond", "true", "--interval", "1", "--ttl", "30")
+        # realpath, not the raw join: on macOS the temp dir is reached through a
+        # symlink, and the arm line prints the resolved path.
+        check("arm names the resolved RESUME path",
+              os.path.join(os.path.realpath(proj), "RESUME.md") in r6.stdout,
+              r6.stdout.strip()[:160])
+        deadline = time.time() + 20
+        while time.time() < deadline and "WATCH FIRED" not in (
+                open(resume).read() if os.path.exists(resume) else ""):
+            time.sleep(0.5)
+        check("armed from a subdirectory, reported at the project root",
+              "WATCH FIRED" in open(resume).read())
+        check("no stray RESUME.md in the subdirectory",
+              not os.path.exists(os.path.join(sub, "RESUME.md")))
+
+        print("7. a slotted cage is reported into the file it actually reads")
+        slotted = os.path.join(proj, "RESUME.slotb.md")
+        _st_run(cage, proj, "arm", "--cond", "true", "--interval", "1",
+                "--ttl", "30", CCAGE_SLOT="slotb")
+        deadline = time.time() + 20
+        while time.time() < deadline and not os.path.exists(slotted):
+            time.sleep(0.5)
+        check("slot outcome lands in RESUME.<slot>.md",
+              os.path.exists(slotted) and "WATCH FIRED" in open(slotted).read())
+
+        print("8. read-only commands create nothing")
+        empty = os.path.join(tmp, "empty-cage")
+        for cmd in ("list", "reap"):
+            _st_run(empty, proj, cmd)
+            check(f"`{cmd}` did not manufacture a config dir",
+                  not os.path.exists(empty))
+
+    print("PASS" if ok else "FAIL")
+    return EXIT_OK if ok else 1
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(
+        prog="ccage-watch",
+        description="Watch a condition and report into RESUME.md, surviving the "
+                    "session that armed it. Never launches a session.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    a = sub.add_parser("arm", help="arm a watcher")
+    a.add_argument("--cond", required=True,
+                   help="shell command; exit 0 means the condition is met")
+    a.add_argument("--note", help="what this bridges, for the RESUME entry")
+    a.add_argument("--interval", type=parse_duration, default=DEFAULT_INTERVAL_S)
+    a.add_argument("--ttl", type=parse_duration, default=DEFAULT_TTL_S)
+    a.add_argument("--replace", action="store_true",
+                   help="restart an identical watcher instead of refusing")
+    a.set_defaults(fn=cmd_arm)
+
+    for name in ("list", "status"):
+        s = sub.add_parser(name, help="show armed watchers")
+        s.set_defaults(fn=cmd_list)
+
+    r = sub.add_parser("reap", help="report armed watchers; record any that died")
+    r.set_defaults(fn=cmd_reap)
+
+    d = sub.add_parser("disarm", help="stop a watcher")
+    d.add_argument("id", nargs="?")
+    d.add_argument("--all", action="store_true")
+    d.set_defaults(fn=cmd_disarm)
+
+    st = sub.add_parser("selftest", help="verify every documented behaviour")
+    st.set_defaults(fn=cmd_selftest)
+
+    run = sub.add_parser("_daemon", help=argparse.SUPPRESS)
+    run.add_argument("spec")
+    run.set_defaults(fn=lambda args: daemon(args.spec))
+
+    args = p.parse_args(argv)
+    if args.cmd == "disarm" and not args.all and not args.id:
+        p.error("disarm needs an id or --all")
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

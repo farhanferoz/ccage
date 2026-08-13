@@ -64,6 +64,11 @@
 #   CCAGE_AUTOCK_READY_MARKER (string marking the TUI as rendered; default ❯),
 #   CCAGE_AUTOCK_NUDGE (override the soft-nudge text; {pct}/{sentinel} substituted),
 #   CCAGE_AUTOCK_HARD_NUDGE (override the hard-backstop nudge text; same substitutions),
+#   CCAGE_AUTOCK_STALL_IDLE (silent-stall watchdog: seconds of zero transcript
+#     growth after a nudge before re-nudging a quiet session; 0 disables;
+#     default 600),
+#   CCAGE_AUTOCK_STALL_NUDGE (override the silent-stall nudge text;
+#     {pct}/{idle}/{sentinel} substituted),
 #   CCAGE_AUTOCK_NUDGE_TIMEOUT (s before re-nudging the weekly-floor stand-down
 #     if unconfirmed; default 600 — the context/occupancy escalation below is
 #     occupancy-only and ignores this),
@@ -180,6 +185,18 @@ NUDGE_TIMEOUT = 600.0   # weekly-floor stand-down only: re-nudge if the model
                         # applies once floored). The context/occupancy machine
                         # below escalates on occupancy alone — no timer.
 MAX_RENUDGE = 1         # soft re-nudges before escalating to the hard path
+STALL_IDLE = 600.0      # silent-stall watchdog: while NUDGED, if this many
+                        # seconds pass since the last nudge with ZERO transcript
+                        # growth, the model went quiet without the sentinel
+                        # (observed: it checkpoints, then hands the clear
+                        # decision back to an absent human — StrategyA
+                        # 2026-07-22). Occupancy cannot move on an idle session,
+                        # so no occupancy branch will ever fire; without this
+                        # the watcher sits NUDGED forever, silently. Idleness is
+                        # the trigger, so the watchdog can never interrupt real
+                        # work — this is NOT the retired wall-clock hard
+                        # fallback, which fired hard wording off elapsed time
+                        # while the model might still be working. 0 disables.
 
 # Threshold derivation (decided contract, three rounds of clarification — do
 # not re-derive): soft defaults to DEFAULT_SOFT; hard defaults to
@@ -226,36 +243,61 @@ def launch_command(cfg):
     return 'claude "$@"' if cfg.chrome else 'claude --no-chrome "$@"'
 
 
-def ask_guard_path():
-    """Locate autonomous_ask_guard.sh: the copy in this script's own tree first
-    (a checkout — keeps tests hermetic even when ccage is also installed), then
-    the fixed hooks path install.sh deploys to."""
+def _hook_path(name):
+    """Locate a per-run guard hook by filename: the copy in this script's own tree
+    first (a checkout — keeps tests hermetic even when ccage is also installed),
+    then the fixed hooks path install.sh deploys to."""
     here = os.path.dirname(os.path.abspath(__file__))
     for cand in (
-        os.path.join(here, "..", "share", "hooks", "autonomous_ask_guard.sh"),
-        os.path.join(os.path.expanduser("~"), ".claude", "hooks",
-                     "autonomous_ask_guard.sh"),
+        os.path.join(here, "..", "share", "hooks", name),
+        os.path.join(os.path.expanduser("~"), ".claude", "hooks", name),
     ):
         if os.path.isfile(cand):
             return os.path.abspath(cand)
     return None
 
 
+def ask_guard_path():
+    return _hook_path("autonomous_ask_guard.sh")
+
+
+def stop_guard_path():
+    return _hook_path("stop_continuation_guard.sh")
+
+
 def write_guard_settings(sdir):
-    """Write the per-run settings file registering the AskUserQuestion guard,
-    and return its path (None if the hook script can't be found). Passed to the
-    launched session via `claude --settings <file>` — the registration lives and
-    dies with the run; no cage settings.json is ever touched. The hook itself is
-    armed by the CCAGE_AUTONOMOUS marker, so a stale file is inert."""
+    """Write the per-run settings file registering the autonomous-run guards, and
+    return its path (None if no guard hook can be found). Passed to the launched
+    session via `claude --settings <file>` — the registration lives and dies with
+    the run; no cage settings.json is ever touched. Both hooks are additionally
+    armed by the CCAGE_AUTONOMOUS marker, so a stale file is inert.
+
+    Two guards, deliberately scoped to unattended runs only:
+      * PreToolUse/AskUserQuestion — a blocking question would stall the run.
+      * Stop — refuses to end a turn while work is plainly available (the root
+        stating a next action and not taking it, or idling while subagents run).
+        An interactive session must never pay a turn-end check, which is exactly
+        why this lives here and not in any cage settings.json."""
     guard = ask_guard_path()
-    if not guard:
+    stop_guard = stop_guard_path()
+    if not guard and not stop_guard:
         return None
     os.makedirs(sdir, exist_ok=True)
     path = os.path.join(sdir, "autonomous-settings.json")
-    payload = {"hooks": {"PreToolUse": [{
-        "matcher": "AskUserQuestion",
-        "hooks": [{"type": "command", "command": "bash %s" % shlex.quote(guard)}],
-    }]}}
+    hooks = {}
+    if guard:
+        hooks["PreToolUse"] = [{
+            "matcher": "AskUserQuestion",
+            "hooks": [{"type": "command",
+                       "command": "bash %s" % shlex.quote(guard)}],
+        }]
+    if stop_guard:
+        hooks["Stop"] = [{
+            "matcher": "*",
+            "hooks": [{"type": "command",
+                       "command": "bash %s" % shlex.quote(stop_guard)}],
+        }]
+    payload = {"hooks": hooks}
     with open(path, "w") as f:
         json.dump(payload, f, indent=2)
         f.write("\n")
@@ -280,6 +322,11 @@ class Config:
         self.hard_interrupt = _truthy(os.environ.get("CCAGE_AUTOCK_HARD_INTERRUPT"), True)
         self.nudge_timeout = _num(os.environ.get("CCAGE_AUTOCK_NUDGE_TIMEOUT"), NUDGE_TIMEOUT)
         self.cooldown = _num(os.environ.get("CCAGE_AUTOCK_COOLDOWN"), COOLDOWN)
+        # Silent-stall watchdog window (seconds; 0 disables). See STALL_IDLE.
+        self.stall_idle = _num(os.environ.get("CCAGE_AUTOCK_STALL_IDLE"), STALL_IDLE)
+        # Override the silent-stall nudge text; {pct}, {idle} (minutes) and
+        # {sentinel} are substituted.
+        self.stall_nudge = os.environ.get("CCAGE_AUTOCK_STALL_NUDGE")
         # Weekly-limit floor, as REMAINING percent. 0 / unset / garbage = off.
         self.weekly_floor = _num(os.environ.get("CCAGE_AUTOCK_WEEKLY_FLOOR"), 0.0)
         # Autonomous kickoff: type this prompt + Enter once at startup so an
@@ -964,6 +1011,10 @@ class Watcher:
     NORMAL = "normal"
     NUDGED = "nudged"
     COOLDOWN = "cooldown"
+    # nudge kinds (_arm_nudge)
+    SOFT = "soft"
+    HARD = "hard"
+    STALL = "stall"
 
     def __init__(self, cfg, master_fd, write_lock, cwd, sdir, logf):
         self.cfg = cfg
@@ -998,6 +1049,9 @@ class Watcher:
         self.nudge_path = None    # transcript file current at nudge time
         self.renudges = 0
         self.hard_fired = False   # hard-threshold escalation done for this cycle
+        self.last_growth = time.time()  # last time the active transcript grew
+        self.stall_fired = False  # silent-stall watchdog re-nudge done this cycle
+        self.stall_log_at = 0.0   # rate-limits the "stall persists" log line
         self.cooldown_until = 0.0
         self.last_path = None     # transcript path of the last occupancy reading
         self.last_sz = -1         # size of that transcript at the last reading
@@ -1083,17 +1137,42 @@ class Watcher:
             )
         self._type(msg)
 
-    def _arm_nudge(self, path, pct, hard=False):
+    def _stall_nudge(self, pct):
+        # The session went quiet after a nudge without printing the sentinel
+        # (typically: checkpoint written, then the model addressed an absent
+        # human instead of confirming). Firm and specific — deliberately NOT
+        # the hard-backstop text, whose "the hard backstop" wording would
+        # misstate an occupancy nowhere near cfg.hard.
+        idle = (time.time() - self.last_growth) / 60.0
+        if self.cfg.stall_nudge:
+            msg = (self.cfg.stall_nudge.replace("{pct}", "%.0f" % pct)
+                   .replace("{idle}", "%.0f" % idle)
+                   .replace("{sentinel}", self.cfg.sentinel))
+        else:
+            msg = (
+                "[auto-checkpoint] The session has been quiet for %.0f minutes "
+                "since the checkpoint nudge without printing %s, so it cannot be "
+                "cleared and resumed (context is at %.0f%%). If the checkpoint "
+                "is already written, print the single token %s on its own line "
+                "now and stop. If not, invoke the checkpoint skill to update "
+                "RESUME.md, then print it. Do not start new work."
+                % (idle, self.cfg.sentinel, pct, self.cfg.sentinel)
+            )
+        self._type(msg)
+
+    def _arm_nudge(self, path, pct, kind=SOFT):
         """Stamp the nudge time + the transcript file/offset, then type the soft
-        (advisory) or hard (backstop) nudge. We pin the *file* current at nudge
-        time (not just the offset): the model echoes the sentinel into it before
-        we /clear rotates to a new file, so scanning that pinned file keeps
-        confirmation correct across rotation."""
+        (advisory), hard (backstop) or stall (silent-stall watchdog) nudge. We
+        pin the *file* current at nudge time (not just the offset): the model
+        echoes the sentinel into it before we /clear rotates to a new file, so
+        scanning that pinned file keeps confirmation correct across rotation."""
         self.nudge_at = time.time()
         self.nudge_path = path
         self.nudge_offset = os.path.getsize(path)
-        if hard:
+        if kind == self.HARD:
             self._hard_nudge(pct)
+        elif kind == self.STALL:
+            self._stall_nudge(pct)
         else:
             self._soft_nudge(pct)
 
@@ -1358,6 +1437,7 @@ class Watcher:
                 self.last_pct = None
             if sz != self.last_sz:
                 self.last_sz = sz
+                self.last_growth = time.time()   # silent-stall watchdog clock
                 tokens, model = latest_usage(path)
                 if tokens is not None and tokens != self.last_tokens:
                     self.last_tokens = tokens
@@ -1386,6 +1466,8 @@ class Watcher:
                     self._log("soft threshold hit at %.1f%% (%d tok) — nudging" % (pct, tokens))
                     self.renudges = 0
                     self.hard_fired = False
+                    self.stall_fired = False
+                    self.stall_log_at = 0.0
                     self._arm_nudge(path, pct)
                     self.state = self.NUDGED
                 continue
@@ -1425,7 +1507,7 @@ class Watcher:
                     if cfg.hard_interrupt:
                         self._interrupt()
                     self.hard_fired = True
-                    self._arm_nudge(path, pct, hard=True)
+                    self._arm_nudge(path, pct, kind=self.HARD)
                 elif self.renudges < MAX_RENUDGE and pct >= cfg.renudge:
                     # Occupancy-anchored re-nudge (hard - RENUDGE_MARGIN, tracking
                     # whatever cfg.hard actually is — never a hardcoded number).
@@ -1438,7 +1520,34 @@ class Watcher:
                               "— re-nudging with hard wording, no interrupt yet"
                               % (pct, cfg.renudge))
                     self.renudges += 1
-                    self._arm_nudge(path, pct, hard=True)
+                    self._arm_nudge(path, pct, kind=self.HARD)
+                elif (cfg.stall_idle > 0
+                      and time.time() - self.nudge_at >= cfg.stall_idle
+                      and time.time() - self.last_growth >= cfg.stall_idle
+                      and time.time() - self.stall_log_at >= cfg.stall_idle):
+                    # Silent-stall watchdog: nudged, and the transcript has not
+                    # grown since — the model went quiet without the sentinel
+                    # (e.g. checkpointed, then handed the clear decision back to
+                    # an absent human). Occupancy cannot move on an idle
+                    # session, so none of the branches above will ever fire
+                    # again; without this the watcher sits NUDGED forever,
+                    # silently. Requires idleness since BOTH the last nudge and
+                    # the last growth, so a fresh nudge always gets a full
+                    # window before the watchdog speaks — and an idle prompt
+                    # means typing cannot interrupt real work. One firm
+                    # re-nudge, then rate-limited logging only (never nag).
+                    idle_min = (time.time() - self.last_growth) / 60.0
+                    self.stall_log_at = time.time()
+                    if not self.stall_fired:
+                        self._log("SILENT STALL: transcript idle %.0f min after "
+                                  "the nudge with no sentinel — re-nudging "
+                                  "(watchdog)" % idle_min)
+                        self.stall_fired = True
+                        self._arm_nudge(path, pct, kind=self.STALL)
+                    else:
+                        self._log("silent stall persists: transcript idle "
+                                  "%.0f min after the watchdog re-nudge"
+                                  % idle_min)
 
 
 # ----------------------------------------------------------------------------

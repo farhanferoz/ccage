@@ -1,14 +1,12 @@
 ---
 name: keepwarm
 description: >-
-  Keep this session's prompt cache warm while the user steps away, by
-  scheduling a tiny self-wake turn every N minutes (default 55, under the
-  1-hour cache TTL) so the cached conversation prefix is re-read before it
-  expires — avoiding a full cache rewrite on the user's return. Use when the
-  user says "/keepwarm", "keep warm", "keep the cache alive/warm", "I'm
-  stepping away / going to a meeting / lunch — keep the session warm", or asks
-  to prevent the prompt cache from expiring. Not a resume fix: a warm cache
-  never survives `claude -r`.
+  Keep this session's prompt cache warm while the user steps away, by scheduling a
+  tiny self-wake turn every N minutes (default 55). Use on "/keepwarm", "keep warm",
+  "keep the cache alive/warm", "I'm stepping away / going to a meeting / lunch — keep
+  the session warm", or asks to prevent the prompt cache from expiring. Not a resume
+  fix.
+
 ---
 
 # /keepwarm

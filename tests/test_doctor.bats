@@ -3,6 +3,7 @@
 # dispatcher against a SANDBOX CCAGE_ROOT (never the user's real ~/.claude-*),
 # so no running session is affected.
 bats_require_minimum_version 1.5.0
+load helpers
 
 setup() {
     command -v jq >/dev/null 2>&1 || skip "jq required"
@@ -87,7 +88,7 @@ has_cmd() {
 @test "doctor lists a cage with messy memory (dead index link)" {
     local repo="$BATS_TEST_TMPDIR/repo7"; mkdir -p "$repo"
     local cage; cage=$(mkcage proj7 "$repo")
-    local md="$cage/projects/${repo//\//-}/memory"
+    local md="$cage/projects/$(oracle_slug "$repo")/memory"
     mkdir -p "$md"
     printf -- '- [Gone](missing.md) — note\n' > "$md/MEMORY.md"
     run "$CCAGE" doctor
@@ -144,7 +145,7 @@ has_cmd() {
     local repo="$BATS_TEST_TMPDIR/repo11"; mkdir -p "$repo"
     local cage; cage=$(mkcage proj11 "$repo")
     # project A == owner, tidy (grouped index, indexed file present)
-    local mdA="$cage/projects/${repo//\//-}/memory"; mkdir -p "$mdA"
+    local mdA="$cage/projects/$(oracle_slug "$repo")/memory"; mkdir -p "$mdA"
     printf '## Grouped\n- [ok](ok.md)\n' > "$mdA/MEMORY.md"
     printf 'x\n' > "$mdA/ok.md"
     # project B != owner, messy (dead index link)

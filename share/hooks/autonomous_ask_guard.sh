@@ -35,7 +35,13 @@ Otherwise, for the truly unattended case:
    after completing all work that does not depend on the answers.
 Halt mid-run only for irreversible / destructive / outward-facing actions.
 MSG
+        printf '%s %-14s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "DENY-ask" "autonomous run" \
+            >> "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/autonomous_ask_guard.log" 2>/dev/null || true
         exit 2
         ;;
 esac
+# Logged only on the DENY path here, deliberately: this guard's ALLOW is "not an
+# autonomous run", which is the overwhelming majority of invocations and would
+# bury the signal. Its inertness is visible another way — the deny is the only
+# state worth counting (D14).
 exit 0

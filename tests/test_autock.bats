@@ -11,6 +11,7 @@
 # temp dir we get a deterministic transcript location regardless of the host's
 # shell init.
 bats_require_minimum_version 1.5.0
+load helpers
 
 AUTO="$BATS_TEST_DIRNAME/../bin/ccage-auto"
 
@@ -26,11 +27,22 @@ setup() {
     # Unset CLAUDE_CONFIG_DIR: when the suite runs inside a real cage it is set in
     # the environment, and resolve_config_dir's fast path would return it instead
     # of the CCAGE_ROOT-derived dir these tests pin. Tests must own the env.
-    unset CCAGE_SLOT CCAGE_AUTOCK CCAGE_AUTOCK_WINDOW CLAUDE_CONFIG_DIR CCAGE_AUTOCK_WEEKLY_FLOOR
+    unset CCAGE_SLOT CCAGE_AUTOCK CLAUDE_CONFIG_DIR
     # Hermetic even when the suite itself runs inside an autonomous session.
-    unset CCAGE_AUTONOMOUS CCAGE_AUTOCK_NO_ASK_GUARD
+    unset CCAGE_AUTONOMOUS
+    # Unset EVERY CCAGE_AUTOCK_* rather than an enumerated list. The hand-listed
+    # set went stale when CCAGE_AUTOCK_SOFT arrived: a live ccage-auto exports its
+    # own thresholds into the session it launches, so the two default-threshold
+    # tests passed in CI and on a clean machine and failed ONLY when the suite was
+    # run from inside a real autonomous session — i.e. exactly when a developer
+    # runs it. Enumerate nothing; match the prefix. (bash 3.2 safe: no ${!x@}, no
+    # process substitution — macOS CI runs stock bash.)
+    for _v in $(env | sed -n 's/^\(CCAGE_AUTOCK_[A-Za-z0-9_]*\)=.*/\1/p'); do
+        unset "$_v"
+    done
+    unset _v
     CAGE="$CCAGE_ROOT/.claude-repo"
-    SLUG="${REPO//\//-}"
+    SLUG="$(oracle_slug "$REPO")"
     SDIR="$CAGE/projects/$SLUG"
     mkdir -p "$SDIR"
 }
@@ -407,6 +419,27 @@ drive() {
     grep -q "cancelling nudge cycle; back to NORMAL" "$CAGE/ccage-autock.log"
     ! cap_has "b'/clear'"                                 # never auto-cleared
     ! grep -q "HARD threshold" "$CAGE/ccage-autock.log"   # never hard-escalated
+}
+
+@test "silent-stall watchdog re-nudges a quiet NUDGED session, then logs instead of nagging" {
+    # StrategyA 2026-07-22 incident class: the model checkpoints (or just goes
+    # quiet) after the soft nudge WITHOUT printing the sentinel, and occupancy
+    # sits below the re-nudge line — so no occupancy branch can ever fire and
+    # the watcher would sit NUDGED forever. The watchdog must fire on
+    # idleness: one loud log + one firm stall nudge, then rate-limited
+    # "persists" logging with no further typing and no Escape interrupt.
+    # pct = 15% of the 1M window: above soft (10), below re-nudge (25) & hard (30).
+    export FAKE_TOKENS=150000 FAKE_DEADLINE=12 CCAGE_AUTOCK_STALL_IDLE=2
+    drive hard "--soft 10 --hard 30 --poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_STALL_IDLE
+    [ "$status" -eq 0 ]
+    grep -q "SILENT STALL" "$CAGE/ccage-autock.log"
+    cap_has "b'quiet for'"                                # the stall nudge was typed
+    grep -q "silent stall persists" "$CAGE/ccage-autock.log"
+    # typed exactly once, not per poll (the "persists" path must not re-type)
+    python3 -c "import sys; sys.exit(0 if open('$CAP','rb').read().count(b'quiet for') == 1 else 1)"
+    ! cap_has "b'\x1b'"                                    # never interrupts
+    ! grep -q "HARD threshold" "$CAGE/ccage-autock.log"    # occupancy never reached hard
 }
 
 @test "a confirmed checkpoint still clears when a live --set raises soft above the current occupancy" {
@@ -1063,4 +1096,259 @@ PY
         > "$CAGE/rate-limits-state.json"
     run bash -c "cd '$REPO' && '$AUTO' --weekly-floor 20 --status"
     [[ "$output" == *"18.5% remaining"* ]]
+}
+
+# --------------------------------------------------------------------------
+# stop_continuation_guard.sh — the Stop hook that refuses to end an unattended
+# turn while work is plainly available. Four triggers; three rest on ground
+# truth (plan file, subagent transcripts, watcher state), one on phrase match.
+# --------------------------------------------------------------------------
+
+STOPG="$BATS_TEST_DIRNAME/../share/hooks/stop_continuation_guard.sh"
+
+stopg() {   # stopg <json> [extra PATH prefix] -> $output is the hook's stdout
+    run bash -c "echo '$1' | CLAUDE_CONFIG_DIR='$CAGE' CCAGE_AUTONOMOUS=1 \
+        PATH='${2:-}${2:+:}$PATH' bash '$STOPG'"
+}
+
+# stopg with PATH REPLACED rather than prefixed, for the cases that assert on
+# something being ABSENT from PATH.
+stopg_with_path() {   # stopg_with_path <json> <full PATH>
+    run bash -c "echo '$1' | CLAUDE_CONFIG_DIR='$CAGE' CCAGE_AUTONOMOUS=1 \
+        PATH='$2' bash '$STOPG'"
+}
+
+# $PATH minus every directory that provides ccage-watch. The UNARMED_PROMISE
+# trigger is inert exactly while ccage-watch is missing, so testing that case
+# against the developer's real PATH means the test passes only until ccage-watch
+# gets installed — which is precisely what happened the day install.sh started
+# shipping it. Same non-hermeticity class as the CLAUDE_CONFIG_DIR note above.
+path_sans_ccage_watch() {
+    local out="" d
+    local IFS=:
+    for d in $PATH; do
+        if [ -z "$d" ]; then continue; fi
+        if [ -x "$d/ccage-watch" ]; then continue; fi
+        out="${out}${out:+:}$d"
+    done
+    printf '%s' "$out"
+}
+
+# Until 2026-08-11 this asserted SILENCE without the autonomous marker, and it
+# went on asserting it after the guard was deliberately extended to attended
+# sessions — a test pinning the behaviour that had just been declared wrong. It
+# now pins the intended rule: unkept intent is caught in BOTH modes, and the
+# reason given must fit the mode it is delivered in (the attended text must not
+# claim nobody is watching).
+@test "stop-guard: unkept intent is caught WITHOUT the autonomous marker too" {
+    run bash -c "echo '{\"session_id\":\"a\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Next I will run the suite.\"}' \
+        | env -u CCAGE_AUTONOMOUS CLAUDE_CONFIG_DIR='$CAGE' bash '$STOPG'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"decision": "block"'* ]]
+    [[ "$output" == *"states an action you were about to take"* ]]
+    [[ "$output" != *"nobody to prompt you"* ]]
+}
+
+@test "stop-guard: the autonomous reason is used when the marker IS set" {
+    run bash -c "echo '{\"session_id\":\"a\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Next I will run the suite.\"}' \
+        | env CCAGE_AUTONOMOUS=1 CLAUDE_CONFIG_DIR='$CAGE' bash '$STOPG'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"nobody to prompt you"* ]]
+}
+
+@test "stop-guard: a clean completion is allowed" {
+    stopg "{\"session_id\":\"b\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"The parser is updated and the tests pass.\"}"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: stopping to ask the user a question is allowed" {
+    stopg "{\"session_id\":\"c\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"I could do A or B. Which do you want?\"}"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: UNKEPT_INTENT — states a next action then stops" {
+    stopg "{\"session_id\":\"d\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Done with the parser. Next I will run the full suite.\"}"
+    [[ "$output" == *'"decision"'* ]]
+    [[ "$output" == *"take that action"* ]]
+}
+
+@test "stop-guard: AGENTS_IDLE — live subagents and no work of its own" {
+    mkdir -p "$SDIR/e/subagents"
+    touch "$SDIR/e/subagents/agent-w1.jsonl"
+    stopg "{\"session_id\":\"e\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Dispatched the worker.\"}"
+    [[ "$output" == *'"decision"'* ]]
+    [[ "$output" == *"SERIALISATION"* ]]
+}
+
+@test "stop-guard: a STALE subagent transcript does not count as live" {
+    mkdir -p "$SDIR/f/subagents"
+    touch "$SDIR/f/subagents/agent-w1.jsonl"
+    # Backdate past LIVE_WINDOW_S. `touch -d '10 minutes ago'` is GNU-only —
+    # BSD touch takes only a full ISO timestamp with -d, which is why
+    # CHANGELOG:272 already replaced this idiom once in test_handoff.bats.
+    # os.utime takes a relative offset directly and is identical on both.
+    python3 -c "import os,sys,time; os.utime(sys.argv[1], (time.time()-600,)*2)" \
+        "$SDIR/f/subagents/agent-w1.jsonl"
+    stopg "{\"session_id\":\"f\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Everything is finished.\"}"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: PLAN_ITEMS_OPEN — claims done while the plan has unticked boxes" {
+    printf '# R\n\n### Plan\n- `%s/p.md` governs\n' "$REPO" > "$REPO/RESUME.md"
+    printf '# P\n- [x] one\n- [ ] two\n- [ ] three\n' > "$REPO/p.md"
+    stopg "{\"session_id\":\"g\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All tasks are complete.\"}"
+    [[ "$output" == *'"decision"'* ]]
+    [[ "$output" == *"2 unticked"* ]]
+}
+
+@test "stop-guard: claims done with every box ticked is allowed" {
+    printf '# R\n\n### Plan\n- `%s/p.md` governs\n' "$REPO" > "$REPO/RESUME.md"
+    printf '# P\n- [x] one\n- [x] two\n' > "$REPO/p.md"
+    stopg "{\"session_id\":\"h\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All tasks are complete.\"}"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: an UNSTRUCTURED plan is unverifiable, never a false block" {
+    printf '# R\n\n### Plan\n- `%s/p.md` governs\n' "$REPO" > "$REPO/RESUME.md"
+    printf '# P\nJust prose. No checkboxes anywhere.\n' > "$REPO/p.md"
+    stopg "{\"session_id\":\"i\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All tasks are complete.\"}"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: UNARMED_PROMISE stays inert while ccage-watch is absent" {
+    stopg_with_path "{\"session_id\":\"j\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"The job is running in the background. I will let you know when it finishes.\"}" \
+        "$(path_sans_ccage_watch)"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: UNARMED_PROMISE fires once ccage-watch exists and none is armed" {
+    mkdir -p "$BATS_TEST_TMPDIR/fakebin"
+    printf '#!/bin/sh\n' > "$BATS_TEST_TMPDIR/fakebin/ccage-watch"
+    chmod +x "$BATS_TEST_TMPDIR/fakebin/ccage-watch"
+    stopg "{\"session_id\":\"k\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"The job is running in the background. I will let you know when it finishes.\"}" \
+        "$BATS_TEST_TMPDIR/fakebin"
+    [[ "$output" == *'"decision"'* ]]
+    [[ "$output" == *"ccage-watch arm"* ]]
+}
+
+@test "stop-guard: an armed watcher allows the promise" {
+    mkdir -p "$BATS_TEST_TMPDIR/fakebin" "$CAGE/watch"
+    printf '#!/bin/sh\n' > "$BATS_TEST_TMPDIR/fakebin/ccage-watch"
+    chmod +x "$BATS_TEST_TMPDIR/fakebin/ccage-watch"
+    echo '{}' > "$CAGE/watch/w1.json"
+    stopg "{\"session_id\":\"l\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"The job is running in the background. I will let you know when it finishes.\"}" \
+        "$BATS_TEST_TMPDIR/fakebin"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: yields after 2 refusals and STAYS yielded (no block/allow cycle)" {
+    local msg="{\"session_id\":\"m\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Done. Next I will run the suite.\"}"
+    local seen=""
+    for _ in 1 2 3 4 5; do
+        stopg "$msg"
+        if [[ "$output" == *'"decision"'* ]]; then seen="${seen}B"; else seen="${seen}a"; fi
+    done
+    # Two refusals, then permanently quiet. "BBaBa" (the pre-fix cycle) must fail.
+    [ "$seen" = "BBaaa" ]
+}
+
+@test "stop-guard: a clean stop re-arms the counter for a later genuine case" {
+    local msg="{\"session_id\":\"n\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Done. Next I will run the suite.\"}"
+    stopg "$msg"; stopg "$msg"; stopg "$msg"          # exhaust: B B a
+    stopg "{\"session_id\":\"n\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All good here.\"}"
+    stopg "$msg"
+    [[ "$output" == *'"decision"'* ]]
+}
+
+# --- shape B's two escape valves: a declared serial wait, and a present human -
+# Both landed 2026-08-11/13 (471dedf, 4a42ef7) with NO tests, which is the exact
+# condition D8 exists for. The failure they answer was MEASURED: shape B fired
+# eight times in one session that was correctly sitting out a deliberately
+# serial evidence gate, and the pressure contributed to a rushed draft.
+#
+# The slug is recomputed here with python's rule rather than bash's `${x//\//-}`
+# so these tests pin the rule the HOOK uses (every non-alphanumeric becomes "-"),
+# not a bash approximation that happens to agree on this tmpdir.
+
+# Slug rule lives in tests/helpers.bash (oracle_slug) — one definition, not five.
+
+@test "stop-guard: a FRESH serial-gate marker stands shape B down" {
+    local slug; slug="$(oracle_slug "$REPO")"
+    mkdir -p "$CAGE/projects/$slug/sg1/subagents"
+    touch "$CAGE/projects/$slug/sg1/subagents/agent-w1.jsonl"
+    touch "$CAGE/projects/$slug/sg1/serial-gate"
+    stopg "{\"session_id\":\"sg1\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Dispatched the worker.\"}"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: a STALE serial-gate marker decays back to blocking" {
+    local slug; slug="$(oracle_slug "$REPO")"
+    mkdir -p "$CAGE/projects/$slug/sg2/subagents"
+    touch "$CAGE/projects/$slug/sg2/subagents/agent-w1.jsonl"
+    touch "$CAGE/projects/$slug/sg2/serial-gate"
+    # 46 minutes, just past SERIAL_GATE_WINDOW_S (2700s). Set via python for
+    # BSD/GNU `touch` portability — the macOS CI leg has no `touch -d '46 min ago'`.
+    python3 -c "import os,time,sys;p=sys.argv[1];os.utime(p,(time.time()-2760,)*2)" \
+        "$CAGE/projects/$slug/sg2/serial-gate"
+    stopg "{\"session_id\":\"sg2\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Dispatched the worker.\"}"
+    [[ "$output" == *'"decision"'* ]]
+    [[ "$output" == *"SERIALISATION"* ]]
+}
+
+@test "stop-guard: shape B's refusal never names the serial-gate marker (D15)" {
+    local slug; slug="$(oracle_slug "$REPO")"
+    mkdir -p "$CAGE/projects/$slug/sg3/subagents"
+    touch "$CAGE/projects/$slug/sg3/subagents/agent-w1.jsonl"
+    stopg "{\"session_id\":\"sg3\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Dispatched the worker.\"}"
+    [[ "$output" == *'"decision"'* ]]
+    [[ "$output" != *"serial-gate"* ]]
+}
+
+@test "stop-guard: a human typing recently stands shape B down (attended)" {
+    local slug; slug="$(oracle_slug "$REPO")"
+    mkdir -p "$CAGE/projects/$slug/sg4/subagents"
+    touch "$CAGE/projects/$slug/sg4/subagents/agent-w1.jsonl"
+    # A genuinely TYPED turn: type=user AND origin.kind=human, timestamped now.
+    python3 - "$CAGE/projects/$slug/sg4.jsonl" <<'PY'
+import datetime, json, sys
+now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+open(sys.argv[1], "w").write(json.dumps({
+    "type": "user", "origin": {"kind": "human"},
+    "promptSource": "typed", "timestamp": now}) + "\n")
+PY
+    stopg "{\"session_id\":\"sg4\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Dispatched the worker.\"}"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: an INJECTED user turn is not a present human (shape B still fires)" {
+    local slug; slug="$(oracle_slug "$REPO")"
+    mkdir -p "$CAGE/projects/$slug/sg5/subagents"
+    touch "$CAGE/projects/$slug/sg5/subagents/agent-w1.jsonl"
+    # Same shape MINUS the human origin marker — hook feedback, teammate messages
+    # and system reminders all arrive as type=user and must not read as presence.
+    python3 - "$CAGE/projects/$slug/sg5.jsonl" <<'PY'
+import datetime, json, sys
+now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+open(sys.argv[1], "w").write(json.dumps({
+    "type": "user", "timestamp": now, "content": "system reminder"}) + "\n")
+PY
+    stopg "{\"session_id\":\"sg5\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Dispatched the worker.\"}"
+    [[ "$output" == *'"decision"'* ]]
+}
+
+@test "unit: write_guard_settings registers the Stop hook alongside the ask guard" {
+    run python3 - "$AUTO" "$SDIR" <<'PY'
+import importlib.machinery, importlib.util, json, sys
+loader = importlib.machinery.SourceFileLoader("ccageauto", sys.argv[1])
+spec = importlib.util.spec_from_loader("ccageauto", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+d = json.load(open(m.write_guard_settings(sys.argv[2])))
+assert "Stop" in d["hooks"], d
+cmd = d["hooks"]["Stop"][0]["hooks"][0]["command"]
+assert cmd.endswith("stop_continuation_guard.sh"), cmd
+assert "AskUserQuestion" == d["hooks"]["PreToolUse"][0]["matcher"], d
+print("ok")
+PY
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ok"* ]]
 }

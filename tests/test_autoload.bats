@@ -331,6 +331,54 @@ memdir() {
     [[ "$output" != *"DISPATCHER mode"* ]]
 }
 
+# --- the cap must not silently drop the doc that matters -------------------
+# MEASURED 2026-08-13 on the live ccage RESUME: `sort -u | head -5` ran BEFORE
+# the existence filter, so alphabetical order plus a prose `CLAUDE.md` token
+# displaced BOTH governing docs of the running programme, with no notice. The
+# mechanism built against silent plan-item loss silently lost the plan.
+
+@test "plan pointer: listing order beats alphabetical under the cap" {
+    # 6 real docs; the governing one is listed FIRST but sorts LAST alphabetically.
+    mkdir -p "$REPO/plans"
+    for n in zz-governing aa bb cc dd ee; do printf 'x\n' > "$REPO/plans/$n.md"; done
+    {
+        printf '### Plan\n'
+        printf -- '- `plans/zz-governing.md` — THE governing doc\n'
+        for n in aa bb cc dd ee; do printf -- '- plans/%s.md\n' "$n"; done
+    } > "$REPO/RESUME.md"
+    run run_hook
+    [ "$status" -eq 0 ]
+    # Assert on the RESOLVED ABSOLUTE path: the hook echoes RESUME's own body
+    # too, where the relative `plans/zz-governing.md` token appears regardless,
+    # so a bare substring match passes even when the doc was dropped. Only the
+    # NOTE block carries the absolute form.
+    [[ "$output" == *"  - $REPO/plans/zz-governing.md"* ]]  # survived the cap, first slot
+    [[ "$output" == *"NOT shown or counted: ee.md"* ]]      # the drop is announced, by name
+}
+
+@test "plan pointer: missing refs do not consume cap slots" {
+    # 6 refs that do NOT exist listed before 1 that does: the real doc must survive.
+    mkdir -p "$REPO/plans"
+    printf 'x\n' > "$REPO/plans/real-plan.md"
+    {
+        printf '### Plan\n'
+        for i in 1 2 3 4 5 6; do printf -- '- plans/ghost-%s.md\n' "$i"; done
+        printf -- '- `plans/real-plan.md`\n'
+    } > "$REPO/RESUME.md"
+    run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"  - $REPO/plans/real-plan.md"* ]]     # absolute form: NOTE, not echo
+}
+
+@test "plan pointer: five or fewer existing refs emit no drop notice" {
+    mkdir -p "$REPO/plans"
+    for n in a b; do printf 'x\n' > "$REPO/plans/$n.md"; done
+    printf '### Plan\n- plans/a.md\n- plans/b.md\n' > "$REPO/RESUME.md"
+    run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"NOT shown"* ]]
+}
+
 # ===== watcher-alive guard on the startup/resume clear (Task 6, failure ====
 # ===== mode 4 + the pgrep/lsof false-positive it was replaced with)     ====
 #
@@ -556,4 +604,154 @@ STUB
     PATH="$stub_bin:$PATH" run run_hook_src startup
     [ "$status" -eq 0 ]
     [ -e "$REPO/.ccage-session-done" ]   # start times agree -> "watcher elsewhere" -> preserved
+}
+
+# ---- plan readiness (register issue 4) -------------------------------------
+# The autoloader already emits a plan-doc DIRECTIVE. These cover the half added
+# 2026-08-11: OPEN ITEM COUNTS as checkable facts. The load-bearing case is the
+# last one — a plan with no checkboxes must report UNVERIFIABLE, because a false
+# "0 open" would license exactly the silent item-dropping this exists to stop.
+
+# Write a RESUME whose ### Plan section points at $REPO/$1, then create $1.
+plan_with() {   # plan_with <filename> <contents>
+    printf '# RESUME\n\n### Plan\n- %s/%s\n' "$REPO" "$1" > "$REPO/RESUME.md"
+    printf '%s' "$2" > "$REPO/$1"
+}
+
+@test "plan readiness: counts open items against the total" {
+    plan_with p.md '# P
+- [x] shipped, in `lib/a.py`
+- [ ] pending, in `lib/b.py`
+'
+    run run_hook
+    [[ "$output" == *"PLAN STATE"* ]]
+    [[ "$output" == *"p.md: 1 of 2 items OPEN"* ]]
+}
+
+@test "plan readiness: flags open items that name no file" {
+    plan_with p.md '# P
+- [ ] tidy things up
+- [ ] make it better
+- [ ] fix `lib/c.py`
+'
+    run run_hook
+    [[ "$output" == *"3 of 3 items OPEN"* ]]
+    [[ "$output" == *"2 name no file"* ]]
+}
+
+@test "plan readiness: says nothing about write sets when every item names one" {
+    plan_with p.md '# P
+- [ ] fix `lib/c.py`
+- [ ] update docs/readme.md
+'
+    run run_hook
+    [[ "$output" == *"2 of 2 items OPEN"* ]]
+    [[ "$output" != *"name no file"* ]]
+}
+
+@test "plan readiness: a fully ticked plan reports zero open" {
+    plan_with p.md '# P
+- [x] one, `a.py`
+- [x] two, `b.py`
+'
+    run run_hook
+    [[ "$output" == *"0 of 2 items OPEN"* ]]
+}
+
+@test "plan readiness: a plan with NO checkboxes is UNVERIFIABLE, never a false pass" {
+    plan_with p.md '# P
+
+Prose only. Several things remain to be done, described in sentences.
+'
+    run run_hook
+    [[ "$output" == *"UNVERIFIABLE"* ]]
+    [[ "$output" != *"items OPEN"* ]]
+}
+
+# REWRITTEN 2026-08-11. This test used to assert the OPPOSITE — that a RESUME
+# with no ### Plan section produced no PLAN STATE line at all — and it passed,
+# green, for a day. It was written by the same reasoning that wrote the code, so
+# it encoded the code's blind spot as the specification.
+#
+# The cost was real: a fresh session in another project was asked for a status
+# report, said nothing about plan completeness, and read as "nothing to report"
+# rather than "I cannot verify this". Silence and a clean bill of health are
+# indistinguishable to a reader, which is the precise failure the sibling test
+# ("a plan with NO checkboxes is UNVERIFIABLE, never a false pass") exists to
+# prevent one level down. An absent answer must look absent.
+@test "plan readiness: NO ### Plan section reports UNVERIFIABLE, never silence" {
+    printf '# RESUME\n\n### Next\n1. do a thing\n' > "$REPO/RESUME.md"
+    run run_hook
+    [[ "$output" == *"PLAN STATE"* ]]
+    [[ "$output" == *"UNVERIFIABLE"* ]]
+    # It must not be readable as "checked, nothing open".
+    [[ "$output" == *"NOT"* ]]
+}
+
+@test "plan readiness: no RESUME.md at all stays silent" {
+    rm -f "$REPO/RESUME.md"
+    run run_hook
+    [[ "$output" != *"PLAN STATE"* ]]
+}
+
+# ---- watcher reap wiring (added 2026-08-11) --------------------------------
+# ccage-watch writes to RESUME only when its condition fires or its TTL expires;
+# killed any other way it writes nothing, so a death used to be indistinguishable
+# from never having armed one. These pin the WIRING — that reap is called, that
+# its output lands ahead of the RESUME body it annotates, that silence stays
+# silent, and that a machine without ccage-watch is unaffected. What reap decides
+# is ccage-watch's own suite's job, so the command is stubbed here.
+
+# Run the hook with a controlled PATH and HOME (the hook falls back to
+# ~/.local/bin/ccage-watch when the command is not on PATH).
+run_hook_env() { ( cd "$REPO" && PATH="$1" HOME="$2" "$HOOK" ); }
+
+stub_bin() {
+    mkdir -p "$BATS_TEST_TMPDIR/bin"
+    cat > "$BATS_TEST_TMPDIR/bin/ccage-watch"
+    chmod +x "$BATS_TEST_TMPDIR/bin/ccage-watch"
+    printf '%s/bin:%s' "$BATS_TEST_TMPDIR" "$PATH"
+}
+
+@test "a watcher that died is reported, ahead of the RESUME body it annotates" {
+    local p
+    p=$(stub_bin <<'EOF'
+#!/bin/sh
+[ "$1" = "reap" ] || exit 0
+echo "WATCHERS (ccage-watch, survives sessions):"
+echo "  - DIED deadbeef00: waiting on the overnight job — never reported"
+EOF
+)
+    printf '# Resume\n\nthe resume body\n' > "$REPO/RESUME.md"
+    run run_hook_env "$p" "$HOME"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"DIED deadbeef00"* ]]
+    # Order is the point: the death must be in context before the state it corrects.
+    [[ "${output%%the resume body*}" == *"DIED deadbeef00"* ]]
+}
+
+@test "no watcher armed: reap contributes nothing to session start" {
+    local p
+    p=$(stub_bin <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+)
+    printf 'the resume body\n' > "$REPO/RESUME.md"
+    run run_hook_env "$p" "$HOME"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"the resume body"* ]]
+    # Not "no output" — this RESUME has no ### Plan section, so the plan-state
+    # block speaks. The claim is narrower: the watcher path adds nothing.
+    [[ "$output" != *"WATCHERS"* ]]
+    [[ "$output" != *"DIED"* ]]
+}
+
+@test "ccage-watch not installed at all: session start is unaffected" {
+    mkdir -p "$BATS_TEST_TMPDIR/empty" "$BATS_TEST_TMPDIR/nohome"
+    printf 'the resume body\n' > "$REPO/RESUME.md"
+    run run_hook_env "$BATS_TEST_TMPDIR/empty:/usr/bin:/bin" "$BATS_TEST_TMPDIR/nohome"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"the resume body"* ]]
+    [[ "$output" != *"WATCHERS"* ]]
 }

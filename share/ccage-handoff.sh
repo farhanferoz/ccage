@@ -35,7 +35,12 @@
 _ccage_handoff_model_family() {
     case "$1" in
         claude-fable-5*|claude-mythos-5*)                    echo fable ;;
-        claude-opus-4-8*|claude-opus-4-7*|claude-opus-4-6*)  echo opus ;;
+        # claude-opus-5 added 2026-08-10. It was matching NOTHING and falling to
+        # the `unknown` default, which happens to be the Opus rate — correct only
+        # by coincidence, and silently wrong the moment Opus 5 is repriced. Same
+        # defect found in `tokenol` the same day; verified there that Opus 5 is
+        # $5/$25, i.e. the current Opus tier, so the family is right.
+        claude-opus-5*|claude-opus-4-8*|claude-opus-4-7*|claude-opus-4-6*)  echo opus ;;
         # Sonnet 5 has an introductory $2/$10 rate through 2026-08-31. The list
         # rate is deliberately used: the intro rate expires, and an expired
         # discount silently UNDER-reports cost, which is the worse error here.
