@@ -2,6 +2,37 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.15.0] — 2026-08-13
+
+### Added — `ccage-watch`, a condition watcher that outlives the session that armed it
+- **A watcher armed inside a Claude session does not survive the session, so every "you'll get a notification when CI finishes" was a promise that could not be kept.** Measured across three sessions (`plans/2026-07-23-trackb-forensics-autocast.md`): each ended correctly, each armed a `Bash(run_in_background)` bridge to the next session, and the harness killed that process **50–131 s after the last assistant turn** — against observed human gaps of 8h23m and 13h56m, with nothing re-driving anything. `ccage-watch` is an OS process parented to init instead, so it genuinely outlives the session. It polls a shell command (`--cond`; exit 0 means met, default every 600 s, expiring after 86400 s) and appends a distinctively-marked block to the project's `RESUME.md`, which is auto-read at the next session start. Subcommands: `arm`, `list`/`status`, `reap`, `disarm`, `selftest`.
+- **It will not launch, resume or relaunch a session.** That capability was cut, not defaulted off: closing a session is itself a decision, often made *because* a job is long-running, so relaunching behind the user overrides a deliberate choice. No API calls and no model invocations anywhere in it — the condition is a shell command and the action is a file append, the same jq-only philosophy as `ccage handoff`.
+- **A death is never silent.** Killed any other way — reboot, OOM, a stray `kill` — a watcher writes nothing, so "armed and died" reads exactly like "never armed"; found by live-firing the unconfigured path. `ccage-watch reap` now runs at session start, records a death in `RESUME.md` the same way a firing is recorded, and names any watcher still pending so one in flight is not mistaken for done. Prints nothing when none is armed.
+- **Stated deviation from the design:** the outcome is appended at end of file rather than inserted under `### Next`. Inserting mid-file is read-modify-write, and a live session running `/checkpoint` writes `RESUME.md` through the Edit tool without a lock this tool could share, so an insert can be silently clobbered — precisely the failure the tool exists to prevent. `RESUME.md` is read in full at session start, so only the position differs.
+- Prior art was checked and nothing native covers this: `CronCreate` is session-only (`durable` is a documented no-op), `Monitor` is session-scoped, the `SessionEnd` hook cannot block, and [anthropics/claude-code#28229](https://github.com/anthropics/claude-code/issues/28229) (native daemon mode) was closed `not_planned`.
+
+### Added — `/skill-catalog`
+- Searches every skill installed on the machine, **including ones absent from the current session's skill list**, and activates one on demand. Closes the failure where a session concludes "there is no skill for this" and reimplements something already installed but unlisted.
+
+### Added — a Stop hook that refuses to end an unattended turn with work plainly available
+- `share/hooks/stop_continuation_guard.sh`. An unattended run that stops early looks identical to one that finished, and the cost is a whole human gap of nothing happening. The guard checks for work that is demonstrably still available and refuses the stop, naming what it found. Its `UNARMED_PROMISE` trigger keys on the **fact** — a live background job at stop time — rather than on a promise-shaped phrase, so it cannot be talked out of firing by rewording.
+
+### Changed — the RESUME budget hook now defends lists, not just size
+- `resume_budget_check` blocks a write that **reduces** the item count of `### Next`, or the checkbox total of a plan document under `plans/`. Ticking is always allowed (`[ ]`→`[x]` leaves the total unchanged); a falling total means an item was deleted rather than finished. Multi-item plans losing items silently is the failure this closes — measured, and it recurred even after being written down. Plan docs carry no byte budget: a plan is meant to grow.
+- New `CCAGE_TIER_BUDGET_BYTES` (default `26000`) budgets the whole always-loaded startup tier (`CLAUDE.md` + `main-session-doctrine.md` + `rules/*.md`) rather than any single file, machine-wide.
+
+### Fixed — the plan-loading machinery silently dropped the governing plan
+- The session-start extractor that surfaces plan documents from `RESUME.md`'s `### Plan` section dropped entries depending on listing order, so the *governing* doc could be the one omitted — the plan machinery failing in exactly the way it exists to prevent, and it had been doing so unnoticed.
+
+### Fixed — Opus 5 was priced at the default tier
+- `claude-opus-5*` was not in the pricing table and fell through to the default rate, so cost estimates (including the `-r`/`-c` resume prompt) were wrong for every Opus 5 session.
+
+### Fixed — 28 macOS test failures from one typo-sized divergence
+- The first CI run in three weeks turned the macOS bash leg red: **28 of 431**, from 24 commits that had only ever been verified on a Linux-only local loop. One root cause: tests built the on-disk project slug as `${path//\//-}` (slashes only) while the code under test uses `re.sub(r"[^A-Za-z0-9]", "-", …)` (every non-alphanumeric). Linux bats tmpdirs contain no other punctuation so the two agreed by luck; macOS ones (`/var/folders/df/…_g8s…`) differ by one character, and every fixture landed in a directory the code never reads. Consolidated into one `oracle_slug()` in `tests/helpers.bash` rather than a third copy — five local copies of one rule is how a rule drifts. Also replaced GNU-only `touch -d` with `os.utime`. Verified 431/431 on every leg, test count checked explicitly rather than trusting the pass/fail bit.
+
+### Fixed — the pid-reuse tolerance was unpinned
+- The ±2 s window in `share/hooks/resume_autoload.sh` is the whole pid-reuse guard, and no test constrained it: mutation-measured, widening it to 100000 s (~28 h, useless) left the suite green, because the only test on that path recorded a start time ~1.7 billion seconds out — so far adrift that a sane window and a useless one both reject it. Two boundary tests now pin it from both directions, each verified against its mutant. What it protects is a live watcher losing its `.ccage-session-done` / `.ccage-autock.conf` state underneath it, originally seen as "`--set` silently reverted".
+
 ## [0.14.2] — 2026-07-21
 
 ### Changed — the re-nudge line now escalates the wording, not just the percentage

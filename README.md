@@ -36,6 +36,8 @@ Drops a tiny shell function over `claude` that:
 13. Ships `ccage enable-mcp` / `disable-mcp` — opt a single project into an MCP server via a project-scoped `.mcp.json`, the isolation-safe way (MCP registrations stay per-project; only agents/skills are globally shared). Settles "why isn't my MCP-backed tool picked up in this cage?" once. See [Per-project MCP opt-in](#per-project-mcp-opt-in-ccage-enable-mcp).
 14. Ships `CCAGE_PLUGINS_FROM` — load a curated folder of plugins into every cage with **no per-project install** (the wrapper passes `--plugin-dir` at launch, so Claude session-loads them). Install once, available everywhere, like your shared skills. See [Shared plugins across cages](#shared-plugins-across-cages-ccage_plugins_from).
 15. Ships `ccage-auto` — an autonomous context manager that runs the whole `/checkpoint` → `/clear` → resume loop for a long-lived (even unattended) session by measuring real context occupancy and driving the checkpoint at a soft threshold, forcing it at a hard one. Retune it **live, mid-session** with the `/checkpoint-threshold` skill (change the thresholds or pause auto-checkpointing without a restart), and the soft nudge is advisory — the model can hold off if checkpointing now would lose in-flight work. See [Autonomous context management](#autonomous-context-management-ccage-auto).
+16. Ships `ccage-watch` — a condition watcher that **outlives the session that armed it**, so "tell me when CI goes green" survives you closing the terminal. A watcher started inside the harness does not: measured, three sessions armed a backgrounded watcher and the harness killed each one 50–131 s after the last turn, against human gaps of 8–14 hours. This one is an OS process parented to init. See [Bridging work across sessions](#bridging-work-across-sessions-ccage-watch).
+17. Ships a `/skill-catalog` skill — searches every skill installed on the machine, including ones outside the current session's skill list, and activates one on demand. The gap it closes: a session concludes "there is no skill for this" and reimplements something already installed but unlisted.
 
 ### Bonus: dodges the `settings.json` write race
 
@@ -295,6 +297,33 @@ It writes a small git-excluded control file (`.ccage-autock.conf`) in the projec
 
 Needs `python3`. Watcher activity is logged to `<cage>/ccage-autock.log`.
 
+## Bridging work across sessions (`ccage-watch`)
+
+You end a session with something still running — CI on a pushed branch, a long training job, a queue draining. The natural move is to leave a watcher behind and get told when it finishes. Inside the Claude session that does not work: a backgrounded watcher is killed shortly after the session's last turn. Measured across three sessions, each armed one and each was killed **50–131 seconds** after the final turn, while the human gaps were 8h23m and 13h56m. Nothing re-drove anything, and — worse — the session had already promised a notification that could never arrive.
+
+`ccage-watch` is an OS process parented to init, so it survives. It polls a shell command and, when that command exits 0, appends a clearly-marked block to the project's `RESUME.md`, which is auto-read at the next session start.
+
+```sh
+# Arm: bridge a CI verdict into the next session.
+ccage-watch arm --cond 'gh pr checks 24 >/dev/null 2>&1; [ $? -ne 8 ]' \
+                --note 'PR #24 four-leg CI verdict'
+
+ccage-watch list       # what is armed
+ccage-watch reap       # report armed watchers, and record any that died
+ccage-watch disarm ID  # stop one
+ccage-watch selftest   # verify every documented behaviour
+```
+
+Defaults: polls every 600 s, expires after 86400 s (`--interval`, `--ttl`). The condition is any shell command — exit 0 means met.
+
+**What it deliberately will not do: launch, resume, or relaunch a session.** That capability was cut rather than defaulted off. Closing a session is itself a decision, often made *because* a job is long-running, so relaunching behind you would override a deliberate choice. There are also no API calls and no model invocations anywhere in it — the condition is a shell command and the action is a file append, the same jq-only philosophy as `ccage handoff`.
+
+**A death is never silent.** A watcher killed some other way — a reboot, an OOM, a stray `kill` — would otherwise write nothing at all, making "armed and died" indistinguishable from "never armed". `reap` runs at session start and records the death in `RESUME.md` the same way it records a firing, and names every watcher still pending so one in flight is not mistaken for finished.
+
+The outcome is appended at end of file rather than inserted under `### Next`. That is a deliberate deviation from the design: inserting mid-file is read-modify-write, and a live session running `/checkpoint` writes `RESUME.md` without a lock this tool could share, so an insert can be silently clobbered — exactly the failure the tool exists to prevent. `RESUME.md` is read in full at session start, so only the position differs.
+
+Needs `python3`. Installed as `<prefix>/bin/ccage-watch`.
+
 ## Uninstall
 
 ```sh
@@ -319,6 +348,7 @@ All off by default. Set any of these before launching `claude`:
 | `CCAGE_SESSION_DOCS=1` | Opt **in**: seed the session-continuity hooks into each cage's `settings.json`. |
 | `CCAGE_NO_AUTOLOAD=1` | Don't seed the `RESUME.md` auto-read hook. |
 | `CCAGE_NO_BUDGET_HOOK=1` | Don't seed the RESUME-size reminder hook. |
+| `CCAGE_TIER_BUDGET_BYTES` | Byte budget for the always-loaded startup tier (`CLAUDE.md` + `main-session-doctrine.md` + `rules/*.md`), default `26000`. A write that grows the *total* past it is blocked; one that doesn't increase it never is. Machine-wide, not per cage. See [docs/FEATURES.md](docs/FEATURES.md). |
 | `CCAGE_SEED_LOCAL_HOOKS=1` | Opt **in**: seed the user's own policy hooks (from `~/.claude/settings.json`) into each cage's `settings.json`. See `docs/FEATURES.md`. |
 | `CCAGE_ROOT=/some/dir` | Parent directory for isolated configs (default `$HOME`). |
 | `CCAGE_PREFIX=.claude-` | Directory name prefix (default `.claude-`). |
