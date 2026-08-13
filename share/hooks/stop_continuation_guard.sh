@@ -46,6 +46,7 @@
 payload="$(cat 2>/dev/null || true)"
 
 python3 - "$payload" <<'PY'
+import datetime
 import json
 import os
 import re
@@ -66,6 +67,13 @@ LIVE_WINDOW_S = 180
 # exemption below) -- longer than LIVE_WINDOW_S because a gate is declared
 # once and then waited on, not refreshed every heartbeat.
 SERIAL_GATE_WINDOW_S = 2700  # 45 minutes
+
+# How recently the human must have TYPED for this session to count as attended.
+# 15 minutes: on 2026-08-12 the user typed at 08:23 and 08:24 and the guard went
+# on firing at 08:34, 08:35, 08:43 and 08:49, telling a person sitting at the
+# keyboard that nobody was there. A window this size covers a working exchange
+# while still letting a genuinely-departed session return to unattended rules.
+ATTENDED_WINDOW_S = 900
 
 
 def allow():
@@ -92,6 +100,14 @@ if MODE == "off":
 #     turn is blocked or merely idle. So the remedy is cheap and always available:
 #     say what you are waiting for. ASKED_USER already detects exactly that.
 AUTONOMOUS = os.environ.get("CCAGE_AUTONOMOUS", "") in ("1", "true", "yes")
+
+# ATTENDED OVERRIDE. ccage-auto sets the autonomous marker for the whole run, so
+# a session the user is actively working in is still labelled autonomous and
+# still pays guards whose stated premise is "there is nobody to prompt you to
+# continue". On 2026-08-12 that premise was false while it fired: the user was
+# typing throughout. The marker says how the run was LAUNCHED; whether a human
+# is present right now is a different question, and answerable.
+ATTENDED = False
 if not AUTONOMOUS:
     MAX_BLOCKS = 1          # nudge once, never nag an attended user
 
@@ -151,6 +167,51 @@ def live_agents():
     return live
 
 
+def user_recently_typed():
+    """True if the human typed into THIS session within ATTENDED_WINDOW_S.
+
+    The distinction that makes this possible: a genuinely typed turn carries
+    `origin: {"kind": "human"}` and `promptSource: "typed"`. Injected turns --
+    hook feedback, teammate messages, system reminders, slash-command bodies --
+    carry neither, and they all arrive as `type: "user"` records, which is why
+    "was there a recent user message" is the wrong question. Measured on a real
+    transcript 2026-08-13: ten typed turns all carried the marker, and all
+    eighteen injected turns lacked it, with no overlap.
+    """
+    slug = re.sub(r"[^A-Za-z0-9]", "-", cwd) if cwd else ""
+    path = os.path.join(config, "projects", slug, session_id + ".jsonl")
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return False
+    try:
+        with open(path, "rb") as f:                 # tail only; these get large
+            f.seek(max(0, size - 400_000))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return False
+    for line in reversed(lines):
+        if '"kind": "human"' not in line and '"kind":"human"' not in line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if row.get("type") != "user":
+            continue
+        origin = row.get("origin") or {}
+        if origin.get("kind") != "human":
+            continue
+        stamp = str(row.get("timestamp") or "")
+        try:
+            when = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        age = (datetime.datetime.now(datetime.timezone.utc) - when).total_seconds()
+        return age <= ATTENDED_WINDOW_S
+    return False
+
+
 def serial_gate_active():
     """True if this session has a fresh marker declaring a serial wait.
 
@@ -164,6 +225,12 @@ def serial_gate_active():
     except OSError:
         return False
 
+
+# Resolve the attended question now that the payload and the helpers both exist.
+# Kept cheap: one tail read of this session's own transcript.
+if AUTONOMOUS and user_recently_typed():
+    ATTENDED = True
+    MAX_BLOCKS = 1          # present user: nudge once, never nag
 
 # ---------------------------------------------------------------- shape A
 # Conservative: an explicit first-person commitment to a NEXT action. Deliberately
@@ -371,7 +438,7 @@ if open_items and not asked:
 # LIVE_WINDOW_S is -- an un-refreshed marker from a wait that is long over
 # must decay back to the default behaviour, not sit there disabling the
 # guard forever.
-elif agents and not asked and not serial_gate_active():
+elif agents and not asked and not serial_gate_active() and not ATTENDED:
     reason = (
         "You are ending this turn with %d subagent(s) still running (%s) during an "
         "AUTONOMOUS run, and your final message contains no work of your own.\n"
