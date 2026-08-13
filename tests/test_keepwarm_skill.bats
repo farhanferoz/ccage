@@ -5,6 +5,7 @@
 # install/uninstall wiring (--no-keepwarm). The scheduling loop itself is agent
 # judgment and is not scripted.
 bats_require_minimum_version 1.5.0
+load helpers
 
 HELPER="$BATS_TEST_DIRNAME/../share/skills/keepwarm/keepwarm-calc.sh"
 SKILL="$BATS_TEST_DIRNAME/../share/skills/keepwarm/SKILL.md"
@@ -24,7 +25,7 @@ emit_entry() {
         "$2" "$3" "$4" >> "$1"
 }
 
-session_dir() { printf '%s/projects/%s\n' "$FAKE_CONFIG" "${PROJ//\//-}"; }
+session_dir() { printf '%s/projects/%s\n' "$FAKE_CONFIG" "$(oracle_slug "$PROJ")"; }
 
 probe() { CLAUDE_CONFIG_DIR="$FAKE_CONFIG" run bash "$HELPER" probe "$PROJ"; }
 

@@ -11,6 +11,7 @@
 # temp dir we get a deterministic transcript location regardless of the host's
 # shell init.
 bats_require_minimum_version 1.5.0
+load helpers
 
 AUTO="$BATS_TEST_DIRNAME/../bin/ccage-auto"
 
@@ -41,7 +42,7 @@ setup() {
     done
     unset _v
     CAGE="$CCAGE_ROOT/.claude-repo"
-    SLUG="${REPO//\//-}"
+    SLUG="$(oracle_slug "$REPO")"
     SDIR="$CAGE/projects/$SLUG"
     mkdir -p "$SDIR"
 }
@@ -1172,16 +1173,22 @@ path_sans_ccage_watch() {
 }
 
 @test "stop-guard: AGENTS_IDLE — live subagents and no work of its own" {
-    mkdir -p "$CAGE/projects/${REPO//\//-}/e/subagents"
-    touch "$CAGE/projects/${REPO//\//-}/e/subagents/agent-w1.jsonl"
+    mkdir -p "$SDIR/e/subagents"
+    touch "$SDIR/e/subagents/agent-w1.jsonl"
     stopg "{\"session_id\":\"e\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Dispatched the worker.\"}"
     [[ "$output" == *'"decision"'* ]]
     [[ "$output" == *"SERIALISATION"* ]]
 }
 
 @test "stop-guard: a STALE subagent transcript does not count as live" {
-    mkdir -p "$CAGE/projects/${REPO//\//-}/f/subagents"
-    touch -d '10 minutes ago' "$CAGE/projects/${REPO//\//-}/f/subagents/agent-w1.jsonl"
+    mkdir -p "$SDIR/f/subagents"
+    touch "$SDIR/f/subagents/agent-w1.jsonl"
+    # Backdate past LIVE_WINDOW_S. `touch -d '10 minutes ago'` is GNU-only —
+    # BSD touch takes only a full ISO timestamp with -d, which is why
+    # CHANGELOG:272 already replaced this idiom once in test_handoff.bats.
+    # os.utime takes a relative offset directly and is identical on both.
+    python3 -c "import os,sys,time; os.utime(sys.argv[1], (time.time()-600,)*2)" \
+        "$SDIR/f/subagents/agent-w1.jsonl"
     stopg "{\"session_id\":\"f\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Everything is finished.\"}"
     [ -z "$output" ]
 }
@@ -1263,10 +1270,10 @@ path_sans_ccage_watch() {
 # so these tests pin the rule the HOOK uses (every non-alphanumeric becomes "-"),
 # not a bash approximation that happens to agree on this tmpdir.
 
-stopg_slug() { python3 -c "import re,sys;print(re.sub(r'[^A-Za-z0-9]','-',sys.argv[1]))" "$REPO"; }
+# Slug rule lives in tests/helpers.bash (oracle_slug) — one definition, not five.
 
 @test "stop-guard: a FRESH serial-gate marker stands shape B down" {
-    local slug; slug="$(stopg_slug)"
+    local slug; slug="$(oracle_slug "$REPO")"
     mkdir -p "$CAGE/projects/$slug/sg1/subagents"
     touch "$CAGE/projects/$slug/sg1/subagents/agent-w1.jsonl"
     touch "$CAGE/projects/$slug/sg1/serial-gate"
@@ -1275,7 +1282,7 @@ stopg_slug() { python3 -c "import re,sys;print(re.sub(r'[^A-Za-z0-9]','-',sys.ar
 }
 
 @test "stop-guard: a STALE serial-gate marker decays back to blocking" {
-    local slug; slug="$(stopg_slug)"
+    local slug; slug="$(oracle_slug "$REPO")"
     mkdir -p "$CAGE/projects/$slug/sg2/subagents"
     touch "$CAGE/projects/$slug/sg2/subagents/agent-w1.jsonl"
     touch "$CAGE/projects/$slug/sg2/serial-gate"
@@ -1289,7 +1296,7 @@ stopg_slug() { python3 -c "import re,sys;print(re.sub(r'[^A-Za-z0-9]','-',sys.ar
 }
 
 @test "stop-guard: shape B's refusal never names the serial-gate marker (D15)" {
-    local slug; slug="$(stopg_slug)"
+    local slug; slug="$(oracle_slug "$REPO")"
     mkdir -p "$CAGE/projects/$slug/sg3/subagents"
     touch "$CAGE/projects/$slug/sg3/subagents/agent-w1.jsonl"
     stopg "{\"session_id\":\"sg3\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Dispatched the worker.\"}"
@@ -1298,7 +1305,7 @@ stopg_slug() { python3 -c "import re,sys;print(re.sub(r'[^A-Za-z0-9]','-',sys.ar
 }
 
 @test "stop-guard: a human typing recently stands shape B down (attended)" {
-    local slug; slug="$(stopg_slug)"
+    local slug; slug="$(oracle_slug "$REPO")"
     mkdir -p "$CAGE/projects/$slug/sg4/subagents"
     touch "$CAGE/projects/$slug/sg4/subagents/agent-w1.jsonl"
     # A genuinely TYPED turn: type=user AND origin.kind=human, timestamped now.
@@ -1314,7 +1321,7 @@ PY
 }
 
 @test "stop-guard: an INJECTED user turn is not a present human (shape B still fires)" {
-    local slug; slug="$(stopg_slug)"
+    local slug; slug="$(oracle_slug "$REPO")"
     mkdir -p "$CAGE/projects/$slug/sg5/subagents"
     touch "$CAGE/projects/$slug/sg5/subagents/agent-w1.jsonl"
     # Same shape MINUS the human origin marker — hook feedback, teammate messages
