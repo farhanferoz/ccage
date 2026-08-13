@@ -1253,6 +1253,82 @@ path_sans_ccage_watch() {
     [[ "$output" == *'"decision"'* ]]
 }
 
+# --- shape B's two escape valves: a declared serial wait, and a present human -
+# Both landed 2026-08-11/13 (471dedf, 4a42ef7) with NO tests, which is the exact
+# condition D8 exists for. The failure they answer was MEASURED: shape B fired
+# eight times in one session that was correctly sitting out a deliberately
+# serial evidence gate, and the pressure contributed to a rushed draft.
+#
+# The slug is recomputed here with python's rule rather than bash's `${x//\//-}`
+# so these tests pin the rule the HOOK uses (every non-alphanumeric becomes "-"),
+# not a bash approximation that happens to agree on this tmpdir.
+
+stopg_slug() { python3 -c "import re,sys;print(re.sub(r'[^A-Za-z0-9]','-',sys.argv[1]))" "$REPO"; }
+
+@test "stop-guard: a FRESH serial-gate marker stands shape B down" {
+    local slug; slug="$(stopg_slug)"
+    mkdir -p "$CAGE/projects/$slug/sg1/subagents"
+    touch "$CAGE/projects/$slug/sg1/subagents/agent-w1.jsonl"
+    touch "$CAGE/projects/$slug/sg1/serial-gate"
+    stopg "{\"session_id\":\"sg1\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Dispatched the worker.\"}"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: a STALE serial-gate marker decays back to blocking" {
+    local slug; slug="$(stopg_slug)"
+    mkdir -p "$CAGE/projects/$slug/sg2/subagents"
+    touch "$CAGE/projects/$slug/sg2/subagents/agent-w1.jsonl"
+    touch "$CAGE/projects/$slug/sg2/serial-gate"
+    # 46 minutes, just past SERIAL_GATE_WINDOW_S (2700s). Set via python for
+    # BSD/GNU `touch` portability — the macOS CI leg has no `touch -d '46 min ago'`.
+    python3 -c "import os,time,sys;p=sys.argv[1];os.utime(p,(time.time()-2760,)*2)" \
+        "$CAGE/projects/$slug/sg2/serial-gate"
+    stopg "{\"session_id\":\"sg2\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Dispatched the worker.\"}"
+    [[ "$output" == *'"decision"'* ]]
+    [[ "$output" == *"SERIALISATION"* ]]
+}
+
+@test "stop-guard: shape B's refusal never names the serial-gate marker (D15)" {
+    local slug; slug="$(stopg_slug)"
+    mkdir -p "$CAGE/projects/$slug/sg3/subagents"
+    touch "$CAGE/projects/$slug/sg3/subagents/agent-w1.jsonl"
+    stopg "{\"session_id\":\"sg3\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Dispatched the worker.\"}"
+    [[ "$output" == *'"decision"'* ]]
+    [[ "$output" != *"serial-gate"* ]]
+}
+
+@test "stop-guard: a human typing recently stands shape B down (attended)" {
+    local slug; slug="$(stopg_slug)"
+    mkdir -p "$CAGE/projects/$slug/sg4/subagents"
+    touch "$CAGE/projects/$slug/sg4/subagents/agent-w1.jsonl"
+    # A genuinely TYPED turn: type=user AND origin.kind=human, timestamped now.
+    python3 - "$CAGE/projects/$slug/sg4.jsonl" <<'PY'
+import datetime, json, sys
+now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+open(sys.argv[1], "w").write(json.dumps({
+    "type": "user", "origin": {"kind": "human"},
+    "promptSource": "typed", "timestamp": now}) + "\n")
+PY
+    stopg "{\"session_id\":\"sg4\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Dispatched the worker.\"}"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: an INJECTED user turn is not a present human (shape B still fires)" {
+    local slug; slug="$(stopg_slug)"
+    mkdir -p "$CAGE/projects/$slug/sg5/subagents"
+    touch "$CAGE/projects/$slug/sg5/subagents/agent-w1.jsonl"
+    # Same shape MINUS the human origin marker — hook feedback, teammate messages
+    # and system reminders all arrive as type=user and must not read as presence.
+    python3 - "$CAGE/projects/$slug/sg5.jsonl" <<'PY'
+import datetime, json, sys
+now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+open(sys.argv[1], "w").write(json.dumps({
+    "type": "user", "timestamp": now, "content": "system reminder"}) + "\n")
+PY
+    stopg "{\"session_id\":\"sg5\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Dispatched the worker.\"}"
+    [[ "$output" == *'"decision"'* ]]
+}
+
 @test "unit: write_guard_settings registers the Stop hook alongside the ask guard" {
     run python3 - "$AUTO" "$SDIR" <<'PY'
 import importlib.machinery, importlib.util, json, sys

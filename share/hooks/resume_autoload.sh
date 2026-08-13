@@ -278,13 +278,22 @@ if [ -f "$resume" ]; then
     plan_docs=""
     # awk carves out the `### Plan` block (up to the next ## / ### heading);
     # grep then pulls any .md path token from it — filename-agnostic on purpose.
+    # LISTING ORDER IS PRESERVED (the governing doc is listed first by
+    # convention), existence is checked BEFORE the cap so a missing ref or a
+    # prose token cannot displace a real doc, and anything past the cap is
+    # announced by name — MEASURED 2026-08-13: `sort -u | head -5` here
+    # silently dropped BOTH governing docs of the live programme behind two
+    # reference docs and a prose `CLAUDE.md` token. A silent cap reads as
+    # "this is everything", which is the exact failure §1c exists to prevent.
     plan_refs="$(awk '
             /^###[[:space:]]+Plan[[:space:]]*$/ { inplan=1; next }
             inplan && /^##/                     { inplan=0 }
             inplan
         ' "$resume" 2>/dev/null \
         | grep -oE '[~/A-Za-z0-9._-][A-Za-z0-9._/~-]*\.md' 2>/dev/null \
-        | sort -u | head -5)"
+        | awk '!seen[$0]++')"
+    plan_kept=0
+    plan_dropped=""
     for ref in $plan_refs; do
         # shellcheck disable=SC2088  # the "~/" pattern matches literal text from RESUME; no expansion intended
         case "$ref" in
@@ -292,13 +301,21 @@ if [ -f "$resume" ]; then
             /*)    cand="$ref" ;;
             *)     cand="$base/$ref" ;;
         esac
-        if [ -f "$cand" ]; then
+        [ -f "$cand" ] || continue
+        if [ "$plan_kept" -lt 5 ]; then
+            plan_kept=$((plan_kept + 1))
             plan_note="${plan_note}  - ${cand}
 "
             plan_docs="${plan_docs}${cand}
 "
+        else
+            plan_dropped="${plan_dropped} ${cand##*/}"
         fi
     done
+    if [ -n "$plan_dropped" ]; then
+        plan_note="${plan_note}  (cap: first 5 in listing order; NOT shown or counted:${plan_dropped})
+"
+    fi
     if [ -n "$plan_note" ]; then
         printf '\nNOTE: RESUME references the plan doc(s) below (verified present on disk).\n'
         printf 'RESUME is a summary, never the plan: READ each doc before executing any task\n'

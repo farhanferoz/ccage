@@ -331,6 +331,54 @@ memdir() {
     [[ "$output" != *"DISPATCHER mode"* ]]
 }
 
+# --- the cap must not silently drop the doc that matters -------------------
+# MEASURED 2026-08-13 on the live ccage RESUME: `sort -u | head -5` ran BEFORE
+# the existence filter, so alphabetical order plus a prose `CLAUDE.md` token
+# displaced BOTH governing docs of the running programme, with no notice. The
+# mechanism built against silent plan-item loss silently lost the plan.
+
+@test "plan pointer: listing order beats alphabetical under the cap" {
+    # 6 real docs; the governing one is listed FIRST but sorts LAST alphabetically.
+    mkdir -p "$REPO/plans"
+    for n in zz-governing aa bb cc dd ee; do printf 'x\n' > "$REPO/plans/$n.md"; done
+    {
+        printf '### Plan\n'
+        printf -- '- `plans/zz-governing.md` — THE governing doc\n'
+        for n in aa bb cc dd ee; do printf -- '- plans/%s.md\n' "$n"; done
+    } > "$REPO/RESUME.md"
+    run run_hook
+    [ "$status" -eq 0 ]
+    # Assert on the RESOLVED ABSOLUTE path: the hook echoes RESUME's own body
+    # too, where the relative `plans/zz-governing.md` token appears regardless,
+    # so a bare substring match passes even when the doc was dropped. Only the
+    # NOTE block carries the absolute form.
+    [[ "$output" == *"  - $REPO/plans/zz-governing.md"* ]]  # survived the cap, first slot
+    [[ "$output" == *"NOT shown or counted: ee.md"* ]]      # the drop is announced, by name
+}
+
+@test "plan pointer: missing refs do not consume cap slots" {
+    # 6 refs that do NOT exist listed before 1 that does: the real doc must survive.
+    mkdir -p "$REPO/plans"
+    printf 'x\n' > "$REPO/plans/real-plan.md"
+    {
+        printf '### Plan\n'
+        for i in 1 2 3 4 5 6; do printf -- '- plans/ghost-%s.md\n' "$i"; done
+        printf -- '- `plans/real-plan.md`\n'
+    } > "$REPO/RESUME.md"
+    run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"  - $REPO/plans/real-plan.md"* ]]     # absolute form: NOTE, not echo
+}
+
+@test "plan pointer: five or fewer existing refs emit no drop notice" {
+    mkdir -p "$REPO/plans"
+    for n in a b; do printf 'x\n' > "$REPO/plans/$n.md"; done
+    printf '### Plan\n- plans/a.md\n- plans/b.md\n' > "$REPO/RESUME.md"
+    run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"NOT shown"* ]]
+}
+
 # ===== watcher-alive guard on the startup/resume clear (Task 6, failure ====
 # ===== mode 4 + the pgrep/lsof false-positive it was replaced with)     ====
 #
