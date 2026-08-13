@@ -1343,8 +1343,22 @@ PY
 # <tmp>/claude-<uid>/<cwd-slug>/<session>/tasks/<id>.output, and a finished job
 # carries a literal "[exited with code N]".
 
+# The tasks dir, computed by the SAME rule the hook uses rather than by a shell
+# approximation of it. `dirname "$(mktemp -u)"` was the first version and it
+# failed on macOS only: python's tempfile.gettempdir() and the shell's view of
+# $TMPDIR disagree there ($TMPDIR carries a trailing slash, and /var is a symlink
+# to /private/var — hazard-table row one). Same defect class as the slug bug
+# fixed earlier the same day: a test that re-derives a rule instead of asking for
+# it agrees with the implementation only where the environment is forgiving.
+tasks_dir() {   # tasks_dir <session>
+    python3 -c "import os,re,sys,tempfile
+print(os.path.join(tempfile.gettempdir(), 'claude-%d' % os.getuid(),
+                   re.sub(r'[^A-Za-z0-9]', '-', sys.argv[1]), sys.argv[2], 'tasks'))" \
+        "$REPO" "$1"
+}
+
 bgjob() {   # bgjob <session> <id> <body>
-    local d; d="$(dirname "$(mktemp -u)")/claude-$(id -u)/$(oracle_slug "$REPO")/$1/tasks"
+    local d; d="$(tasks_dir "$1")"
     mkdir -p "$d"; printf '%s' "$3" > "$d/$2.output"
 }
 
