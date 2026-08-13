@@ -1209,8 +1209,20 @@ class Watcher:
         if paused != self.paused:
             self.paused = paused
             if not paused:
-                # Un-pausing: re-arm from a clean slate so occupancy re-triggers.
-                self.state = self.NORMAL
+                # Un-pausing: re-arm from a clean slate so occupancy re-triggers
+                # -- UNLESS a checkpoint was confirmed while paused.
+                #
+                # While paused the whole state machine is skipped (see the
+                # `if self.paused: continue` in run()), so a model that was
+                # nudged, then paused, then checkpointed and printed the
+                # sentinel has its confirmation read by nobody. Resetting to
+                # NORMAL here threw that away: the /clear the checkpoint existed
+                # to enable never happened, and because occupancy is still above
+                # soft, the very next poll nudged again -- asking for work the
+                # model had just finished. Preserving NUDGED lets the normal
+                # branch pick the confirmation up on the next poll and clear.
+                if not (self.state == self.NUDGED and self._confirmed()):
+                    self.state = self.NORMAL
 
     def _weekly_warn_msg(self, remaining):
         return (

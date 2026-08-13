@@ -666,6 +666,49 @@ conf() { ( cd "$REPO" && "$AUTO" "$@" ); }
     [[ "$output" == *"effective    : 50% / 55% (re-nudge 50%)"* ]]
 }
 
+@test "Watcher._refresh_control: un-pausing keeps a checkpoint confirmed WHILE paused, instead of discarding it (unit)" {
+    # While paused the whole state machine is skipped, so a model that was
+    # nudged, then paused, then checkpointed and printed the sentinel has its
+    # confirmation read by nobody. Un-pausing used to reset to NORMAL
+    # unconditionally, throwing that away: no /clear, and -- occupancy still
+    # being above soft -- an immediate re-nudge asking for work just finished.
+    run python3 - "$AUTO" "$REPO" "$SDIR" <<'PY'
+import importlib.util, importlib.machinery, os, sys, threading, time
+loader = importlib.machinery.SourceFileLoader("ccageauto", sys.argv[1])
+spec = importlib.util.spec_from_loader("ccageauto", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+cwd, sdir = sys.argv[2], sys.argv[3]
+r, w = os.pipe()
+
+def watcher(confirmed):
+    cfg = m.Config(["--soft", "40"]); cfg.validate()
+    wat = m.Watcher(cfg, w, threading.Lock(), cwd, sdir, open(os.devnull, "w"))
+    # Real _confirmed() runs: sentinel seen, and nudge older than 20s so the
+    # corroboration fallback applies without depending on RESUME's mtime.
+    wat._new_text_since_nudge = lambda: (cfg.sentinel if confirmed else "nothing here")
+    wat.nudge_at = time.time() - 30
+    wat.state = wat.NUDGED
+    wat.paused = True                      # currently paused...
+    m.write_control_file(cwd, {"paused": False})   # ...control file says resume
+    wat.conf_mtime = -1; wat._refresh_control()
+    os.remove(m.control_path(cwd))
+    return wat
+
+# The fix: a confirmation that landed while paused survives the un-pause, so
+# the normal NUDGED branch clears on the next poll.
+wat = watcher(True)
+assert wat.state == wat.NUDGED, ("confirmed-while-paused was discarded", wat.state)
+assert wat.paused is False, wat.paused
+
+# Regression: with nothing confirmed, un-pausing still re-arms from NORMAL.
+wat2 = watcher(False)
+assert wat2.state == wat2.NORMAL, ("clean un-pause should reset", wat2.state)
+print("UNIT_OK")
+PY
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"UNIT_OK"* ]]
+}
+
 @test "Watcher._refresh_control: a live soft-only override re-derives hard when the launch hard was NOT explicit, but stays sticky when it WAS (unit)" {
     run python3 - "$AUTO" "$REPO" "$SDIR" <<'PY'
 import importlib.util, importlib.machinery, os, sys, threading

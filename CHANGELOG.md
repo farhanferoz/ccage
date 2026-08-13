@@ -2,6 +2,11 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.15.1] — 2026-08-13
+
+### Fixed — un-pausing auto-checkpointing threw away a checkpoint made while paused
+- **`/checkpoint-threshold pause` suspends the whole occupancy state machine, so a confirmation that arrives while paused is read by nobody** — and un-pausing reset the state to NORMAL unconditionally, discarding it. The sequence is ordinary: occupancy crosses the soft threshold and the model is nudged, you pause for a delicate stretch (a long subagent run you don't want interrupted), the model checkpoints and prints the sentinel anyway, you resume. The `/clear` that the checkpoint existed to enable never happened, and because occupancy was still above soft, the very next poll nudged again — asking the model to redo work it had just finished. Un-pausing now preserves the NUDGED state when a checkpoint has actually been confirmed, so the normal branch picks it up and clears on the next poll; with nothing confirmed it still re-arms from NORMAL exactly as before. Only reachable if you use `pause`.
+
 ## [0.15.0] — 2026-08-13
 
 ### Added — `ccage-watch`, a condition watcher that outlives the session that armed it
