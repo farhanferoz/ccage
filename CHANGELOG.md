@@ -2,6 +2,12 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.15.2] — 2026-08-14
+
+### Fixed — the stop guard read the wrong project's state, two ways
+- **Under `CCAGE_SLOT` the plan verdict came from another workstream's RESUME.** `plan_open_items()` hardcoded `RESUME.md` while everything else that touches these files is slot-aware — `resume_autoload.sh`, `/checkpoint`, `ccage-watch`, `ccage-auto` — so a slotted session claiming "all done" was judged against the trunk's checkboxes: a false block on items that are not yours, and a false pass while yours are open. The trigger's own comment claimed it read "the same section resume_autoload.sh reads", which is exactly what it did not do. Validation matches every other site: an unsafe slot is ignored and falls back to the plain file, never becoming a path component.
+- **Every ground truth the guard consults was keyed on the payload's `cwd`, which is not the project.** `cwd` is "the current working directory when the hook is invoked" and follows Claude's own `cd` (the hooks API ships a `CwdChanged` event for precisely that); `CLAUDE_PROJECT_DIR` stays at the root. Measured from a subdirectory: the transcript, the subagent dir and a background job's output file all stayed under the PROJECT slug, so one `cd` pointed nine paths at a directory that does not exist — and each trigger then failed silently in the permissive direction: no transcript dir → no live agents, no tasks dir → no background jobs, no RESUME → no plan items, no typed-turn record → an attended session read as unattended. A guard that switches itself off on `cd` is worse than no guard, because its silence is indistinguishable from a clean stop. There is now one `project` anchor, and the project-slug rule is computed once rather than in four hand-written copies — the fifth copy of that rule is what turned the macOS leg red in 0.15.0.
+
 ## [0.15.1] — 2026-08-13
 
 ### Fixed — un-pausing auto-checkpointing threw away a checkpoint made while paused

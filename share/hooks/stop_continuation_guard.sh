@@ -124,7 +124,33 @@ last_msg = p.get("last_assistant_message") or ""
 if not session_id:
     allow()
 
+# THE ANCHOR IS THE PROJECT, NEVER THE PAYLOAD'S cwd (2026-08-14). Every ground
+# truth this hook consults -- the transcript, the subagent dir, the session
+# scratchpad, RESUME -- is keyed on the project. `cwd` is NOT the project: it is
+# "the current working directory when the hook is invoked" and it follows
+# Claude's own `cd` (the docs ship a CwdChanged event for exactly that), while
+# CLAUDE_PROJECT_DIR stays at the root. MEASURED from a subdirectory of this
+# repo: payload cwd=/home/ff235/dev/ccage/tests while CLAUDE_PROJECT_DIR
+# =/home/ff235/dev/ccage -- and both the transcript
+# (<config>/projects/-home-ff235-dev-ccage/) and a background job started from
+# that subdirectory (/tmp/claude-<uid>/-home-ff235-dev-ccage/) stayed under the
+# PROJECT slug.
+#
+# So a single `cd` pointed every path below at a directory that does not exist,
+# and each trigger then fails SILENTLY in the permissive direction: no transcript
+# dir -> no live agents (shape B off), no tasks dir -> no background jobs, no
+# RESUME -> no plan items, no typed-turn record -> an attended session read as
+# unattended. A guard that switches itself off on `cd` is worse than no guard,
+# because its silence is indistinguishable from a clean stop. Fall back to cwd
+# only when the variable is absent, which is also what resume_autoload.sh does.
+project = os.environ.get("CLAUDE_PROJECT_DIR") or cwd
+
 config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+# Claude Code's on-disk project slug: EVERY non-alphanumeric becomes "-". One
+# copy, computed once -- this rule had four local copies in this file, and the
+# repo already paid for that once (28 macOS failures, 0.15.0, from a fifth copy
+# that spelled the same rule differently).
+slug = re.sub(r"[^A-Za-z0-9]", "-", project) if project else ""
 state_dir = os.path.join(config, "stop_guard_state")
 counter = os.path.join(state_dir, session_id + ".count")
 
@@ -149,7 +175,6 @@ def write_count(n):
 # ---------------------------------------------------------------- shape B
 # Ground truth: subagent transcripts under this session, touched recently.
 def live_agents():
-    slug = re.sub(r"[^A-Za-z0-9]", "-", cwd) if cwd else ""
     sub = os.path.join(config, "projects", slug, session_id, "subagents")
     if not os.path.isdir(sub):
         return []
@@ -180,7 +205,6 @@ def user_recently_typed():
     transcript 2026-08-13: ten typed turns all carried the marker, and all
     eighteen injected turns lacked it, with no overlap.
     """
-    slug = re.sub(r"[^A-Za-z0-9]", "-", cwd) if cwd else ""
     path = os.path.join(config, "projects", slug, session_id + ".jsonl")
     try:
         size = os.path.getsize(path)
@@ -217,10 +241,9 @@ def user_recently_typed():
 def serial_gate_active():
     """True if this session has a fresh marker declaring a serial wait.
 
-    Mirrors live_agents()'s slug computation -- same session, same directory
-    layout, just a different leaf file.
+    Same session dir as live_agents() -- both key on the shared project `slug`,
+    just a different leaf file.
     """
-    slug = re.sub(r"[^A-Za-z0-9]", "-", cwd) if cwd else ""
     marker = os.path.join(config, "projects", slug, session_id, "serial-gate")
     try:
         return (time.time() - os.path.getmtime(marker)) <= SERIAL_GATE_WINDOW_S
@@ -302,7 +325,18 @@ def plan_open_items():
     (0, path) — it is unstructured, so its completion is UNVERIFIABLE, and this
     guard must not manufacture a verdict from silence. That case is reported by
     the session-start autoloader, not blocked here."""
-    resume = os.path.join(cwd, "RESUME.md") if cwd else ""
+    # SLOT-AWARE, or the contract in the comment above is a lie. A slotted
+    # session (CCAGE_SLOT) owns RESUME.<slot>.md, so reading the plain file
+    # counts ANOTHER workstream's checkboxes: a false block on items that are
+    # not yours, and a false pass while yours are open. Validation MIRRORS
+    # resume_autoload.sh:60-69 (and agent_reaper's record()): an unsafe slot is
+    # IGNORED and we fall back to the plain file, so a slot can never become a
+    # path component. Keep the three in step if any of them changes.
+    slot = os.environ.get("CCAGE_SLOT", "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", slot or ""):
+        slot = ""
+    name = "RESUME.%s.md" % slot if slot else "RESUME.md"
+    resume = os.path.join(project, name) if project else ""
     if not resume or not os.path.isfile(resume):
         return 0, None
     try:
@@ -322,7 +356,7 @@ def plan_open_items():
     for ref in refs[:5]:
         path = os.path.expanduser(ref) if ref.startswith("~/") else ref
         if not os.path.isabs(path):
-            path = os.path.join(cwd, path)
+            path = os.path.join(project, path)
         if not os.path.isfile(path):
             continue
         try:
@@ -376,7 +410,7 @@ def live_background_jobs():
     Fail-open: no tasks dir, or an unreadable one, returns [] -- an unmeasurable
     condition must never manufacture a block."""
     tasks = os.path.join(tempfile.gettempdir(), "claude-%d" % os.getuid(),
-                         re.sub(r"[^A-Za-z0-9]", "-", cwd) if cwd else "",
+                         slug,
                          session_id, "tasks")
     live, now = [], time.time()
     try:
@@ -404,7 +438,6 @@ def live_background_jobs():
 # TaskCreate results carry "Task #N created", TaskUpdate inputs carry the status
 # changes. Last status wins; anything never updated is still pending.
 def open_task_count():
-    slug = re.sub(r"[^A-Za-z0-9]", "-", cwd) if cwd else ""
     path = os.path.join(config, "projects", slug, session_id + ".jsonl")
     if not os.path.isfile(path):
         return 0
@@ -580,9 +613,9 @@ def unpushed_vs_ci():
 
     Fail-open everywhere: not a repo, no upstream, no CI config, git missing or
     slow -> (0, None). An unmeasurable condition must not manufacture a block."""
-    if not cwd or not os.path.isdir(os.path.join(cwd, ".git")):
+    if not project or not os.path.isdir(os.path.join(project, ".git")):
         return 0, None
-    wf = os.path.join(cwd, ".github", "workflows")
+    wf = os.path.join(project, ".github", "workflows")
     try:
         if not any(f.endswith((".yml", ".yaml")) for f in os.listdir(wf)):
             return 0, None
@@ -590,7 +623,7 @@ def unpushed_vs_ci():
         return 0, None                      # no CI configured: nothing to miss
     def git(*a):
         try:
-            p = subprocess.run(("git", "-C", cwd) + a, capture_output=True,
+            p = subprocess.run(("git", "-C", project) + a, capture_output=True,
                                text=True, timeout=5)
             return p.stdout.strip() if p.returncode == 0 else ""
         except Exception:

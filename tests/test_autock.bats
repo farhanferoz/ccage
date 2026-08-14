@@ -27,7 +27,10 @@ setup() {
     # Unset CLAUDE_CONFIG_DIR: when the suite runs inside a real cage it is set in
     # the environment, and resolve_config_dir's fast path would return it instead
     # of the CCAGE_ROOT-derived dir these tests pin. Tests must own the env.
-    unset CCAGE_SLOT CCAGE_AUTOCK CLAUDE_CONFIG_DIR
+    # CLAUDE_PROJECT_DIR for the same reason as CLAUDE_CONFIG_DIR: the stop guard
+    # anchors every path on it, and a real cage exports it, so leaving it set
+    # would point the hook at the developer's own repo instead of $REPO.
+    unset CCAGE_SLOT CCAGE_AUTOCK CLAUDE_CONFIG_DIR CLAUDE_PROJECT_DIR
     # Hermetic even when the suite itself runs inside an autonomous session.
     unset CCAGE_AUTONOMOUS
     # Unset EVERY CCAGE_AUTOCK_* rather than an enumerated list. The hand-listed
@@ -1154,6 +1157,21 @@ stopg() {   # stopg <json> [extra PATH prefix] -> $output is the hook's stdout
         PATH='${2:-}${2:+:}$PATH' bash '$STOPG'"
 }
 
+# stopg for a SLOTTED session. CCAGE_SLOT is unset in setup() (a developer's own
+# slotted session would otherwise leak in), so it is set explicitly here.
+stopg_slot() {   # stopg_slot <json> <slot>
+    run bash -c "echo '$1' | CCAGE_SLOT='$2' CLAUDE_CONFIG_DIR='$CAGE' \
+        CCAGE_AUTONOMOUS=1 bash '$STOPG'"
+}
+
+# stopg for a session whose working directory has MOVED: the payload carries the
+# subdirectory Claude cd'd into, while CLAUDE_PROJECT_DIR still names the root.
+# That is the measured shape of a `cd` (2026-08-14), not a hypothetical.
+stopg_proj() {   # stopg_proj <json> <project-dir>
+    run bash -c "echo '$1' | CLAUDE_PROJECT_DIR='$2' CLAUDE_CONFIG_DIR='$CAGE' \
+        CCAGE_AUTONOMOUS=1 bash '$STOPG'"
+}
+
 # stopg with PATH REPLACED rather than prefixed, for the cases that assert on
 # something being ABSENT from PATH.
 stopg_with_path() {   # stopg_with_path <json> <full PATH>
@@ -1256,6 +1274,82 @@ path_sans_ccage_watch() {
     printf '# P\nJust prose. No checkboxes anywhere.\n' > "$REPO/p.md"
     stopg "{\"session_id\":\"i\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All tasks are complete.\"}"
     [ -z "$output" ]
+}
+
+# CCAGE_SLOT (2026-08-14). The trigger's own comment says its source of truth is
+# "the same section resume_autoload.sh reads" — but that hook is slot-aware
+# (resume_autoload.sh:60-69) and this one was not, so the two disagreed exactly
+# when a slot was set. Every case below is DISCRIMINATING: the trunk and slot
+# RESUMEs point at plans with different open counts, so reading the wrong file
+# produces the wrong verdict rather than the same one by luck.
+two_plan_fixtures() {   # trunk.md: $1 open items, slot.md: $2 open items
+    local i
+    printf '# R\n\n### Plan\n- `%s/trunk.md` governs\n' "$REPO" > "$REPO/RESUME.md"
+    printf '# R\n\n### Plan\n- `%s/slot.md` governs\n'  "$REPO" > "$REPO/RESUME.rollout.md"
+    printf '# trunk\n- [x] shipped\n' > "$REPO/trunk.md"
+    printf '# slot\n- [x] shipped\n'  > "$REPO/slot.md"
+    for ((i = 0; i < $1; i++)); do printf -- '- [ ] trunk open %d\n' "$i" >> "$REPO/trunk.md"; done
+    for ((i = 0; i < $2; i++)); do printf -- '- [ ] slot open %d\n'  "$i" >> "$REPO/slot.md"; done
+}
+
+@test "stop-guard: a slotted session counts ITS OWN RESUME.<slot>.md, not the trunk's" {
+    two_plan_fixtures 0 2
+    stopg_slot "{\"session_id\":\"s1\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All tasks are complete.\"}" rollout
+    [[ "$output" == *'"decision"'* ]]
+    [[ "$output" == *"2 unticked"* ]]
+    [[ "$output" == *"slot.md"* ]]
+    [[ "$output" != *"trunk.md"* ]]
+}
+
+@test "stop-guard: a slotted session is NOT blocked by another workstream's open items" {
+    two_plan_fixtures 2 0
+    stopg_slot "{\"session_id\":\"s2\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All tasks are complete.\"}" rollout
+    [ -z "$output" ]
+}
+
+@test "stop-guard: an unsafe CCAGE_SLOT falls back to the plain RESUME.md" {
+    # Same rule as the wrapper and resume_autoload: ignored, never a path component.
+    two_plan_fixtures 3 0
+    stopg_slot "{\"session_id\":\"s3\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All tasks are complete.\"}" "../etc"
+    [[ "$output" == *"3 unticked"* ]]
+    [[ "$output" == *"trunk.md"* ]]
+}
+
+# THE PROJECT ANCHOR (2026-08-14). The payload's cwd follows Claude's own `cd`
+# while CLAUDE_PROJECT_DIR stays at the root — measured with a probe hook fired
+# from a subdirectory of this repo. Every path this guard consults lives under
+# the PROJECT slug, so keying on cwd switched each trigger off silently after a
+# cd, which reads exactly like a clean stop. These pin both directions.
+@test "stop-guard: the plan trigger survives a cd into a subdirectory" {
+    mkdir -p "$REPO/sub"
+    printf '# R\n\n### Plan\n- `%s/p.md` governs\n' "$REPO" > "$REPO/RESUME.md"
+    printf '# P\n- [ ] one\n- [ ] two\n' > "$REPO/p.md"
+    stopg_proj "{\"session_id\":\"cd1\",\"cwd\":\"$REPO/sub\",\"last_assistant_message\":\"All tasks are complete.\"}" "$REPO"
+    [[ "$output" == *'"decision"'* ]]
+    [[ "$output" == *"2 unticked"* ]]
+}
+
+@test "stop-guard: shape B survives a cd into a subdirectory" {
+    mkdir -p "$REPO/sub" "$SDIR/cd2/subagents"
+    touch "$SDIR/cd2/subagents/agent-w1.jsonl"
+    stopg_proj "{\"session_id\":\"cd2\",\"cwd\":\"$REPO/sub\",\"last_assistant_message\":\"Dispatched the worker.\"}" "$REPO"
+    [[ "$output" == *"SERIALISATION"* ]]
+}
+
+@test "stop-guard: with no CLAUDE_PROJECT_DIR the payload cwd is the anchor" {
+    # The fallback must hold: a hook invoked without the variable still works.
+    printf '# R\n\n### Plan\n- `%s/p.md` governs\n' "$REPO" > "$REPO/RESUME.md"
+    printf '# P\n- [ ] only one\n' > "$REPO/p.md"
+    run bash -c "echo '{\"session_id\":\"cd3\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All tasks are complete.\"}' \
+        | env -u CLAUDE_PROJECT_DIR CLAUDE_CONFIG_DIR='$CAGE' CCAGE_AUTONOMOUS=1 bash '$STOPG'"
+    [[ "$output" == *"1 unticked"* ]]
+}
+
+@test "stop-guard: an unset slot still reads the plain RESUME.md" {
+    two_plan_fixtures 1 0
+    stopg "{\"session_id\":\"s4\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All tasks are complete.\"}"
+    [[ "$output" == *"1 unticked"* ]]
+    [[ "$output" == *"trunk.md"* ]]
 }
 
 @test "stop-guard: UNARMED_PROMISE stays inert while ccage-watch is absent" {
