@@ -81,6 +81,20 @@ SERIAL_GATE_WINDOW_S = 2700  # 45 minutes
 # while still letting a genuinely-departed session return to unattended rules.
 ATTENDED_WINDOW_S = 900
 
+# How close ccage-auto's own injection stamp must be to a "typed" turn to
+# claim it as its own rather than the user's. Wide enough for the pty write +
+# the transcript recording the row (KEY_DELAY is 250ms; the rest is
+# sub-second submission), far below any real human's gap between two typed
+# prompts -- ASSERTED, not measured against a dated watcher log (none of the
+# sampled ccage-autock.log files carry a date field, so a submit-to-transcript
+# latency could not be pinned down precisely here). TRADE, stated rather than
+# hidden: a human who types again within this many seconds of ANY watcher
+# injection (a poke, a nudge, a resume prompt) has that one turn read as the
+# injection, not as them -- narrow and self-correcting, since the very next
+# typed turn more than this many seconds after the last injection is read
+# correctly.
+INJECTION_TOLERANCE_S = 30
+
 
 def allow():
     """Let the turn end. The only safe default."""
@@ -159,6 +173,14 @@ config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
 # repo already paid for that once (28 macOS failures, 0.15.0, from a fifth copy
 # that spelled the same rule differently).
 slug = re.sub(r"[^A-Za-z0-9]", "-", project) if project else ""
+# Same reasoning as the slug comment above, for CCAGE_SLOT: an unsafe/absent
+# slot must never become a path component. MIRRORS ccage-auto's
+# slot_suffix() and plan_open_items()'s own (pre-existing) local validation
+# below -- ONE copy here, reused by both, rather than a third copy of the
+# same rule spelled differently (the failure mode named two lines up).
+_slot_env = os.environ.get("CCAGE_SLOT", "")
+SLOT = _slot_env if re.fullmatch(r"[A-Za-z0-9_-]+", _slot_env or "") else ""
+SLOT_SUFFIX = ("." + SLOT) if SLOT else ""
 state_dir = os.path.join(config, "stop_guard_state")
 counter = os.path.join(state_dir, session_id + ".count")
 
@@ -325,7 +347,22 @@ def user_recently_typed():
         except ValueError:
             return False
         age = (datetime.datetime.now(datetime.timezone.utc) - when).total_seconds()
-        return age <= ATTENDED_WINDOW_S
+        if age > ATTENDED_WINDOW_S:
+            return False
+        # A typed turn within the window is only the USER's if ccage-auto did
+        # not inject it at the same moment -- both carry the identical
+        # origin/promptSource marker (MEASURED 2026-08-15: the resume nudge at
+        # 21:54:19Z carried origin: {"kind": "human"}, promptSource: "typed",
+        # same as a real keystroke). SLOT-SCOPED to match the writer
+        # (Watcher._type in bin/ccage-auto): CCAGE_SLOT lets several sessions
+        # run against the SAME project concurrently, and an unscoped marker
+        # would let one slot's injection mask another slot's genuine typing.
+        try:
+            injected = os.path.getmtime(
+                os.path.join(state_dir, slug + SLOT_SUFFIX + ".injected"))
+        except OSError:
+            return True
+        return abs(injected - when.timestamp()) > INJECTION_TOLERANCE_S
     return False
 
 
@@ -449,11 +486,10 @@ def plan_open_items():
     # not yours, and a false pass while yours are open. Validation MIRRORS
     # resume_autoload.sh:60-69 (and agent_reaper's record()): an unsafe slot is
     # IGNORED and we fall back to the plain file, so a slot can never become a
-    # path component. Keep the three in step if any of them changes.
-    slot = os.environ.get("CCAGE_SLOT", "")
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", slot or ""):
-        slot = ""
-    name = "RESUME.%s.md" % slot if slot else "RESUME.md"
+    # path component. SLOT is the one module-level copy of that validation
+    # (see the comment beside `slug`, above) — reused here rather than
+    # recomputed, so this and the injected-marker lookup can never disagree.
+    name = "RESUME.%s.md" % SLOT if SLOT else "RESUME.md"
     resume = os.path.join(project, name) if project else ""
     if not resume or not os.path.isfile(resume):
         return 0, None

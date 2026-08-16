@@ -1130,6 +1130,29 @@ class Watcher:
             if submit:
                 time.sleep(settle)
                 self._write(b"\r")
+        # Our keystrokes reach the pty exactly as a human's do, so the
+        # transcript stamps them origin=human, promptSource=typed. MEASURED
+        # 2026-08-15: the resume nudge at 21:54:19Z carries that exact shape.
+        # Leave a mark the Stop guard can subtract, or every injection makes
+        # an unattended run look attended for 15 minutes.
+        #
+        # SLOT-SCOPED, matching this file's own RESUME naming
+        # ("RESUME%s.md" % slot_suffix(), used at :1301/:1750/:2012):
+        # CCAGE_SLOT lets several sessions run concurrently against the SAME
+        # project (same cwd_slug), so an unscoped marker would be shared by
+        # every slot -- slot A's injection would make slot B's genuinely
+        # typed turn read as injected, switching attended-session detection
+        # off for a session where the user really is present. The reader
+        # (share/hooks/stop_continuation_guard.sh's user_recently_typed)
+        # must compute the identical name from the same CCAGE_SLOT.
+        try:
+            marker = os.path.join(self._config_dir(), "stop_guard_state",
+                                  cwd_slug(self.cwd) + slot_suffix() + ".injected")
+            os.makedirs(os.path.dirname(marker), exist_ok=True)
+            open(marker, "a").close()
+            os.utime(marker, None)
+        except OSError:
+            pass
 
     def _interrupt(self):
         # Escape interrupts a running turn (forces the model to yield) and also

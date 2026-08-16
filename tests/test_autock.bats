@@ -1519,6 +1519,101 @@ PY
     [[ "$output" == *'"decision"'* ]]
 }
 
+# --- ccage-auto's OWN keystrokes are not a present human (Task 9, 2026-08-16) -
+# The pty write ccage-auto uses to inject a nudge/poke/resume prompt is
+# indistinguishable from real typing: MEASURED against a real transcript
+# (/home/ff235/.claude-StrategyA/projects/-home-ff235-dev-Oasis-StrategyA/
+# ad2baf5d-8082-4ad4-99f8-e3e6529dc0e1.jsonl), the 21:54:19.719Z resume prompt
+# carries origin: {"kind": "human"}, promptSource: "typed" -- the exact shape
+# sg4 above treats as a present human. Watcher._type() leaves a
+# <slug>[.<slot>].injected marker the guard subtracts.
+
+@test "stop-guard: ccage-auto's own injected keystroke is not read as the user typing" {
+    local slug; slug="$(oracle_slug "$REPO")"
+    mkdir -p "$CAGE/projects/$slug/sg6/subagents" "$CAGE/stop_guard_state"
+    touch "$CAGE/projects/$slug/sg6/subagents/agent-w1.jsonl"
+    # Same shape as sg4 (a genuinely typed turn) -- ONLY the fresh .injected
+    # marker distinguishes this from a real human present at the keyboard.
+    python3 - "$CAGE/projects/$slug/sg6.jsonl" <<'PY'
+import datetime, json, sys
+now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+open(sys.argv[1], "w").write(json.dumps({
+    "type": "user", "origin": {"kind": "human"},
+    "promptSource": "typed", "timestamp": now}) + "\n")
+PY
+    touch "$CAGE/stop_guard_state/$slug.injected"
+    stopg "{\"session_id\":\"sg6\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Dispatched the worker.\"}"
+    [[ "$output" == *'"decision"'* ]]
+}
+
+# SLOT COLLISION (Risk 1, 2026-08-16). CCAGE_SLOT lets several sessions run
+# concurrently against the SAME project, so the SAME project slug. An unscoped
+# marker would be shared by every slot -- one slot's injection would mask
+# another slot's genuinely typed turn. This plants the marker at the UNSCOPED
+# path an unfixed writer (or an unslotted session) would use, then reads it
+# from a DIFFERENT, slotted session: the scoped reader must not find it.
+@test "stop-guard: an unscoped injection marker does not mask a slotted session's own typing" {
+    local slug; slug="$(oracle_slug "$REPO")"
+    mkdir -p "$CAGE/projects/$slug/sg7/subagents" "$CAGE/stop_guard_state"
+    touch "$CAGE/projects/$slug/sg7/subagents/agent-w1.jsonl"
+    touch "$CAGE/stop_guard_state/$slug.injected"
+    python3 - "$CAGE/projects/$slug/sg7.jsonl" <<'PY'
+import datetime, json, sys
+now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+open(sys.argv[1], "w").write(json.dumps({
+    "type": "user", "origin": {"kind": "human"},
+    "promptSource": "typed", "timestamp": now}) + "\n")
+PY
+    stopg_slot "{\"session_id\":\"sg7\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Dispatched the worker.\"}" b
+    [ -z "$output" ]
+}
+
+# The other direction: a slot's OWN scoped marker must still be found -- the
+# fix must not overshoot into "no marker is ever consulted".
+@test "stop-guard: a slot's own injection IS still recognised via its own scoped marker" {
+    local slug; slug="$(oracle_slug "$REPO")"
+    mkdir -p "$CAGE/projects/$slug/sg8/subagents" "$CAGE/stop_guard_state"
+    touch "$CAGE/projects/$slug/sg8/subagents/agent-w1.jsonl"
+    python3 - "$CAGE/projects/$slug/sg8.jsonl" <<'PY'
+import datetime, json, sys
+now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+open(sys.argv[1], "w").write(json.dumps({
+    "type": "user", "origin": {"kind": "human"},
+    "promptSource": "typed", "timestamp": now}) + "\n")
+PY
+    touch "$CAGE/stop_guard_state/$slug.b.injected"
+    stopg_slot "{\"session_id\":\"sg8\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Dispatched the worker.\"}" b
+    [[ "$output" == *'"decision"'* ]]
+}
+
+# SLUG AGREEMENT (Risk 2, 2026-08-16). The writer (Watcher._type, cwd_slug())
+# and the reader (user_recently_typed()'s module-level `slug`) compute the
+# marker's basename with two SEPARATELY WRITTEN expressions -- byte-identical
+# today by coincidence, not by a shared definition. oracle_slug is this
+# suite's already-established stand-in for the READER's rule (~15 existing
+# tests already depend on it tracking the hook, so a reader-side drift is
+# already caught elsewhere); this compares the WRITER's actual function
+# against it directly, which nothing else in the suite does.
+@test "stop-guard: ccage-auto's cwd_slug() agrees with the reader's slug rule (direct comparison)" {
+    local paths=(
+        "/home/user/my.repo" "/home/user/my_repo" "/home/user/my-repo"
+        "/home/user/a repo (2)" "/tmp/a+b~c"
+    )
+    local p writer reader
+    for p in "${paths[@]}"; do
+        writer="$(python3 -c "
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader('ccage_auto', '$AUTO')
+spec = importlib.util.spec_from_loader('ccage_auto', loader)
+m = importlib.util.module_from_spec(spec)
+loader.exec_module(m)
+print(m.cwd_slug(sys.argv[1]))
+" "$p")"
+        reader="$(oracle_slug "$p")"
+        [ "$writer" = "$reader" ]
+    done
+}
+
 # --- UNARMED_PROMISE keys on a FACT, not only on wording (2026-08-13) --------
 # Correction B asked for "a background job is running and no watcher is armed";
 # what shipped needed a promise SENTENCE, so a silent turn-end over a live job
