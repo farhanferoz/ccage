@@ -1893,3 +1893,163 @@ PLAN
     # poked at least twice: once before the circuit opened, once after reset
     python3 -c "import sys; sys.exit(0 if open('$CAP','rb').read().count(b'[supervisor]') >= 2 else 1)"
 }
+
+# --- Task 7: job-aware suppression ------------------------------------------
+#
+# The plan's own snippets name launch_fake_session/start_autock/refute_typed,
+# none of which exist (Global Constraints). Rewritten against drive/cap_has/
+# write_parked_record, following the idiom of the Task 5/6 tests above. A
+# background WRITER subshell (never `drive` itself backgrounded -- `run`
+# inside a backgrounded subshell loses $status/$output to the parent) grows a
+# log file concurrently so _job_state's two-sample growing/landed transition
+# can be exercised for real instead of faked with a single append.
+
+@test "supervisor: jobs still growing with a watcher armed stay silent" {
+    local log="$BATS_TEST_TMPDIR/sweep.log"; printf '0123456789' > "$log"
+    write_parked_record sess "{\"logs\":[{\"path\":\"$log\",\"size\":10}]}"
+    mkdir -p "$CAGE/watch"; printf '{"id":"w1","cond":"false"}' > "$CAGE/watch/w1.json"
+    # Keeps growing for the WHOLE run -- a single pre-append would stall after
+    # one poll and (correctly) read as landed, which is a different test below.
+    # Writes faster than the 1s poll and outlives FAKE_DEADLINE with a wide
+    # margin (9s of writing against a 4s deadline): a tight margin here was
+    # measured to race the watcher's own shutdown-tail poll against the
+    # writer's last append, producing a spurious one-off "landed" read.
+    ( for _i in $(seq 1 30); do sleep 0.3; printf 'x' >> "$log"; done ) &
+    local writer=$!
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=4 CCAGE_AUTOCK_SUPERVISOR_IDLE=2
+    drive idle "--poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE
+    kill "$writer" 2>/dev/null || true; wait "$writer" 2>/dev/null || true
+    [ "$status" -eq 0 ]
+    ! cap_has "b'[supervisor]'"
+}
+
+@test "supervisor: jobs growing with NO watcher armed get one poke" {
+    local log="$BATS_TEST_TMPDIR/sweep2.log"; printf '0123456789' > "$log"
+    write_parked_record sess "{\"logs\":[{\"path\":\"$log\",\"size\":10}]}"
+    printf 'more output' >> "$log"
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=6 CCAGE_AUTOCK_SUPERVISOR_IDLE=2
+    drive idle "--poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE
+    [ "$status" -eq 0 ]
+    cap_has "b'[supervisor]'"
+    cap_has "b'ccage-watch arm'"
+}
+
+@test "supervisor: jobs that landed are reported by name, even with a watcher armed" {
+    local log="$BATS_TEST_TMPDIR/sweep3.log"; printf '0123456789' > "$log"
+    write_parked_record sess "{\"logs\":[{\"path\":\"$log\",\"size\":10}]}"
+    mkdir -p "$CAGE/watch"; printf '{"id":"w1","cond":"false"}' > "$CAGE/watch/w1.json"
+    printf 'final output' >> "$log"          # grew, then stops
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=8 CCAGE_AUTOCK_SUPERVISOR_IDLE=2
+    drive idle "--poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE
+    [ "$status" -eq 0 ]
+    cap_has "b'sweep3.log'"
+}
+
+# --- Task 6/7 interaction (found while implementing, not in the plan text) --
+#
+# The plan's own _supervise snippet special-cases "landed" with an
+# UNCONDITIONAL return, whether or not it pokes. That makes Task 6's whole
+# ladder (escalate -> circuit-open -> stand-down record) UNREACHABLE for a
+# landed job -- not "probably fine, a restart wouldn't help" as the plan
+# speculates, but a silent, permanent dead end that breaks Task 6's own
+# termination guarantee ("a wedged session costs one poke, one restart, then
+# silence") for precisely the state most likely to mean a human is waiting on
+# an unread answer. It also means a job that lands AFTER an earlier, less
+# specific poke already spent sup_pokes never gets its own informative poke
+# at all -- silently absorbed, not even escalated.
+
+@test "supervisor: a landed job still escalates and opens the circuit, and gets its own fresh poke even after an earlier generic one" {
+    local log="$BATS_TEST_TMPDIR/landed1.log"; printf '0123456789' > "$log"
+    write_parked_record sess "{\"logs\":[{\"path\":\"$log\",\"size\":10}]}"
+    printf 'more' >> "$log"      # already grown before the watcher ever looks
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=20 \
+        CCAGE_AUTOCK_SUPERVISOR_IDLE=2 CCAGE_AUTOCK_SUPERVISOR_ESCALATE=2
+    drive idle "--soft 40 --poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE CCAGE_AUTOCK_SUPERVISOR_ESCALATE
+    [ "$status" -eq 0 ]
+    # poll 1 sees "growing" (first observation) with no watcher -> the ordinary
+    # ladder pokes generically and spends sup_pokes=1 BEFORE landing is ever
+    # detected -- this is what makes the scenario discriminate: the landed
+    # poke below must fire despite sup_pokes already being spent.
+    grep -q "SUPERVISOR: idle .* — poking once" "$CAGE/ccage-autock.log"
+    grep -q "a job landed" "$CAGE/ccage-autock.log"
+    grep -q "still idle after the poke" "$CAGE/ccage-autock.log"
+    grep -q "no confirmation or activity after the escalation" "$CAGE/ccage-autock.log"
+    grep -q "circuit open" "$CAGE/ccage-autock.log"
+    grep -q "supervisor: stood down" "$REPO/RESUME.md"
+}
+
+@test "supervisor: a job that lands after a long declared-serial wait gets a fresh poke, not a jump to give-up" {
+    local log="$BATS_TEST_TMPDIR/longwait.log"; printf '0123456789' > "$log"
+    write_parked_record sess "{\"logs\":[{\"path\":\"$log\",\"size\":10}]}"
+    mkdir -p "$CAGE/watch"; printf '{"id":"w1","cond":"false"}' > "$CAGE/watch/w1.json"
+    ( for _i in $(seq 1 20); do sleep 0.3; printf 'x' >> "$log"; done ) &
+    local writer=$!
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=16 \
+        CCAGE_AUTOCK_SUPERVISOR_IDLE=2 CCAGE_AUTOCK_SUPERVISOR_ESCALATE=2
+    drive idle "--soft 40 --poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE CCAGE_AUTOCK_SUPERVISOR_ESCALATE
+    kill "$writer" 2>/dev/null || true; wait "$writer" 2>/dev/null || true
+    [ "$status" -eq 0 ]
+    # sup_acted_at is NEVER touched while growing+armed (that branch returns
+    # before _supervisor_poke is ever called), so a generic poke never fires --
+    # this is the "stale/zero timer" case the fix must not mis-handle.
+    ! grep -q "SUPERVISOR: idle .* — poking once" "$CAGE/ccage-autock.log"
+    grep -q "a job landed" "$CAGE/ccage-autock.log"
+    cap_has "b'longwait.log'"
+    grep -q "still idle after the poke" "$CAGE/ccage-autock.log"
+}
+
+# --- Other defects found while verifying _job_state against the real schema
+
+@test "supervisor: a tracked task job is reported landed when its exit marker appears (not just detached logs)" {
+    # DEFECT: the plan's own priority-1 text says landing is "a snapshot entry
+    # grew and stopped, OR a tasks/*.output gained its exit marker" -- but the
+    # supplied _job_state only ever inspects rec["logs"]; it never re-reads
+    # rec["jobs"] (Bash run_in_background jobs, Task 2's job_snapshot()) against
+    # disk. A job represented purely via rec["jobs"] can never be detected as
+    # landed by the code as given.
+    bgjob sess job-y 'still running'
+    write_parked_record sess '{"jobs":[{"id":"job-y","size":13}],"logs":[],"launch_id":"sess"}'
+    ( sleep 3; printf 'still running\n[exited with code 0]' > "$(tasks_dir sess)/job-y.output" ) &
+    local writer=$!
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=10 CCAGE_AUTOCK_SUPERVISOR_IDLE=2
+    drive idle "--poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE
+    wait "$writer" 2>/dev/null || true
+    [ "$status" -eq 0 ]
+    grep -q "a job landed" "$CAGE/ccage-autock.log"
+    cap_has "b'job-y'"
+}
+
+@test "supervisor: a watch spec left behind by a DEAD watcher process does not silence the supervisor" {
+    # DEFECT: bin/ccage-watch's own daemon() names its failure mode -- killed
+    # by a crash/OOM/SIGKILL, it writes nothing, and its spec is only cleaned
+    # up by `ccage-watch reap`, which resume_autoload.sh runs at SessionStart
+    # only, never mid-session. A bare glob over watch/*.json reads a dead
+    # watcher's leftover spec as "still armed" for the rest of THIS session --
+    # with nobody left alive to ever report the result either.
+    local log="$BATS_TEST_TMPDIR/deadwatch.log"; printf '0123456789' > "$log"
+    write_parked_record sess "{\"logs\":[{\"path\":\"$log\",\"size\":10}]}"
+    mkdir -p "$CAGE/watch"
+    printf '{"id":"w1","cond":"false","pid":999999999}' > "$CAGE/watch/w1.json"
+    # Keeps growing for the whole run: a single append settles into "landed"
+    # within two polls, and landed overrides watch-armed BY DESIGN regardless
+    # of this fix -- that would test the wrong branch. Continuous growth
+    # isolates the GROWING+dead-watcher-spec case (case 3) specifically.
+    # Writes faster than the 1s poll and outlives FAKE_DEADLINE with a wide
+    # margin (9s of writing against a 4s deadline) -- see the timing note on
+    # the "stay silent" test above; the same boundary race applies here.
+    ( for _i in $(seq 1 30); do sleep 0.3; printf 'x' >> "$log"; done ) &
+    local writer=$!
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=4 CCAGE_AUTOCK_SUPERVISOR_IDLE=2
+    drive idle "--poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE
+    kill "$writer" 2>/dev/null || true; wait "$writer" 2>/dev/null || true
+    [ "$status" -eq 0 ]
+    cap_has "b'[supervisor]'"
+    cap_has "b'ccage-watch arm'"
+}

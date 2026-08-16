@@ -122,6 +122,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import termios
 import threading
 import time
@@ -1079,6 +1080,12 @@ class Watcher:
         self.sup_open = False     # circuit open: stay quiet until real work
         self.sup_acted_at = 0.0   # when the supervisor last typed
         self.sup_seen = {}        # path -> size at the previous poll (Task 7)
+        self.sup_landed_poked = False  # a fresh "a job landed" poke has been
+                                   # sent for the CURRENT landing (Task 7) --
+                                   # reset whenever a job is next seen growing,
+                                   # so landing always gets its own poke even
+                                   # when sup_pokes was already spent on an
+                                   # earlier, less specific idle poke.
         self.sup_driving = False  # True while NUDGED is the supervisor's own
                                    # escalation cycle (Task 6) -- see run()'s
                                    # NUDGED branch, which must not cancel it on
@@ -1500,6 +1507,114 @@ class Watcher:
         self.sup_pokes += 1
         self.sup_acted_at = time.time()
 
+    def _watch_armed(self):
+        """A live ccage-watch spec is a DECLARATION that this wait is serial —
+        and unlike a bare marker it is falsifiable: `--cond` is a command that
+        exits 0 when the thing is done, so a session that cannot write the
+        condition does not know what it is waiting for.
+
+        Checks the recorded pid, not just the spec file's existence.
+        bin/ccage-watch's own daemon() names its failure mode: a watcher
+        killed by a crash/OOM/SIGKILL writes nothing at all, and its spec is
+        only cleaned up by `ccage-watch reap` — which resume_autoload.sh runs
+        at SessionStart ONLY, never mid-session (checked 2026-08-16). A bare
+        glob would read that leftover spec as "still armed" for the rest of
+        THIS session, with nobody left alive to ever report the result
+        either — a fail-silent hole in the permissive direction, the same
+        shape as Task 2's phantom-jobs bug. Reuses this file's own
+        _pid_alive() (already used for the watcher-liveness pidfiles above)
+        rather than importing ccage-watch's own liveness(), which also probes
+        /proc and ps for a `ccage-watch` cmdline match — that extra precision
+        does not matter here, and _pid_alive's simpler kill(pid, 0) already
+        errs toward "still armed" on anything unprovable (EPERM, other
+        OSError), matching ccage-watch's own UNKNOWN-counts-as-alive stance.
+        An unreadable/mid-write spec (cmd_arm's own two-step write is not
+        atomic) is skipped rather than counted: the doctrine here inverts the
+        usual fail-open direction — for THIS supervisor, "ask" is the safe
+        default, not "stay silent" (the 11-hour idle incident this whole
+        design responds to was ALL silence)."""
+        for spath in glob.glob(os.path.join(self._config_dir(), "watch",
+                                            "*.json")):
+            try:
+                with open(spath) as fh:
+                    spec = json.load(fh)
+            except (OSError, ValueError):
+                continue                # unreadable/mid-write: not a declaration
+            pid = spec.get("pid")
+            if pid is None or _pid_alive(pid):
+                return True             # freshly armed, or provably still running
+        return False
+
+    def _task_output_exited(self, rec):
+        """True if any tracked task output (rec["jobs"] -- Bash
+        run_in_background jobs, Task 2's job_snapshot()) now carries an exit
+        marker.
+
+        DEFECT this closes: the plan's own priority-1 text for _job_state
+        says landing is "a snapshot entry grew and stopped, OR a
+        tasks/*.output gained its exit marker" -- but _job_state's log-growth
+        loop only ever looks at rec["logs"] (detached `setsid nohup` jobs).
+        rec["jobs"] was only ever consulted as a bare presence flag. A job
+        represented purely via rec["jobs"] could therefore never be detected
+        as landed. job_snapshot() only records entries WITHOUT an exit marker
+        AT STOP TIME (Task 2), so re-reading here, keyed on the SAME launch
+        id and the same tasks-dir layout the Stop hook itself used
+        (share/hooks/stop_continuation_guard.sh's _scratch_root/tasks_dir),
+        is the only way this class of job is ever seen landing."""
+        tasks = os.path.join(tempfile.gettempdir(), "claude-%d" % os.getuid(),
+                             cwd_slug(self.cwd), rec.get("launch_id") or "",
+                             "tasks")
+        for j in rec.get("jobs") or []:
+            jid = j.get("id") if isinstance(j, dict) else None
+            if not jid:
+                continue
+            try:
+                with open(os.path.join(tasks, jid + ".output"),
+                         errors="replace") as fh:
+                    body = fh.read()
+            except OSError:
+                continue
+            if "[exited with code" in body[-400:]:
+                return True
+        return False
+
+    def _job_state(self, rec):
+        """"growing" | "landed" | "none", from two samples of the same paths.
+
+        Growth between samples is the only evidence available for a detached
+        `setsid nohup` job — the harness records nothing about those. The Stop
+        hook took sample one; this is sample two. No mtime guess is involved,
+        which is what the retired 180-second window got wrong.
+
+        A tracked task-output job (rec["jobs"]) gaining its exit marker is
+        equally unambiguous "landed" evidence, folded into the same `stalled`
+        bucket as a log that grew-then-stopped — so a log still ACTIVELY
+        growing elsewhere still wins ("growing" beats "landed" when both are
+        true at once, same as the original log-only logic): don't interrupt
+        with news about one finished job while another is still producing
+        output."""
+        logs = rec.get("logs") or []
+        jobs = rec.get("jobs") or []
+        grew = stalled = False
+        for entry in logs:
+            try:
+                now = os.path.getsize(entry["path"])
+            except (OSError, KeyError, TypeError):
+                continue
+            if now > entry.get("size", 0):
+                if self.sup_seen.get(entry["path"], -1) == now:
+                    stalled = True         # grew since the snapshot, now still
+                else:
+                    grew = True
+                self.sup_seen[entry["path"]] = now
+        if jobs and self._task_output_exited(rec):
+            stalled = True
+        if grew:
+            return "growing"
+        if stalled:
+            return "landed"
+        return "growing" if jobs else "none"
+
     def _supervise(self, path, pct):
         """Idle detection and ONE poke. Runs only in NORMAL — the other states
         already own the session. The escalation and the circuit breaker land in
@@ -1513,6 +1628,7 @@ class Watcher:
             self._log("SUPERVISOR: a tool call landed after the poke — "
                       "work resumed, episode reset")
             self.sup_pokes, self.sup_open, self.sup_seen = 0, False, {}
+            self.sup_landed_poked = False
         if not self.cfg.supervisor or self.sup_open:
             return
         idle = time.time() - self.last_growth
@@ -1521,6 +1637,47 @@ class Watcher:
         rec = self._parked(path)
         if rec is None:
             return                      # no snapshot: claim nothing
+        # FOUND WHILE IMPLEMENTING (interaction with Task 6's ladder, flagged
+        # for explicit review in the brief). The plan's own snippet special-
+        # cased "landed" with an UNCONDITIONAL return -- whether or not it
+        # actually poked -- which makes the whole escalate -> circuit-open ->
+        # stand-down ladder built in Task 6 UNREACHABLE for a landed job. That
+        # is not "probably fine, a restart wouldn't help" (the plan's own
+        # speculation): it silently breaks Task 6's own termination guarantee
+        # ("a wedged session costs one poke, one restart, then silence") for
+        # precisely the state most likely to mean a human is waiting on an
+        # unread answer -- worse, a job that landed AFTER an earlier, less
+        # specific poke had already spent sup_pokes got NO poke at all, ever
+        # (the inner `if sup_pokes == 0` guard skipped it, but the outer
+        # `return` still fired unconditionally).
+        #
+        # DECIDED: "landed" no longer owns a separate control-flow branch.
+        # It only overrides the watch-armed suppression (case 1's own
+        # "fires regardless of an armed watcher" -- "growing" still respects
+        # it); once past that, it falls into the SAME poke/escalate/circuit
+        # ladder as every other idle episode. sup_landed_poked (reset
+        # whenever the state is next seen "growing", and on the work-resumed
+        # reset above) guarantees a FRESH, specifically-worded poke for this
+        # landing even when sup_pokes/sup_acted_at are stale from an earlier,
+        # less specific poke or from a long watch-armed wait during which
+        # sup_acted_at was never touched at all (that branch returns before
+        # _supervisor_poke is ever called) -- so the ladder always re-enters
+        # at the POKE rung for a fresh landing, never skips straight to
+        # escalation or give-up off a stale/zero timer.
+        state = self._job_state(rec)
+        if state == "growing":
+            self.sup_landed_poked = False
+            if self._watch_armed():
+                return               # declared serial: silent until it ends
+        elif state == "landed" and not self.sup_landed_poked:
+            self._log("SUPERVISOR: a job landed — poking with the path")
+            self._supervisor_poke(idle / 60.0, self._sup_detail(rec))
+            self.sup_landed_poked = True
+            # _supervisor_poke() bumps sup_pokes by whatever it already was;
+            # pin it to 1 so THIS poke -- not a stale earlier one -- is what
+            # the ladder below measures its escalate timer against.
+            self.sup_pokes = 1
+            return
         if self.sup_pokes == 0:
             self._log("SUPERVISOR: idle %.0f min at %.1f%% — poking once"
                       % (idle / 60.0, pct))
@@ -1564,14 +1721,21 @@ class Watcher:
 
     def _sup_detail(self, rec):
         """One clause of fact, or nothing. Facts shape the WORDING; they never
-        decide whether to poke."""
+        decide whether to poke.
+
+        Deliberately does not assert current status for a job: rec["jobs"]
+        is a snapshot taken at the last stop, and by the time this fires
+        (after an idle window, possibly after Task 7's own _job_state has
+        since found an exit marker) a claim like "has no exit marker" can
+        already be stale and wrong -- naming the job is the fact; whether it
+        finished is for the model to check."""
         if rec.get("jobs"):
             # rec["jobs"] is [{"id": str, "size": int}, ...] (Task 2's
             # amendment changed this from a list of bare id strings) -- joining
             # the dicts directly raises TypeError the instant a job is present.
             names = [j["id"] for j in rec["jobs"][:3] if isinstance(j, dict) and "id" in j]
             if names:
-                return (" A background job (%s) has no exit marker."
+                return (" A background job (%s) may need a look."
                         % ", ".join(names))
         if rec.get("logs"):
             return " The last thing written was %s." % os.path.basename(
