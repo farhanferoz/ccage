@@ -374,6 +374,40 @@ while time.time() < deadline:
         # An unknown mode already falls through to exactly this behaviour; the
         # branch is explicit so a later catch-all cannot silently break it.
         pass
+    elif mode == "idle_then_confirm":
+        # Idle (like "idle") until the SUPERVISOR's escalation nudge lands --
+        # it carries the same "auto-checkpoint" marker as any other nudge,
+        # since it is armed with kind=SOFT -- then play the model exactly like
+        # "confirm" mode does. Proves the checkpoint/clear/resume rung reaches
+        # a real /clear once genuinely confirmed, rather than being cancelled
+        # by the below-soft branch before the model ever got a chance to act.
+        if not confirmed and b"auto-checkpoint" in buf:
+            append_turn(300000, text=sentinel + " done")
+            with open(os.path.join(os.getcwd(), "RESUME.md"), "a") as f:
+                f.write("checkpoint\n")
+            confirmed = True
+        if b"Resume the task" in buf:
+            break
+    elif mode == "idle_then_work":
+        # Idle until the circuit has ACTUALLY opened (read from the watcher's
+        # own log -- not a fixed sleep, to avoid a race), then grow the
+        # transcript with a REAL tool_use block. A bare append_turn() would not
+        # do: _worked_since inspects content blocks structurally for
+        # {"type": "tool_use"}, which append_turn() never emits. Proves the
+        # supervisor's episode-reset fires on genuine work and a fresh poke
+        # follows, even after the circuit opened.
+        logpath = os.path.join(os.path.dirname(os.path.dirname(sdir)), "ccage-autock.log")
+        if not confirmed and os.path.exists(logpath) and "circuit open" in open(logpath).read():
+            obj = {"type": "assistant", "message": {
+                "model": "claude-opus-4-8",
+                "usage": {"input_tokens": 100, "cache_read_input_tokens": 100,
+                          "cache_creation_input_tokens": 0},
+                "content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                            "input": {"command": "echo hi"}}]},
+                "timestamp": "2099-01-01T00:00:00Z"}
+            with open(jsonl, "a") as f:
+                f.write(json.dumps(obj) + "\n")
+            confirmed = True
 sys.exit(0)
 PY
 }
@@ -1786,4 +1820,62 @@ PLAN
     unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE
     [ "$status" -eq 0 ]
     ! cap_has "b'[supervisor]'"
+}
+
+@test "supervisor: ladder escalates once, and opens the circuit rather than nag when nothing confirms" {
+    # The discriminating test for the below-soft trap: occupancy stays under
+    # soft for the ENTIRE run (a supervisor-driven cycle never has it any
+    # other way), so if the escalation's nudge cycle were cancelled by the
+    # ordinary below-soft branch, "cancelling nudge cycle" would appear in the
+    # log and the circuit would open having typed the checkpoint request but
+    # given the model no real chance to act on it.
+    write_parked_record sess '{"jobs":[{"id":"job-x","size":5}],"logs":[]}'
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=10 \
+        CCAGE_AUTOCK_SUPERVISOR_IDLE=2 CCAGE_AUTOCK_SUPERVISOR_ESCALATE=2
+    drive idle "--soft 40 --poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE CCAGE_AUTOCK_SUPERVISOR_ESCALATE
+    [ "$status" -eq 0 ]
+    cap_has "b'[supervisor]'"                                    # rung 1: the poke
+    cap_has "b'job-x'"                                           # _sup_detail named the job (schema fix)
+    cap_has "b'auto-checkpoint'"                                 # rung 2: the escalation nudge
+    grep -q "still idle after the poke" "$CAGE/ccage-autock.log"
+    grep -q "no confirmation or activity after the escalation" "$CAGE/ccage-autock.log"
+    grep -q "circuit open" "$CAGE/ccage-autock.log"
+    ! grep -q "cancelling nudge cycle" "$CAGE/ccage-autock.log"  # never the below-soft trap
+    ! cap_has "b'/clear'"                                        # never confirmed, so never cleared
+    # armed exactly once -- not re-typed while NUDGED
+    python3 -c "import sys; sys.exit(0 if open('$CAP','rb').read().count(b'auto-checkpoint') == 1 else 1)"
+}
+
+@test "supervisor: the escalation reaches a real /clear when the model does confirm" {
+    # The success path for the same fix: confirming (echoing the sentinel,
+    # touching RESUME.md) after the escalation nudge must still clear, proving
+    # sup_driving suppresses ONLY the below-soft cancellation and leaves
+    # _confirmed() and _do_clear() untouched.
+    write_parked_record sess '{"jobs":[],"logs":[]}'
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=10 \
+        CCAGE_AUTOCK_SUPERVISOR_IDLE=2 CCAGE_AUTOCK_SUPERVISOR_ESCALATE=2
+    drive idle_then_confirm "--soft 40 --poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE CCAGE_AUTOCK_SUPERVISOR_ESCALATE
+    [ "$status" -eq 0 ]
+    cap_has "b'[supervisor]'"
+    cap_has "b'auto-checkpoint'"
+    cap_has "b'/clear'"
+    cap_has "b'Resume the task from RESUME.md'"
+    grep -q "checkpoint confirmed" "$CAGE/ccage-autock.log"
+    ! grep -q "cancelling nudge cycle" "$CAGE/ccage-autock.log"
+    ! grep -q "circuit open" "$CAGE/ccage-autock.log"
+}
+
+@test "supervisor: the circuit stays open until the transcript grows with real work, then pokes again" {
+    write_parked_record sess '{"jobs":[],"logs":[]}'
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=15 \
+        CCAGE_AUTOCK_SUPERVISOR_IDLE=2 CCAGE_AUTOCK_SUPERVISOR_ESCALATE=2
+    drive idle_then_work "--soft 40 --poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE CCAGE_AUTOCK_SUPERVISOR_ESCALATE
+    [ "$status" -eq 0 ]
+    grep -q "circuit open" "$CAGE/ccage-autock.log"
+    grep -q "work resumed, episode reset" "$CAGE/ccage-autock.log"
+    # poked at least twice: once before the circuit opened, once after reset
+    python3 -c "import sys; sys.exit(0 if open('$CAP','rb').read().count(b'[supervisor]') >= 2 else 1)"
 }

@@ -1079,6 +1079,11 @@ class Watcher:
         self.sup_open = False     # circuit open: stay quiet until real work
         self.sup_acted_at = 0.0   # when the supervisor last typed
         self.sup_seen = {}        # path -> size at the previous poll (Task 7)
+        self.sup_driving = False  # True while NUDGED is the supervisor's own
+                                   # escalation cycle (Task 6) -- see run()'s
+                                   # NUDGED branch, which must not cancel it on
+                                   # the below-soft check the way an ordinary
+                                   # nudge cycle is cancelled.
         self.cooldown_until = 0.0
         self.last_path = None     # transcript path of the last occupancy reading
         self.last_sz = -1         # size of that transcript at the last reading
@@ -1519,7 +1524,72 @@ class Watcher:
         if self.sup_pokes == 0:
             self._log("SUPERVISOR: idle %.0f min at %.1f%% — poking once"
                       % (idle / 60.0, pct))
-            self._supervisor_poke(idle / 60.0, "")
+            self._supervisor_poke(idle / 60.0, self._sup_detail(rec))
+            return
+        # Poked, and still nothing. Convert the session rather than nag it:
+        # MEASURED 2026-08-15, 12 auto-clears in one project and work resumed
+        # immediately after every one. Resumption is reliable; late-session
+        # idling is the failure.
+        if time.time() - self.sup_acted_at < self.cfg.sup_escalate:
+            return
+        if self.sup_pokes == 1:
+            self._log("SUPERVISOR: still idle after the poke — "
+                      "checkpoint/clear/resume")
+            # A fresh NUDGED cycle. The ONLY other place that arms one (the
+            # NORMAL branch's soft-crossing check, in run()) resets these
+            # three alongside the nudge, and this path must match it: a
+            # PRIOR regular nudge cycle earlier in the same session can leave
+            # stall_fired stale True, which would silently swallow the
+            # watchdog's one legitimate re-nudge for THIS cycle.
+            self.stall_fired = False
+            self.stall_log_at = 0.0
+            self._arm_nudge(path, pct)     # ask for the checkpoint
+            self.sup_pokes = 2
+            self.sup_acted_at = time.time()
+            # Marks the cycle we are about to hand to the NUDGED state as OURS
+            # -- see the NUDGED branch in run(). Cleared there, either on
+            # confirmation or on give-up; never left dangling.
+            self.sup_driving = True
+            self.state = self.NUDGED       # the existing machine owns the clear
+            return
+        # Reached only by RE-ENTRY into NORMAL with sup_pokes still at 2: either
+        # the NUDGED branch's give-up path handed back a session that never
+        # confirmed and never worked, or the "worked_since" reset above would
+        # already have zeroed sup_pokes if real work had actually resumed. Both
+        # cases are exactly "one poke, one escalation attempt, nothing worked".
+        self.sup_open = True
+        self._log("SUPERVISOR: circuit open — no further action until the "
+                  "transcript grows")
+        self._record_standdown()
+
+    def _sup_detail(self, rec):
+        """One clause of fact, or nothing. Facts shape the WORDING; they never
+        decide whether to poke."""
+        if rec.get("jobs"):
+            # rec["jobs"] is [{"id": str, "size": int}, ...] (Task 2's
+            # amendment changed this from a list of bare id strings) -- joining
+            # the dicts directly raises TypeError the instant a job is present.
+            names = [j["id"] for j in rec["jobs"][:3] if isinstance(j, dict) and "id" in j]
+            if names:
+                return (" A background job (%s) has no exit marker."
+                        % ", ".join(names))
+        if rec.get("logs"):
+            return " The last thing written was %s." % os.path.basename(
+                rec["logs"][-1]["path"])
+        return ""
+
+    def _record_standdown(self):
+        """Leave a line where the user reads it, not only in the watcher log.
+        RESUME naming is slot-aware — `slot_suffix()` is this file's existing
+        helper (`:511`, used at `:689`); there is no resume_name() here."""
+        try:
+            path = os.path.join(self.cwd, "RESUME%s.md" % slot_suffix())
+            with open(path, "a") as fh:
+                fh.write("\n<!-- supervisor: stood down after one poke and one "
+                         "resume attempt with no work produced; nothing further "
+                         "will be attempted for this session -->\n")
+        except OSError:
+            pass
 
     def run(self):
         cfg = self.cfg
@@ -1644,11 +1714,41 @@ class Watcher:
                     self._do_clear()
                     self.cooldown_until = time.time() + cfg.cooldown
                     self.state = self.COOLDOWN
-                elif pct < cfg.soft:
+                    self.sup_driving = False   # cycle finished; nothing dangling
+                elif (self.sup_driving
+                      and time.time() - self.sup_acted_at >= cfg.sup_escalate
+                      and not self._worked_since(path, self.sup_acted_at)):
+                    # This NUDGED cycle is the SUPERVISOR's own escalation
+                    # (Task 6, rung 2), not an ordinary soft-threshold nudge.
+                    # Occupancy is below soft for its ENTIRE duration -- that is
+                    # the precondition that let _supervise arm it in the first
+                    # place -- so the plain `pct < cfg.soft` branch below would
+                    # fire on the very next poll and cancel the cycle before the
+                    # model could ever act on it. MEASURED in an isolated clone
+                    # with the brief's original code: nudge typed at 14:40:57,
+                    # cancelled ("cancelling nudge cycle; back to NORMAL") at
+                    # 14:40:58, and the circuit opened at 14:40:59 -- one poke
+                    # spent, zero chance given, no /clear ever typed.
+                    #
+                    # Give the escalation cfg.sup_escalate seconds. If nothing
+                    # was confirmed AND no tool call landed (_worked_since --
+                    # the same fact _supervise's own episode-reset uses, so a
+                    # model that quietly resumed real work without printing the
+                    # sentinel is never mistaken for a still-idle session), hand
+                    # back to NORMAL without touching sup_pokes/sup_open, so
+                    # _supervise's own fallthrough (the bottom of that method)
+                    # is the ONE place that decides to open the circuit.
+                    self._log("SUPERVISOR: no confirmation or activity after "
+                              "the escalation — handing back to close the loop")
+                    self.sup_driving = False
+                    self.state = self.NORMAL
+                elif not self.sup_driving and pct < cfg.soft:
                     # Occupancy fell below soft (manual /clear, a stale arm, a
                     # threshold raise) with nothing checkpointed: the nudge is
                     # moot. Never re-nudge or escalate below the live
-                    # threshold — stand down instead.
+                    # threshold — stand down instead. Guarded off for a
+                    # supervisor-driven cycle (see above): pct is ALWAYS below
+                    # soft there, so this branch is not "moot", it is fatal.
                     self._log("occupancy %.1f%% < soft %.0f%% — cancelling "
                               "nudge cycle; back to NORMAL" % (pct, cfg.soft))
                     self.state = self.NORMAL
