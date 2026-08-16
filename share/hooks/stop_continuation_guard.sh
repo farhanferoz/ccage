@@ -404,9 +404,20 @@ def launch_session_id():
     return os.environ.get("CLAUDE_CODE_SESSION_ID") or session_id
 
 
-def _scratch_root():
+# THE TWO SCRATCH DIRS ARE KEYED DIFFERENTLY, AND ASSUMING OTHERWISE IS THE
+# SAME BUG AGAIN (measured 2026-08-16, on the session this whole design came
+# from). Under /tmp/claude-<uid>/<slug>/:
+#   <LAUNCH id>/tasks/       harness background jobs   -- process-lifetime key
+#   <CURRENT id>/scratchpad/ the session's own files   -- rotates on /clear
+# On the 2026-08-15 session: tasks/ existed ONLY under 425d989b (the launch
+# id), while the scratchpad holding flow_entry_rule_v2.log -- the detached run
+# that landed at 23:48 with nobody to read it -- was under ad2baf5d (the
+# current id). 425d989b's own scratchpad held only files from its own working
+# period, hours stale. Reading the launch scratchpad therefore misses exactly
+# the log this feature exists to notice, and misses it SILENTLY.
+def _scratch_root(sid):
     return os.path.join(tempfile.gettempdir(), "claude-%d" % os.getuid(),
-                        slug, launch_session_id())
+                        slug, sid)
 
 
 # An orphan from a long-dead run must not resurrect: the exit marker decides
@@ -429,7 +440,7 @@ def live_background_jobs():
     <scratchpad>/tasks/<id>.output and appends a literal `[exited with code N]`
     when it finishes. Fail-open: no tasks dir, or an unreadable one, returns []
     -- an unmeasurable condition must never manufacture a block."""
-    tasks = os.path.join(_scratch_root(), "tasks")
+    tasks = os.path.join(_scratch_root(launch_session_id()), "tasks")
     live, now = [], time.time()
     try:
         names = os.listdir(tasks)
@@ -463,7 +474,7 @@ def detached_logs():
     two samples need two moments: this hook takes one, ccage-auto compares.
     Fail-open: an unreadable scratchpad returns [] and nothing is claimed."""
     out = []
-    sp = os.path.join(_scratch_root(), "scratchpad")
+    sp = os.path.join(_scratch_root(session_id), "scratchpad")
     try:
         names = sorted(os.listdir(sp))[:MAX_SNAPSHOT]
     except OSError:
