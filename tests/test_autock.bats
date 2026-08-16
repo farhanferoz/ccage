@@ -367,6 +367,13 @@ while time.time() < deadline:
         if confirmed and os.path.exists(logpath) and "cancelling nudge cycle" in open(logpath).read():
             time.sleep(0.3)
             break
+    elif mode == "idle":
+        # Capture only. The opening turn above is the only write this mode ever
+        # makes, so last_growth stops advancing -- which IS the supervisor's
+        # idle signal. Every other mode keeps writing turns and can never idle.
+        # An unknown mode already falls through to exactly this behaviour; the
+        # branch is explicit so a later catch-all cannot silently break it.
+        pass
 sys.exit(0)
 PY
 }
@@ -1748,4 +1755,35 @@ PLAN
 @test "stop-guard: stop_hook_active still writes the parked record" {
     stopg "{\"session_id\":\"sess-shb\",\"stop_hook_active\":true,\"cwd\":\"$REPO\",\"last_assistant_message\":\"Summarised.\"}"
     [ -f "$CAGE/stop_guard_state/sess-shb.parked" ]
+}
+
+@test "supervisor: does not poke before the idle window elapses" {
+    write_parked_record sess '{"jobs":[],"logs":[]}'
+    # FAKE_TOKENS well under the default soft line: the supervisor only acts in
+    # NORMAL, so occupancy must never cross soft during the run.
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=2 CCAGE_AUTOCK_SUPERVISOR_IDLE=5
+    drive idle "--poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE
+    [ "$status" -eq 0 ]
+    ! cap_has "b'[supervisor]'"
+}
+
+@test "supervisor: pokes exactly once after the idle window, and never again" {
+    write_parked_record sess '{"jobs":[],"logs":[]}'
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=6 CCAGE_AUTOCK_SUPERVISOR_IDLE=2
+    drive idle "--poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE
+    [ "$status" -eq 0 ]
+    cap_has "b'[supervisor]'"
+    grep -q "poking once" "$CAGE/ccage-autock.log"
+    # Typed once, not once per poll after the idle line is crossed.
+    python3 -c "import sys; sys.exit(0 if open('$CAP','rb').read().count(b'[supervisor]') == 1 else 1)"
+}
+
+@test "supervisor: never fires without a parked record (fail-open)" {
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=6 CCAGE_AUTOCK_SUPERVISOR_IDLE=2
+    drive idle "--poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE
+    [ "$status" -eq 0 ]
+    ! cap_has "b'[supervisor]'"
 }

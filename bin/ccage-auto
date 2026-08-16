@@ -109,6 +109,7 @@
 # The one case the data can't disambiguate — a 200K vs 1M variant of the SAME
 # family — is yours to pin via --window-map / CCAGE_AUTOCK_WINDOWS (or --window).
 
+import datetime
 import errno
 import fcntl
 import glob
@@ -218,6 +219,19 @@ RATE_LIMITS_STATE = "rate-limits-state.json"
 WEEKLY_WARN_MARGIN = 5.0        # warn stage fires at floor + this (remaining %)
 WEEKLY_STALE_S = 30 * 60.0      # sensor readings older than this are unknown
 
+# ---------------------------------------------------------------- supervisor
+# An idle session with work left is unrecoverable today: the Stop hook is the
+# only intervention point, it fires once at the instant of stopping, and after
+# that nothing in the system ever asks again. MEASURED 2026-08-15: a session
+# stopped at 23:33 with a detached run still going; the run finished at 23:48
+# and the session sat at the prompt for eleven hours.
+#
+# The supervisor never infers "the work is finished" -- that is a statement of
+# intent and every attempt to read it off disk has been wrong. It asks once, and
+# accepts a COMMAND as the answer, because a marker file is a fact.
+SUPERVISOR_IDLE = 300.0      # transcript quiet this long -> one poke
+SUPERVISOR_ESCALATE = 300.0  # still quiet this long after the poke -> clear
+
 
 def _truthy(v, default):
     if v is None:
@@ -324,6 +338,15 @@ class Config:
         self.cooldown = _num(os.environ.get("CCAGE_AUTOCK_COOLDOWN"), COOLDOWN)
         # Silent-stall watchdog window (seconds; 0 disables). See STALL_IDLE.
         self.stall_idle = _num(os.environ.get("CCAGE_AUTOCK_STALL_IDLE"), STALL_IDLE)
+        # Supervisor: pokes an idle NORMAL-state session once. See SUPERVISOR_IDLE.
+        # Named CCAGE_AUTOCK_* like every other tunable here, which also means
+        # the bats setup() prefix-unset keeps the suite hermetic against a
+        # developer running it from inside a live autonomous session.
+        self.supervisor = _truthy(os.environ.get("CCAGE_AUTOCK_SUPERVISOR"), True)
+        self.sup_idle = _num(os.environ.get("CCAGE_AUTOCK_SUPERVISOR_IDLE"),
+                             SUPERVISOR_IDLE)
+        self.sup_escalate = _num(os.environ.get("CCAGE_AUTOCK_SUPERVISOR_ESCALATE"),
+                                 SUPERVISOR_ESCALATE)
         # Override the silent-stall nudge text; {pct}, {idle} (minutes) and
         # {sentinel} are substituted.
         self.stall_nudge = os.environ.get("CCAGE_AUTOCK_STALL_NUDGE")
@@ -1052,6 +1075,10 @@ class Watcher:
         self.last_growth = time.time()  # last time the active transcript grew
         self.stall_fired = False  # silent-stall watchdog re-nudge done this cycle
         self.stall_log_at = 0.0   # rate-limits the "stall persists" log line
+        self.sup_pokes = 0        # pokes spent in the current idle episode
+        self.sup_open = False     # circuit open: stay quiet until real work
+        self.sup_acted_at = 0.0   # when the supervisor last typed
+        self.sup_seen = {}        # path -> size at the previous poll (Task 7)
         self.cooldown_until = 0.0
         self.last_path = None     # transcript path of the last occupancy reading
         self.last_sz = -1         # size of that transcript at the last reading
@@ -1381,6 +1408,119 @@ class Watcher:
             return True
         return False
 
+    def _config_dir(self):
+        """self.sdir is <config>/projects/<slug>; the config root is two up.
+        This file has no config_dir() function — session_dir() TAKES one."""
+        return os.path.dirname(os.path.dirname(self.sdir))
+
+    def _parked(self, path):
+        """This session's parked record, or None. `path` is the live transcript;
+        its stem is the session id the Stop hook keyed on.
+
+        A /clear rotates to a new transcript with a new session id, so the new
+        session has no record until it stops once — but idling always FOLLOWS a
+        stop, and the stop is what writes the record, so it is always present by
+        the time it is needed. Fail-open regardless: unreadable returns None."""
+        sid = os.path.splitext(os.path.basename(path))[0]
+        rec = os.path.join(self._config_dir(), "stop_guard_state",
+                           sid + ".parked")
+        try:
+            with open(rec) as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return None
+
+    def _worked_since(self, path, when):
+        """True if a real tool call appears in the transcript after `when`.
+
+        NOT "the transcript grew" — the supervisor's own poke grows it, so that
+        test resets the budget on the supervisor's own action and pokes forever.
+        NOT "an assistant turn appeared" — answering is not working; a session
+        that replies "still waiting" and stops would earn a fresh poke every
+        window. A tool call is the cheapest fact that means work resumed.
+
+        The content blocks are inspected STRUCTURALLY, not by substring. Review
+        found the substring form spoofable: Claude Code logs
+        `"stop_reason":"tool_use"` on the text-only row too, and any session that
+        merely WRITES the token `"tool_use"` in prose — e.g. one discussing this
+        very file — would reset its own episode. That is the same
+        speaking-is-not-working trap through a narrower door.
+
+        Tail-read only; these files get large."""
+        try:
+            size = os.path.getsize(path)
+            with open(path, "rb") as fh:
+                fh.seek(max(0, size - 200_000))
+                blob = fh.read().decode("utf-8", "replace")
+        except OSError:
+            return False
+        for line in blob.splitlines():
+            if '"tool_use"' not in line:        # cheap prefilter only
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            content = (row.get("message") or {}).get("content")
+            if not isinstance(content, list):
+                continue
+            if not any(isinstance(c, dict) and c.get("type") == "tool_use"
+                       for c in content):
+                continue                        # prose mentioning it is not it
+            stamp = str(row.get("timestamp") or "")
+            try:
+                ts = datetime.datetime.fromisoformat(
+                    stamp.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                continue
+            if ts > when:
+                return True
+        return False
+
+    def _supervisor_poke(self, idle_min, detail):
+        """One message, three exits. It states an observation and asks; it never
+        asserts WHY it fired. MEASURED 2026-08-16: a guard that asserted its
+        reason matched a quoted counter-example and told the reader it had
+        claimed completion, which teaches that its reasons are noise."""
+        msg = (
+            "[supervisor] This session has been idle for %.0f minutes.%s "
+            "Whichever is true: continue with the work now; or, if there is "
+            "genuinely nothing left, run `/checkpoint --final`; or, if you are "
+            "waiting on something, arm a watcher for it with `ccage-watch arm "
+            "--cond '<command, exit 0 = done>' --note '<what this bridges>'` "
+            "and I will not ask again until it finishes."
+            % (idle_min, detail)
+        )
+        self._type(msg)
+        self.sup_pokes += 1
+        self.sup_acted_at = time.time()
+
+    def _supervise(self, path, pct):
+        """Idle detection and ONE poke. Runs only in NORMAL — the other states
+        already own the session. The escalation and the circuit breaker land in
+        the next commit; this one deliberately stops after the poke.
+
+        The episode budget is reset by EVIDENCE OF WORK and never by the
+        supervisor's own actions. That asymmetry is the entire termination
+        argument: a wedged session costs a bounded number of interventions."""
+        if (self.sup_pokes or self.sup_open) and self.sup_acted_at \
+                and self._worked_since(path, self.sup_acted_at):
+            self._log("SUPERVISOR: a tool call landed after the poke — "
+                      "work resumed, episode reset")
+            self.sup_pokes, self.sup_open, self.sup_seen = 0, False, {}
+        if not self.cfg.supervisor or self.sup_open:
+            return
+        idle = time.time() - self.last_growth
+        if idle < self.cfg.sup_idle:
+            return
+        rec = self._parked(path)
+        if rec is None:
+            return                      # no snapshot: claim nothing
+        if self.sup_pokes == 0:
+            self._log("SUPERVISOR: idle %.0f min at %.1f%% — poking once"
+                      % (idle / 60.0, pct))
+            self._supervisor_poke(idle / 60.0, "")
+
     def run(self):
         cfg = self.cfg
         self._log("watcher start: soft=%.0f%% hard=%.0f%% poll=%.0fs%s"
@@ -1482,6 +1622,8 @@ class Watcher:
                     self.stall_log_at = 0.0
                     self._arm_nudge(path, pct)
                     self.state = self.NUDGED
+                    continue
+                self._supervise(path, pct)
                 continue
 
             if self.state == self.NUDGED:

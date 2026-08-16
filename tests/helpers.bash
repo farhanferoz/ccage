@@ -28,3 +28,18 @@ load_ccage() {
     source "$BATS_TEST_DIRNAME/../share/claude-isolation.sh"
 }
 
+
+# Write a stop-guard "parked" record so Watcher._parked() finds a snapshot for a
+# session id. $1 = session id (the transcript basename stem — the ccage-auto
+# live-fire fixture always writes $SDIR/sess.jsonl, so pass "sess"); $2 = extra
+# JSON fields merged over the base record. Relies on $CAGE from setup().
+write_parked_record() {
+    mkdir -p "$CAGE/stop_guard_state"
+    python3 - "$CAGE/stop_guard_state/$1.parked" "${2:-{\}}" <<'PY'
+import json, sys, time
+rec = {"stamp": time.time(), "session_id": "s", "launch_id": "s",
+       "project": "/p", "jobs": [], "logs": []}
+rec.update(json.loads(sys.argv[2]))
+json.dump(rec, open(sys.argv[1], "w"))
+PY
+}
