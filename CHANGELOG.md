@@ -2,6 +2,33 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.16.0] — 2026-08-16
+
+### Added — a bounded supervisor for the other way a session stalls
+- **The occupancy ladder manages a session that grows too big; nothing managed one that simply stopped.** Measured: a session stopped at 23:33 with a detached job still running, the job finished at 23:48, and the session sat at the prompt for eleven hours. The Stop hook is the only intervention point in that story and it fires once, at the instant of stopping — after which nothing in the system ever asks again, and `ccage-auto` was watching only context occupancy. The two halves each held a piece of the answer: the hook knows everything at the moment a turn ends but can act only once; the watcher can act at any time but knew only how full the window was.
+- **They are now wired together.** The Stop hook writes a *parked record* — a snapshot of running jobs and scratchpad logs, taken as facts on disk — at **every** stop, whether it allows or blocks. `ccage-auto` runs a bounded ladder off it: one question, then one checkpoint→clear→resume, then the circuit opens and stays open until the session does real work again. "Real work" means a tool call, not a reply, so a session that answers *"still waiting"* and stops does not earn a fresh round — that distinction is the whole termination argument, and without it the design is a nag loop.
+- **It never infers that the work is finished.** It states an observation, asks, and accepts a *command* as the answer: carry on, `/checkpoint --final` if there is genuinely nothing left, or `ccage-watch arm` if the wait is legitimately serial. A marker file is a fact; a phrase is not. The poke also never asserts *why* it fired — an earlier guard that did assert its reason matched a quoted counter-example and told the reader it had claimed completion, which teaches that a guard's reasons are noise.
+- **Job-aware, in both directions.** A job still growing with a watcher armed for it is a declared serial wait, and the supervisor stays quiet. A job that has **landed unread** gets the highest-precision question there is, naming the file — because reading the result is the entire point, and that is the state most likely to mean somebody is waiting on an answer nobody read.
+- Knobs: `CCAGE_AUTOCK_SUPERVISOR` (default on), `CCAGE_AUTOCK_SUPERVISOR_IDLE` (300 s), `CCAGE_AUTOCK_SUPERVISOR_ESCALATE` (300 s).
+
+### Added — the watcher can write the stand-down marker itself, on facts alone
+- **A hands-off run should not be hostage to the model remembering to run `/checkpoint --final`.** The watcher now writes `.ccage-session-done` when a checkpoint is genuinely confirmed on disk, nothing is running, and the supervisor's own escalation is what produced it.
+- **It will not write one for silence.** A session that went quiet and never answered gets no marker — that would change its meaning from *"the model confirmed nothing is left"* to *"nobody replied"*, and the marker silences the watcher entirely. The asymmetry is deliberate and load-bearing throughout this release: anything the model writes may wake the supervisor, and only a fact on disk may send it to sleep.
+
+### Fixed — the Stop hook was blind to most of the jobs it was meant to see
+- **Background jobs were read from the wrong directory for an entire run.** The scratch dirs are keyed on the session id the *process launched with*, which `/clear` never changes, while the hook used the transcript's current `session_id`. Measured: a session wrote every background job under one id while the hook looked under another, and reported "no jobs" for fourteen hours.
+- **A quiet job was called finished.** A 180-second freshness window treated three minutes of silence as completion; the harness appends an explicit exit marker when a job really ends, so the marker is the signal and mtime is noise.
+- **A detached `setsid nohup … > log` job created no tracked output at all** — this project's normal pattern for a long run — so the hook recorded nothing about it. Those logs are now snapshotted with their sizes, and liveness is decided by growth between two samples rather than by a guess.
+- **A phantom job could block a stop.** The tasks directory accumulates output files for calls that are not background jobs; two sat at zero bytes with no exit marker, and the guard duly announced "1 background job still running" with nothing running. An empty output is no longer evidence of a job.
+
+### Fixed — the guard demanded a declaration that was already written in front of it
+- An unticked plan item whose own line says it is blocked on or parked by the user is **not open work**. All three items the guard reported against a real register carried exactly that, and the refusal asked for a deferral to be declared out loud in the very file where it already was. The marker must be at the head of the item, and matching is anchored there — a bare mention of "deferred" or "parked" inside an item's text does not suppress it, because suppressing real work is the wrong failure direction.
+- **`stop_hook_active` is honoured.** This file previously asserted the field did not exist, verified against the reference on 2026-08-10; it is present in the installed build and documented as the platform's anti-loop flag. One block per continuation chain is the right ceiling now that the supervisor owns persistent follow-up: the hook nudges at the doorway, it does not run a loop.
+
+### Fixed — the watcher's own keystrokes were being read as the user being present
+- `ccage-auto` injects by writing to the pty, which is indistinguishable from a human typing: the transcript stamps those turns `origin: human, promptSource: typed` (confirmed against a real transcript). So for fifteen minutes after every clear the Stop guard believed someone was at the keyboard, halved its budget and switched a trigger off entirely. Injections now leave a mark the guard subtracts.
+- The mark is **slot-scoped on both sides**. `CCAGE_SLOT` lets several sessions run against one project, and an unscoped marker would be shared between them — one slot's injection masking another slot's genuine typing, switching attended detection off for a session where the user really is present.
+
 ## [0.15.2] — 2026-08-14
 
 ### Fixed — the stop guard read the wrong project's state, two ways
