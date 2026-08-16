@@ -1686,3 +1686,15 @@ PY
     [ "$status" -eq 0 ]
     [[ "$output" == *"ok"* ]]
 }
+
+@test "stop-guard: MODE=off still records the facts, it only silences the verdict" {
+    # Raised in review: `off` used to skip write_parked(), so anyone quieting
+    # the refusals silently lost the supervisor that depends on the record.
+    bgjob offrec job-o 'running'
+    run bash -c "echo '{\"session_id\":\"offrec\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Summarised.\"}' \
+        | CLAUDE_CONFIG_DIR='$CAGE' CCAGE_AUTONOMOUS=1 CLAUDE_CODE_SESSION_ID=offrec \
+          CCLAUDE_STOPGUARD_MODE=off PATH='$(fakewatch):$PATH' bash '$STOPG'"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"background job"* ]]          # verdict silenced
+    [ -f "$CAGE/stop_guard_state/offrec.parked" ]  # facts still recorded
+}

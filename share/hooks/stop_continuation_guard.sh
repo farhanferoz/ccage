@@ -83,8 +83,12 @@ def allow():
     sys.exit(0)
 
 
-if MODE == "off":
-    allow()
+# MODE=off is NOT checked here any more (2026-08-16). It is the kill switch for
+# this hook's REFUSALS, and it used to skip the parked record too — so anyone
+# who silenced the refusals also, silently, lost the supervisor that depends on
+# that record. Observation is free and has no user-visible effect; only the
+# verdict is worth switching off. The check now sits just after write_parked().
+# Raised by review as "is this a conscious call?" — it is now.
 
 # ATTENDED SESSIONS ARE NO LONGER EXEMPT (2026-08-11). This used to return here
 # unless CCAGE_AUTONOMOUS was set, on the reasoning that "an attended session must
@@ -172,18 +176,30 @@ def write_count(n):
         pass
 
 
-def job_snapshot():
-    """[{id, size}] for every task output that has NOT recorded an exit.
+def _unfinished_task_outputs():
+    """Yield (id, body) for every task output that has NOT recorded an exit.
 
-    No liveness verdict here — that needs two samples and only the watcher can
-    take the second. Compare with live_background_jobs(), which DOES judge, for
-    the hook's own immediate trigger, and therefore carries the non-empty rule."""
+    ONE definition of "an unfinished job", because there are two consumers and
+    they must not drift. They differ only in what they do with the result:
+    job_snapshot() records sizes and passes no verdict; live_background_jobs()
+    additionally requires a non-empty body before calling a job live.
+
+    Two near-identical copies is precisely the shape this file has already paid
+    for once — a fifth copy of the slug rule, spelled differently, turned 28
+    macOS tests red in 0.15.0. Sorted so the MAX_SNAPSHOT cap truncates
+    predictably rather than in filesystem order.
+
+    The harness appends `[exited with code N]` when a job really ends: that
+    marker is the signal, and mtime is not. A 180s freshness window called a
+    quiet-but-running job finished, which is how a live sweep read as "nothing
+    running" on 2026-08-15. STALE_JOB_S only stops an ancient unmarked file
+    counting forever."""
     tasks = os.path.join(_scratch_root(launch_session_id()), "tasks")
-    out, now = [], time.time()
+    now = time.time()
     try:
-        names = os.listdir(tasks)
+        names = sorted(os.listdir(tasks))
     except OSError:
-        return []
+        return
     for name in names:
         if not name.endswith(".output"):
             continue
@@ -193,12 +209,18 @@ def job_snapshot():
                 continue
             with open(path, errors="replace") as f:
                 body = f.read()
-            if "[exited with code" in body[-400:]:
-                continue
-            out.append({"id": name[:-len(".output")], "size": len(body)})
         except OSError:
             continue
-    return out[:MAX_SNAPSHOT]
+        if "[exited with code" in body[-400:]:
+            continue
+        yield name[:-len(".output")], body
+
+
+def job_snapshot():
+    """[{id, size}] for the watcher. No liveness verdict — that needs two
+    samples and only the watcher can take the second."""
+    return [{"id": i, "size": len(b)}
+            for i, b in _unfinished_task_outputs()][:MAX_SNAPSHOT]
 
 
 def write_parked():
@@ -221,14 +243,20 @@ def write_parked():
         "jobs": job_snapshot(),
         "logs": [{"path": p, "size": s} for p, s in detached_logs()],
     }
+    tmp = os.path.join(state_dir, session_id + ".parked.tmp")
     try:
         os.makedirs(state_dir, exist_ok=True)
-        tmp = os.path.join(state_dir, session_id + ".parked.tmp")
         with open(tmp, "w") as f:
             json.dump(rec, f)
         os.replace(tmp, os.path.join(state_dir, session_id + ".parked"))
     except OSError:
-        pass                    # fail-open: never wedge a stop on state
+        # Fail-open: never wedge a stop on state. Clean up the half-written
+        # temp rather than leaving debris to accumulate across failures —
+        # os.replace is atomic, so the live record is never a partial write.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------- shape B
@@ -499,43 +527,23 @@ def live_background_jobs():
     <scratchpad>/tasks/<id>.output and appends a literal `[exited with code N]`
     when it finishes. Fail-open: no tasks dir, or an unreadable one, returns []
     -- an unmeasurable condition must never manufacture a block."""
-    tasks = os.path.join(_scratch_root(launch_session_id()), "tasks")
-    live, now = [], time.time()
-    try:
-        names = os.listdir(tasks)
-    except OSError:
-        return []
-    for name in names:
-        if not name.endswith(".output"):
-            continue
-        path = os.path.join(tasks, name)
-        try:
-            if now - os.path.getmtime(path) > STALE_JOB_S:
-                continue
-            # The harness appends `[exited with code N]` when a job really
-            # ends. That marker is the signal; mtime is not. A 180s freshness
-            # window called a quiet-but-running job finished, which is how a
-            # live sweep read as "nothing running" on 2026-08-15.
-            with open(path, errors="replace") as f:
-                body = f.read()
-            if "[exited with code" in body[-400:]:
-                continue
-            # MEASURED 2026-08-16, live in the controller's own session: the
-            # tasks dir accumulates <id>.output files for calls that are not
-            # background jobs, and two sat at 0 bytes with no exit marker while
-            # the guard announced "1 background job still running" with nothing
-            # running. A file never written to is not evidence of a job.
-            # STATED LIMIT: a genuinely silent job is invisible to THIS trigger.
-            # It is still snapshotted by job_snapshot(), so the supervisor
-            # catches it by growth — this trigger trades recall for precision,
-            # deliberately, because a false "still running" makes the supervisor
-            # sit silent in exactly the case it exists for.
-            if not body.strip():
-                continue
-            live.append(name[:-len(".output")])
-        except OSError:
-            continue
-    return live
+    # MEASURED 2026-08-16, live in this setup's own session: the tasks dir
+    # accumulates <id>.output files for calls that are not background jobs, and
+    # two sat at 0 bytes with no exit marker while the guard announced
+    # "1 background job still running" with nothing running. A file never
+    # written to is not evidence of a job.
+    #
+    # STATED LIMIT, corrected 2026-08-16 after it was found to overclaim: a job
+    # that has not written yet is invisible to THIS trigger, and it is caught
+    # later only IF IT EVER WRITES ANYTHING — job_snapshot() records it and the
+    # watcher compares sizes, but a job whose output stays at 0 bytes for its
+    # whole life reads 0->0 on every sample and is indistinguishable from a dead
+    # entry (it also ages out of the snapshot after STALE_JOB_S, since an
+    # unwritten file's mtime never advances). That is a real hole in the
+    # observation channel, not a solved problem. The trade is deliberate: a
+    # false "still running" makes the supervisor sit silent in exactly the case
+    # it exists for, which is worse than missing a job that has produced nothing.
+    return [i for i, body in _unfinished_task_outputs() if body.strip()]
 
 
 def detached_logs():
@@ -610,6 +618,11 @@ agents = live_agents()
 # Every stop, allow or block. A record that only appeared on refusals would be
 # missing in exactly the cases the supervisor exists to catch.
 write_parked()
+
+# The refusal kill switch, applied AFTER the record is written (see the note
+# where this check used to live).
+if MODE == "off":
+    allow()
 
 reason = None
 open_items, plan_path = (plan_open_items() if CLAIMS_DONE.search(tail) else (0, None))
