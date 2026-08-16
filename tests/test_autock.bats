@@ -2053,3 +2053,52 @@ PLAN
     cap_has "b'[supervisor]'"
     cap_has "b'ccage-watch arm'"
 }
+
+# --- Task 8: the watcher writes the done-marker itself ----------------------
+#
+# The brief's own snippet calls _maybe_mark_done(rec) from "the branch that
+# would open the circuit" -- verified dead: after Task 6/7, that fallthrough
+# is reached only by the give-up path (_confirmed() False by construction) or
+# by a re-entry _worked_since would already have reset to sup_pokes=0. A
+# confirmation can never reach there, so the marker could never be written as
+# specified. RESOLUTION (a) taken: moved to where _confirmed() actually
+# becomes True -- run()'s NUDGED branch -- gated on self.sup_driving so an
+# ordinary occupancy nudge (never idle in the first place) cannot trigger it.
+# Test 3 below discriminates (a) from candidate (b) (drop the confirmation
+# requirement, rest only on facts): under (a) a give-up with nothing running
+# writes no marker; under (b) it would.
+
+@test "supervisor: done marker is written after a confirmed checkpoint with nothing running" {
+    write_parked_record sess '{"jobs":[],"logs":[]}'
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=30 \
+        CCAGE_AUTOCK_SUPERVISOR_IDLE=2 CCAGE_AUTOCK_SUPERVISOR_ESCALATE=6
+    drive idle_then_confirm "--soft 40 --poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE CCAGE_AUTOCK_SUPERVISOR_ESCALATE
+    [ "$status" -eq 0 ]
+    cap_has "b'/clear'"                              # the existing clear still happens
+    grep -q "checkpoint confirmed" "$CAGE/ccage-autock.log"
+    grep -q "wrote .ccage-session-done" "$CAGE/ccage-autock.log"
+    [ -f "$REPO/.ccage-session-done" ]
+}
+
+@test "supervisor: no done marker while a job is present at confirmation" {
+    write_parked_record sess '{"jobs":[{"id":"job-z","size":5}],"logs":[]}'
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=30 \
+        CCAGE_AUTOCK_SUPERVISOR_IDLE=2 CCAGE_AUTOCK_SUPERVISOR_ESCALATE=6
+    drive idle_then_confirm "--soft 40 --poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE CCAGE_AUTOCK_SUPERVISOR_ESCALATE
+    [ "$status" -eq 0 ]
+    cap_has "b'/clear'"                              # confirmation and clear still happen
+    [ ! -f "$REPO/.ccage-session-done" ]
+}
+
+@test "supervisor: giving up with nothing confirmed does NOT write the done marker" {
+    write_parked_record sess '{"jobs":[],"logs":[]}'
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=10 \
+        CCAGE_AUTOCK_SUPERVISOR_IDLE=2 CCAGE_AUTOCK_SUPERVISOR_ESCALATE=2
+    drive idle "--soft 40 --poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE CCAGE_AUTOCK_SUPERVISOR_ESCALATE
+    [ "$status" -eq 0 ]
+    grep -q "circuit open" "$CAGE/ccage-autock.log"
+    [ ! -f "$REPO/.ccage-session-done" ]
+}

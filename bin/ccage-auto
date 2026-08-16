@@ -1755,6 +1755,57 @@ class Watcher:
         except OSError:
             pass
 
+    def _maybe_mark_done(self, rec):
+        """Write the stand-down marker on FACTS, not on a declaration.
+
+        CALL-SITE DECISION (Task 8's brief called this from "the branch that
+        would open the circuit" — verified DEAD before implementing: after
+        Task 6/7 that fallthrough is reached only by the give-up path, where
+        _confirmed() is False BY CONSTRUCTION (give-up requires it), or by a
+        re-entry that _worked_since's reset at the top of _supervise would
+        already have zeroed sup_pokes for. A confirmation can never reach
+        there, so the marker specified there could never be written — the
+        whole task would be dead code. Two resolutions were possible: (a)
+        move the trigger to where _confirmed() actually becomes True, or (b)
+        drop the confirmation requirement and rest only on facts. (b) was
+        rejected: it would let the give-up path itself (nothing ever
+        confirmed, nothing running) write the marker, which changes what the
+        marker MEANS — "nobody is home to say otherwise" is not "the model
+        confirmed there is nothing left". (a) taken: called from run()'s
+        NUDGED branch, at the exact point _confirmed() is True, gated there
+        on self.sup_driving so an ORDINARY occupancy nudge — a session that
+        was never idle in the first place — can never trigger this.
+
+        Three of the four conditions are facts on disk, read from the
+        freshest parked record for the CURRENT (pre-clear) transcript; the
+        fourth (_confirmed()) is the existing checkpoint-confirmation
+        mechanism already trusted everywhere else in this ladder to decide
+        when /clear is safe — RESUME.md's own mtime corroborating the
+        sentinel, not a bare textual claim. Per the asymmetry this design
+        rests on, a model-authored signal may keep the supervisor awake but
+        may never send it to sleep by itself — nothing here reads
+        last_assistant_message or any other free-text claim of completion."""
+        if rec.get("jobs") or self._job_state(rec) != "none":
+            return False
+        if not self._confirmed():
+            return False
+        try:
+            # "w", not append: checkpoint-init.sh's own mark-done writes a
+            # fresh informational line the same way (consumers only test
+            # existence/mtime, but a stale prior line would mislead anyone
+            # reading the file by hand). Says WHO decided — a human finding
+            # this later should not have to guess whether the model ran
+            # `/checkpoint --final` or the supervisor closed the loop itself.
+            with open(os.path.join(self.cwd, SESSION_DONE_MARKER), "w") as fh:
+                fh.write("session marked done by ccage-auto's supervisor: %s\n"
+                         % datetime.datetime.now(datetime.timezone.utc)
+                             .strftime("%Y-%m-%dT%H:%M:%SZ"))
+        except OSError:
+            return False
+        self._log("SUPERVISOR: checkpoint confirmed, nothing running — "
+                  "wrote %s; standing down" % SESSION_DONE_MARKER)
+        return True
+
     def run(self):
         cfg = self.cfg
         self._log("watcher start: soft=%.0f%% hard=%.0f%% poll=%.0fs%s"
@@ -1875,6 +1926,18 @@ class Watcher:
                     # in text logged SINCE the nudge, so it cannot fire on a
                     # stale arm or a manual /clear.
                     self._log("checkpoint confirmed at %.1f%% — clearing" % pct)
+                    # Task 8: this is the ONE place a confirmation can be
+                    # paired with "the supervisor already asked once and got
+                    # no work" (sup_driving is only True for the supervisor's
+                    # own escalation cycle, never an ordinary occupancy
+                    # nudge) — see _maybe_mark_done's docstring for why the
+                    # brief's original call site was dead code. rec is the
+                    # freshest parked snapshot for THIS (pre-clear) session;
+                    # a /clear always follows regardless of the outcome here.
+                    if self.sup_driving:
+                        rec = self._parked(path)
+                        if rec is not None and self._maybe_mark_done(rec):
+                            self.sup_open = True
                     self._do_clear()
                     self.cooldown_until = time.time() + cfg.cooldown
                     self.state = self.COOLDOWN
