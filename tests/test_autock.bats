@@ -1562,6 +1562,57 @@ fakewatch() {
     [[ "$output" == *"background job"* ]]
 }
 
+@test "stop-guard: parked record is written on a clean stop" {
+    stopg "{\"session_id\":\"sess-p1\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Committed and pushed.\"}"
+    [ -f "$CAGE/stop_guard_state/sess-p1.parked" ]
+    run python3 -c "import json;d=json.load(open('$CAGE/stop_guard_state/sess-p1.parked'));print(d['session_id'],d['project'])"
+    [[ "$output" == "sess-p1 $REPO" ]]
+}
+
+@test "stop-guard: parked record reads the scratchpad from the CURRENT session, tasks from the LAUNCH one" {
+    # The discriminating test. Both directories exist; only one holds the live
+    # log. Keying both on the launch id (as the first draft of this plan did)
+    # reads the STALE scratchpad and misses the running job entirely, which is
+    # the original bug wearing a different hat. Measured on the real session:
+    # tasks/ lived under 425d989b, the live scratchpad under ad2baf5d.
+    local root; root="$(dirname "$(tasks_dir launch-id)")"
+    mkdir -p "$root/scratchpad" "$(dirname "$root")/current-id/scratchpad"
+    printf 'stale' > "$root/scratchpad/old.log"
+    printf '0123456789' > "$(dirname "$root")/current-id/scratchpad/live.log"
+    bgjob launch-id job-x 'running'
+    stopg "{\"session_id\":\"current-id\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Summarised.\"}" \
+        "$(fakewatch)" "launch-id"
+    run python3 -c "import json;d=json.load(open('$CAGE/stop_guard_state/current-id.parked'));\
+print(sorted(p['path'].split('/')[-1] for p in d['logs']), d['jobs'])"
+    [[ "$output" == *"live.log"* ]]
+    [[ "$output" != *"old.log"* ]]
+    [[ "$output" == *"job-x"* ]]
+}
+
+@test "stop-guard: parked record snapshots detached scratchpad logs with sizes" {
+    local sp; sp="$(dirname "$(tasks_dir sess-p2)")/scratchpad"
+    mkdir -p "$sp"
+    printf '0123456789' > "$sp/sweep.log"
+    stopg "{\"session_id\":\"sess-p2\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Summarised.\"}"
+    run python3 -c "import json;d=json.load(open('$CAGE/stop_guard_state/sess-p2.parked'));print([l['size'] for l in d['logs'] if l['path'].endswith('sweep.log')])"
+    [[ "$output" == "[10]" ]]
+}
+
+@test "stop-guard: parked record — an unwritable state dir never blocks the stop" {
+    mkdir -p "$CAGE/stop_guard_state"
+    chmod 500 "$CAGE/stop_guard_state" 2>/dev/null || skip "cannot chmod"
+    stopg "{\"session_id\":\"sess-p3\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Done.\"}"
+    chmod 700 "$CAGE/stop_guard_state"
+    [ "$status" -eq 0 ]
+}
+
+@test "stop-guard: an empty output with no exit marker is not a running job" {
+    bgjob bgempty job-e ''
+    stopg "{\"session_id\":\"bgempty\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Summarised.\"}" \
+        "$(fakewatch)"
+    [[ "$output" != *"background job"* ]]
+}
+
 @test "stop-guard: a job with an exit marker is finished, however fresh" {
     bgjob bge job-c 'done
 [exited with code 0]'

@@ -172,6 +172,65 @@ def write_count(n):
         pass
 
 
+def job_snapshot():
+    """[{id, size}] for every task output that has NOT recorded an exit.
+
+    No liveness verdict here — that needs two samples and only the watcher can
+    take the second. Compare with live_background_jobs(), which DOES judge, for
+    the hook's own immediate trigger, and therefore carries the non-empty rule."""
+    tasks = os.path.join(_scratch_root(launch_session_id()), "tasks")
+    out, now = [], time.time()
+    try:
+        names = os.listdir(tasks)
+    except OSError:
+        return []
+    for name in names:
+        if not name.endswith(".output"):
+            continue
+        path = os.path.join(tasks, name)
+        try:
+            if now - os.path.getmtime(path) > STALE_JOB_S:
+                continue
+            with open(path, errors="replace") as f:
+                body = f.read()
+            if "[exited with code" in body[-400:]:
+                continue
+            out.append({"id": name[:-len(".output")], "size": len(body)})
+        except OSError:
+            continue
+    return out[:MAX_SNAPSHOT]
+
+
+def write_parked():
+    """Snapshot the facts a supervisor needs, at the one moment they are all
+    cheap to read. Written on EVERY stop, allow or block: the watcher needs a
+    current snapshot either way, and a record that only appears on refusals
+    would be missing in exactly the cases this exists to catch.
+
+    Facts only. No verdict, no phrase, no judgment about whether work
+    remains — that question has no answer on disk and every attempt to infer
+    it has been wrong."""
+    rec = {
+        "stamp": time.time(),
+        "session_id": session_id,
+        "launch_id": launch_session_id(),
+        "project": project,
+        # Sizes, not bare ids: liveness is growth between two samples, decided
+        # by the watcher. "No exit marker" alone marked 0-byte non-job files as
+        # running (measured 2026-08-16) — see live_background_jobs().
+        "jobs": job_snapshot(),
+        "logs": [{"path": p, "size": s} for p, s in detached_logs()],
+    }
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        tmp = os.path.join(state_dir, session_id + ".parked.tmp")
+        with open(tmp, "w") as f:
+            json.dump(rec, f)
+        os.replace(tmp, os.path.join(state_dir, session_id + ".parked"))
+    except OSError:
+        pass                    # fail-open: never wedge a stop on state
+
+
 # ---------------------------------------------------------------- shape B
 # Ground truth: subagent transcripts under this session, touched recently.
 def live_agents():
@@ -458,8 +517,22 @@ def live_background_jobs():
             # window called a quiet-but-running job finished, which is how a
             # live sweep read as "nothing running" on 2026-08-15.
             with open(path, errors="replace") as f:
-                if "[exited with code" not in f.read()[-400:]:
-                    live.append(name[:-len(".output")])
+                body = f.read()
+            if "[exited with code" in body[-400:]:
+                continue
+            # MEASURED 2026-08-16, live in the controller's own session: the
+            # tasks dir accumulates <id>.output files for calls that are not
+            # background jobs, and two sat at 0 bytes with no exit marker while
+            # the guard announced "1 background job still running" with nothing
+            # running. A file never written to is not evidence of a job.
+            # STATED LIMIT: a genuinely silent job is invisible to THIS trigger.
+            # It is still snapshotted by job_snapshot(), so the supervisor
+            # catches it by growth — this trigger trades recall for precision,
+            # deliberately, because a false "still running" makes the supervisor
+            # sit silent in exactly the case it exists for.
+            if not body.strip():
+                continue
+            live.append(name[:-len(".output")])
         except OSError:
             continue
     return live
@@ -533,6 +606,10 @@ tail = last_msg[-1200:] if last_msg else ""
 asked = bool(ASKED_USER.search(tail))
 committed = bool(COMMIT.search(tail)) and not asked
 agents = live_agents()
+
+# Every stop, allow or block. A record that only appeared on refusals would be
+# missing in exactly the cases the supervisor exists to catch.
+write_parked()
 
 reason = None
 open_items, plan_path = (plan_open_items() if CLAIMS_DONE.search(tail) else (0, None))
