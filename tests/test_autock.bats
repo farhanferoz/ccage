@@ -1853,8 +1853,16 @@ PLAN
     # sup_driving suppresses ONLY the below-soft cancellation and leaves
     # _confirmed() and _do_clear() untouched.
     write_parked_record sess '{"jobs":[],"logs":[]}'
-    export FAKE_TOKENS=50000 FAKE_DEADLINE=10 \
-        CCAGE_AUTOCK_SUPERVISOR_IDLE=2 CCAGE_AUTOCK_SUPERVISOR_ESCALATE=2
+    # ONE tunable gates TWO windows: how long after the poke before the
+    # escalation arms, AND how long the armed escalation waits before giving up.
+    # At 2s that left the confirm path a 2-second race against give-up, which a
+    # loaded runner loses -- CI run 31952616954 went red on BOTH bash legs
+    # (ubuntu and macOS) while both zsh legs passed and a local Linux bash run
+    # was green, which is the signature of a race, not a portability bug.
+    # Widened so the confirm has real room; the give-up path is covered by its
+    # own test above, which does not depend on this margin.
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=30 \
+        CCAGE_AUTOCK_SUPERVISOR_IDLE=2 CCAGE_AUTOCK_SUPERVISOR_ESCALATE=6
     drive idle_then_confirm "--soft 40 --poll 1"
     unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE CCAGE_AUTOCK_SUPERVISOR_ESCALATE
     [ "$status" -eq 0 ]
@@ -1869,7 +1877,13 @@ PLAN
 
 @test "supervisor: the circuit stays open until the transcript grows with real work, then pokes again" {
     write_parked_record sess '{"jobs":[],"logs":[]}'
-    export FAKE_TOKENS=50000 FAKE_DEADLINE=15 \
+    # The longest chain in the file: poke -> escalate -> give up -> circuit open
+    # -> real work lands -> episode reset -> poke again. That is ~8s of a 15s
+    # deadline, and every step can slip under load. Widened after test 123 went
+    # red on both bash CI legs for exactly that reason (see its comment); this
+    # one passed, but it is the same class and a silent flake costs a full CI
+    # round-trip each time it bites.
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=24 \
         CCAGE_AUTOCK_SUPERVISOR_IDLE=2 CCAGE_AUTOCK_SUPERVISOR_ESCALATE=2
     drive idle_then_work "--soft 40 --poll 1"
     unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE CCAGE_AUTOCK_SUPERVISOR_ESCALATE
