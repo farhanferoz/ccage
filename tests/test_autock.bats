@@ -1548,11 +1548,13 @@ fakewatch() {
 @test "stop-guard: a job quiet for over 3 minutes still counts as running" {
     bgjob bgq job-b 'quiet but alive'
     # A fixed calendar-date touch drifts stale past STALE_JOB_S (24h) depending
-    # on wall-clock time when the suite runs, and touch -t's format also
-    # disagrees between GNU/BSD -- same brittleness class already fixed once
-    # in this file (see the comment above tasks_dir()). Relative os.utime
-    # instead: comfortably past the old LIVE_WINDOW_S (180s), nowhere near
-    # STALE_JOB_S (86400s).
+    # on when the suite runs -- the literal date first written here was already
+    # 27h old the day it was written, so the test failed on its own fixture.
+    # Relative os.utime instead: comfortably past the old LIVE_WINDOW_S (180s),
+    # nowhere near STALE_JOB_S (86400s). Same age-it-relatively idiom as the
+    # STALE-subagent-transcript test above, which uses it because `touch -d` is
+    # GNU-only. (`touch -t` is POSIX and portable -- it was not the problem
+    # here; wall-clock drift was.)
     python3 -c "import os,sys,time; os.utime(sys.argv[1], (time.time()-3600,)*2)" \
         "$(tasks_dir bgq)/job-b.output"
     stopg "{\"session_id\":\"bgq\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Summarised.\"}" \
