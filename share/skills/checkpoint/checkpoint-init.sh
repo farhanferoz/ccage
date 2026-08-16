@@ -66,10 +66,7 @@ case "$cmd" in
 - (open workstream — status)
 
 ### Decisions
-- (settled choice worth remembering)
-
-### Open questions
-- (unresolved question that needs an answer)
+- (pointer only — the rulings themselves live in DECISIONS.md, which is auto-loaded)
 
 ### Live jobs
 - none

@@ -126,14 +126,26 @@ older lives in `$changelog`.
 ### Next
 - <the very next concrete action — the first thing to do on resume>
 
+<!-- 🔴 THE RULE THAT DECIDES WHICH SECTION ANYTHING GOES IN: **content lifetime must match
+     section lifetime.** These sections do NOT all have the same lifetime, and that is the point.
+       TRANSIENT (rewritten every checkpoint, expected to be wrong tomorrow):
+         `### Now`, `### Next`, `### Live jobs & tasks`, the `## Session` blocks.
+       SEMI (survives while the work does): `### Threads`, `### Plan`.
+       DURABLE — and therefore NOT here at all: rulings and open questions go to `DECISIONS.md`,
+         results go to the project's own findings ledger, working rules go to CLAUDE.md.
+     A DURABLE fact in a transient section ROTS: it is rewritten by someone summarising, drifts from
+     the register that owns it, and is then read FIRST because this file loads first. Measured
+     2026-08-15 (Oasis/StrategyA): three ratified rulings were read out of a `### Open questions`
+     section here and put back to the user as undecided.
+     A TRANSIENT fact in a durable register BLOATS it: a task, a running job or a "currently
+     building" note in `DECISIONS.md` never gets deleted, because that file's rule is that entries
+     do not vanish. Keep the RULING there and the TASK here. -->
+
 ### Threads
 - <open workstream> — <status>
 
 ### Decisions
 - <settled choice worth remembering>
-
-### Open questions
-- <unresolved question that needs an answer>
 
 ### Plan
 <!-- Present ONLY when work follows a plan/design doc. Name the doc(s) with
@@ -203,7 +215,7 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    the `Read`/`Edit`/`Write` tools this session, do **one** `Read` before the
    first `Edit` — otherwise that Edit fails and costs more than the read saved.
    Skipping a needless re-read saves a full-context round-trip.
-2. **Keep carried state verbatim.** Every thread, decision, and open question this
+2. **Keep carried state verbatim.** Every thread and decision-pointer this
    session did *not* change stays exactly as written.
 2a. **Ground every state-claim before you write it** — invoke the
    `ground-before-summarizing` skill. Any short-hand label, method codename or
@@ -213,12 +225,19 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    silently dropped four live items — a checkpoint written from recall is how
    wrong state becomes next session's ground truth.
 3. **Update the structured lines in place** — `### Now / ### Next / ### Threads /
-   ### Decisions / ### Open questions / ### Plan / ### Live jobs & tasks` — for
+   ### Decisions / ### Plan / ### Live jobs & tasks` — for
    whatever moved this session. When a plan doc governs the work, fill
    **`### Plan`** with its exact path and remaining scope — measured failure
    (2026-07-16): resumed sessions acted from RESUME's summary bullets without
    opening the plan, silently dropping tasks; the autoloader turns this line
-   into a read-and-dispatch directive. Add new decisions and open questions. `### Now` and `### Next` are
+   into a read-and-dispatch directive. Add new decisions. **An UNRESOLVED question goes to `DECISIONS.md` too, as an entry whose
+   answer is "not decided yet" plus its `Revisit if:` trigger — never into a separate section
+   here.** RESUME and a decisions register both holding rulings is two registers with no
+   back-pressure: an item settled in one stays open in the other, and RESUME is read first, so the
+   stale copy wins. Measured 2026-08-15 on Oasis/StrategyA — three already-ratified rulings (a
+   borrowing ceiling, twice; an FX rate) were read out of RESUME's `### Open questions` and put
+   back to the user as open. *"All 3 we have decided before. This is unacceptable."* One register
+   holds both states; only there can they contradict each other visibly. `### Now` and `### Next` are
    the highest-value lines for resumption: make `### Next` one concrete first
    action, not a vague goal. **`### Live jobs & tasks`** records what `/clear`
    destroys, for rebuild-on-resume: run `TaskList` (skip gracefully if the tool is
@@ -241,8 +260,9 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    block yet). This keeps repeated same-day checkpoints from growing `$resume`.
    - **Promote before you overwrite.** `$resume` is git-excluded — there is no
      version history to recover from — so anything still load-bearing in the block
-     you're about to condense must first move to a durable line (`DECISIONS.md`
-     for anything ratified, `### Open questions`) or to `$changelog`. The block's
+     you're about to condense must first move to a durable line (`DECISIONS.md` — for anything
+     ratified AND for anything still open, the latter carrying its `Revisit if:` trigger) or to
+     `$changelog`. The block's
      narrative is meant to be ephemeral "where things stand"; durable facts must
      not die in it.
 5. **One-time migration — ALWAYS, regardless of budget.** If `$resume` has a
@@ -276,7 +296,8 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    session blocks alone won't fix it — prune the structured sections too: (a) a
    `### Threads` bullet whose work has **shipped/closed** moves to `$changelog`
    as a dated prose line (lossless move, keep any still-open sub-question in
-   `### Next`/`### Open questions`); (b) a `### Decisions` bullet **moves to
+   `### Next` if it is WORK, or in `DECISIONS.md` with its `Revisit if:` trigger if it is a
+   QUESTION); (b) a `### Decisions` bullet **moves to
    `DECISIONS.md`** (create it if absent — `resume_autoload.sh` injects it into
    every session, workers excluded), one line, with the condition that should
    prompt revisiting it; (c) never prune a bullet that is the only record of
@@ -385,7 +406,7 @@ end. Do not add any, and do not suggest it.
    wants it merged anyway.
 
 4. **Merge into `$resume` exactly as §3 does** — in place, into the same `###
-   Now / ### Next / ### Threads / ### Decisions / ### Open questions / ### Plan`
+   Now / ### Next / ### Threads / ### Decisions / ### Plan`
    sections, keeping every carried line verbatim. **Never overwrite `$resume`**:
    the recovered session is additional history, not a replacement for state that
    accumulated since. Prepend a `## Session <YYYY-MM-DD>` block for the recovered
@@ -486,7 +507,7 @@ again. It does not checkpoint the caller; do that first if you have unsaved stat
 2. **Read the plain `RESUME.md` and every `RESUME.<slot>.md`.** The plain file is
    the base; each slot file is an overlay.
 3. **Merge into the plain `RESUME.md` — a judgment merge, never a `cat`:**
-   - **Threads / Decisions / Open questions:** the **union** across all files,
+   - **Threads / Decisions:** the **union** across all files,
      with overlaps **deduped** (the same workstream often appears in two slots);
      when two versions disagree, keep the most-recent wording.
    - **`### Now`:** combine into one — a line per still-active workstream, newest
