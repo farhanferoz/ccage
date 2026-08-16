@@ -395,6 +395,27 @@ def ccage_watch_available():
     return False
 
 
+# The harness keys its scratch dirs on the session id the PROCESS launched
+# with, exported as CLAUDE_CODE_SESSION_ID; /clear rotates the transcript's
+# session_id but not this one. MEASURED 2026-08-16: transcript ad2baf5d wrote
+# every background job under 425d989b/tasks, so keying on the payload id read
+# a directory that never existed and reported "no jobs" for a 14-hour run.
+def launch_session_id():
+    return os.environ.get("CLAUDE_CODE_SESSION_ID") or session_id
+
+
+def _scratch_root():
+    return os.path.join(tempfile.gettempdir(), "claude-%d" % os.getuid(),
+                        slug, launch_session_id())
+
+
+# An orphan from a long-dead run must not resurrect: the exit marker decides
+# liveness, and this only stops an ancient unmarked file counting forever.
+STALE_JOB_S = 86400
+# Cap the snapshot so a scratchpad full of artifacts cannot bloat the record.
+MAX_SNAPSHOT = 200
+
+
 def live_background_jobs():
     """Background Bash jobs this session started that have not reported an exit.
 
@@ -406,12 +427,9 @@ def live_background_jobs():
 
     The fact is on disk: the harness writes each backgrounded job to
     <scratchpad>/tasks/<id>.output and appends a literal `[exited with code N]`
-    when it finishes. No marker + touched within LIVE_WINDOW_S = still running.
-    Fail-open: no tasks dir, or an unreadable one, returns [] -- an unmeasurable
-    condition must never manufacture a block."""
-    tasks = os.path.join(tempfile.gettempdir(), "claude-%d" % os.getuid(),
-                         slug,
-                         session_id, "tasks")
+    when it finishes. Fail-open: no tasks dir, or an unreadable one, returns []
+    -- an unmeasurable condition must never manufacture a block."""
+    tasks = os.path.join(_scratch_root(), "tasks")
     live, now = [], time.time()
     try:
         names = os.listdir(tasks)
@@ -422,14 +440,43 @@ def live_background_jobs():
             continue
         path = os.path.join(tasks, name)
         try:
-            if now - os.path.getmtime(path) > LIVE_WINDOW_S:
-                continue                       # stale: long finished or abandoned
+            if now - os.path.getmtime(path) > STALE_JOB_S:
+                continue
+            # The harness appends `[exited with code N]` when a job really
+            # ends. That marker is the signal; mtime is not. A 180s freshness
+            # window called a quiet-but-running job finished, which is how a
+            # live sweep read as "nothing running" on 2026-08-15.
             with open(path, errors="replace") as f:
                 if "[exited with code" not in f.read()[-400:]:
                     live.append(name[:-len(".output")])
         except OSError:
             continue
     return live
+
+
+def detached_logs():
+    """(path, size) for everything under this session's scratchpad.
+
+    A `setsid nohup … > log` job — this project's normal pattern for a long
+    run — creates no tasks/*.output at all, so the harness records nothing
+    about it. Growth between two samples is the only available evidence, and
+    two samples need two moments: this hook takes one, ccage-auto compares.
+    Fail-open: an unreadable scratchpad returns [] and nothing is claimed."""
+    out = []
+    sp = os.path.join(_scratch_root(), "scratchpad")
+    try:
+        names = sorted(os.listdir(sp))[:MAX_SNAPSHOT]
+    except OSError:
+        return []
+    for name in names:
+        p = os.path.join(sp, name)
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        if st.st_size and not os.path.isdir(p):
+            out.append((p, st.st_size))
+    return out
 
 
 # ------------------------------------------------------- trigger 5 (attended)

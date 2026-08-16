@@ -1152,8 +1152,13 @@ PY
 
 STOPG="$BATS_TEST_DIRNAME/../share/hooks/stop_continuation_guard.sh"
 
-stopg() {   # stopg <json> [extra PATH prefix] -> $output is the hook's stdout
+stopg() {   # stopg <json> [extra PATH prefix] [launch-session-id]
+    local launch="${3:-}"
+    if [ -z "$launch" ]; then
+        launch="$(printf '%s' "$1" | sed -n 's/.*"session_id":"\([^"]*\)".*/\1/p')"
+    fi
     run bash -c "echo '$1' | CLAUDE_CONFIG_DIR='$CAGE' CCAGE_AUTONOMOUS=1 \
+        CLAUDE_CODE_SESSION_ID='$launch' \
         PATH='${2:-}${2:+:}$PATH' bash '$STOPG'"
 }
 
@@ -1531,6 +1536,36 @@ fakewatch() {
     stopg "{\"session_id\":\"bg3\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All done here.\"}" \
         "$(fakewatch)"
     [ -z "$output" ]
+}
+
+@test "stop-guard: jobs are read from the LAUNCH session id, not the payload's" {
+    bgjob launch-id job-a 'still going...'
+    stopg "{\"session_id\":\"current-id\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Summarised.\"}" \
+        "$(fakewatch)" "launch-id"
+    [[ "$output" == *"background job"* ]]
+}
+
+@test "stop-guard: a job quiet for over 3 minutes still counts as running" {
+    bgjob bgq job-b 'quiet but alive'
+    # A fixed calendar-date touch drifts stale past STALE_JOB_S (24h) depending
+    # on wall-clock time when the suite runs, and touch -t's format also
+    # disagrees between GNU/BSD -- same brittleness class already fixed once
+    # in this file (see the comment above tasks_dir()). Relative os.utime
+    # instead: comfortably past the old LIVE_WINDOW_S (180s), nowhere near
+    # STALE_JOB_S (86400s).
+    python3 -c "import os,sys,time; os.utime(sys.argv[1], (time.time()-3600,)*2)" \
+        "$(tasks_dir bgq)/job-b.output"
+    stopg "{\"session_id\":\"bgq\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Summarised.\"}" \
+        "$(fakewatch)"
+    [[ "$output" == *"background job"* ]]
+}
+
+@test "stop-guard: a job with an exit marker is finished, however fresh" {
+    bgjob bge job-c 'done
+[exited with code 0]'
+    stopg "{\"session_id\":\"bge\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Summarised.\"}" \
+        "$(fakewatch)"
+    [[ "$output" != *"background job"* ]]
 }
 
 # --- trigger 6: work CI has never seen (2026-08-13) --------------------------
