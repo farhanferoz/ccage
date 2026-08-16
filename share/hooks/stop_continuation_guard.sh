@@ -26,12 +26,16 @@
 # CCAGE_AUTONOMOUS marker so it stays inert if that settings file is ever reused.
 # An interactive session must never pay a turn-end check.
 #
-# RUNAWAY PROTECTION IS OURS. The docs do not describe any built-in cap on
-# consecutive Stop refusals, and no stop_hook_active field exists in the Stop
-# payload (verified against the hooks reference 2026-08-10). A Stop hook that can
-# refuse forever can wedge a session, so this one counts its own consecutive
-# blocks per session and yields after CCLAUDE_STOPGUARD_MAX (default 2). A guard
-# that traps a session is worse than the stall it prevents.
+# RUNAWAY PROTECTION IS BOTH OURS AND THE PLATFORM'S. `stop_hook_active` is set
+# when this hook is firing again because it blocked the previous stop; we yield
+# on it (CORRECTED 2026-08-16 — this file previously asserted the field did not
+# exist, "verified against the hooks reference 2026-08-10"; it is present 5 times
+# in the installed 2.1.233 and is documented as the anti-loop flag). The local
+# counter stays as a second line of defence, because the field is reported not to
+# propagate when system reminders interleave with stop attempts
+# (anthropics/claude-code#54360). One block per continuation chain is the right
+# ceiling now that ccage-auto's supervisor owns persistent follow-up: this hook
+# nudges at the doorway, it does not run a loop.
 #
 # HONEST PRECISION NOTE. Shape B keys on GROUND TRUTH (live subagent transcripts
 # on disk). Shape A keys on PHRASE MATCHING of last_assistant_message, which is
@@ -405,6 +409,33 @@ CLAIMS_DONE = re.compile(
 )
 
 
+# An unticked box whose own line OPENS by declaring it is waiting on the user is
+# not open work — it is a deferral already declared, in the file the guard is
+# reading. MEASURED 2026-08-16: all three "unticked items" reported against
+# plans/2026-08-10-issue-register.md carried BLOCKED/PARKED at the head of the
+# line, and the refusal demanded a declaration that was already written there.
+#
+# ANCHORED AT THE START OF THE ITEM, deliberately. An unanchored word list was
+# tried first and review demonstrated it silently dropped real work:
+#     - [ ] Implement deferred loading for the image gallery.
+#     - [ ] Rename the parked-domain feature flag.
+#     - [ ] Fix the awaiting a response race in the poller.
+# all matched, because "deferred loading", "parked domain" and "awaiting a
+# response" are ordinary engineering vocabulary. Suppressing a genuinely open
+# item is the WRONG failure direction here: this signal may keep the supervisor
+# awake, it must never be able to send it to sleep. Requiring the declaration to
+# be the first thing in the item keeps the measured cases and drops all four.
+#
+# LIMIT, stated not hidden: the marker must be on the checkbox's own line and at
+# its head. An item that declares itself two lines down is still counted.
+DEFERRED_ITEM = re.compile(
+    r"^[ \t]*-[ \t]*\[ \][ \t]*[*_~`> ]*"
+    r"(?:blocked\b|parked\b|deferred\b|on hold\b|waiting on\b|awaiting\b"
+    r"|needs? your\b)",
+    re.I,
+)
+
+
 def plan_open_items():
     """(open_count, plan_path) for the governing plan, or (0, None).
 
@@ -451,7 +482,8 @@ def plan_open_items():
                 body = f.read()
         except OSError:
             continue
-        open_n = len(re.findall(r"^\s*-\s*\[ \]", body, re.M))
+        open_n = sum(1 for ln in re.findall(r"^[ \t]*-[ \t]*\[ \].*$", body, re.M)
+                     if not DEFERRED_ITEM.search(ln))
         if open_n:
             return open_n, path
     return 0, None
@@ -622,6 +654,13 @@ write_parked()
 # The refusal kill switch, applied AFTER the record is written (see the note
 # where this check used to live).
 if MODE == "off":
+    allow()
+
+# The platform's own anti-loop flag: this hook already blocked the previous stop.
+# Yield — the supervisor, not another refusal, owns what happens next. Placed
+# beside the kill switch and after write_parked() for the same reason: the record
+# is observation and must survive every path that silences the verdict.
+if p.get("stop_hook_active"):
     allow()
 
 reason = None

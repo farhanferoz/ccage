@@ -1698,3 +1698,54 @@ PY
     [[ "$output" != *"background job"* ]]          # verdict silenced
     [ -f "$CAGE/stop_guard_state/offrec.parked" ]  # facts still recorded
 }
+
+@test "stop-guard: plan items declared blocked or parked are not counted" {
+    mkdir -p "$REPO/plans"
+    cat > "$REPO/plans/p.md" <<'PLAN'
+- [ ] **BLOCKED on the user — deletions.** Irreversible; needs a decision.
+- [ ] **PARKED by the user 2026-08-13** — classification pass.
+- [ ] Wire the new predicate into the poke text.
+PLAN
+    printf '### Plan\n- ACTIVE: `plans/p.md`\n' > "$REPO/RESUME.md"
+    stopg "{\"session_id\":\"sess-pi\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All work is complete.\"}"
+    [[ "$output" == *"still has 1 unticked item"* ]]
+}
+
+@test "stop-guard: a plan whose open items are ALL blocked allows the stop" {
+    mkdir -p "$REPO/plans"
+    cat > "$REPO/plans/p2.md" <<'PLAN'
+- [ ] **BLOCKED on the user — deletions.**
+- [ ] **PARKED by the user 2026-08-13** — classification pass.
+PLAN
+    printf '### Plan\n- ACTIVE: `plans/p2.md`\n' > "$REPO/RESUME.md"
+    stopg "{\"session_id\":\"sess-pi2\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All work is complete.\"}"
+    [[ "$output" != *"unticked item"* ]]
+}
+
+@test "stop-guard: ordinary vocabulary does not suppress a genuinely open item" {
+    # Review demonstrated an unanchored word list silently dropped all four of
+    # these. Suppressing real work is the wrong failure direction: this signal
+    # may keep the supervisor awake, never send it to sleep.
+    mkdir -p "$REPO/plans"
+    cat > "$REPO/plans/p3.md" <<'PLAN'
+- [ ] Implement deferred loading for the image gallery.
+- [ ] Rename the parked-domain feature flag.
+- [ ] Fix the awaiting a response race in the poller.
+- [ ] Document what blocked on I/O means here.
+PLAN
+    printf '### Plan\n- ACTIVE: `plans/p3.md`\n' > "$REPO/RESUME.md"
+    stopg "{\"session_id\":\"sess-pi3\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All work is complete.\"}"
+    [[ "$output" == *"still has 4 unticked item"* ]]
+}
+
+@test "stop-guard: stop_hook_active yields immediately" {
+    bgjob launch-id job9 'still going...'
+    stopg "{\"session_id\":\"sess-sha\",\"stop_hook_active\":true,\"cwd\":\"$REPO\",\"last_assistant_message\":\"Summarised.\"}" \
+        "$(fakewatch)" "launch-id"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: stop_hook_active still writes the parked record" {
+    stopg "{\"session_id\":\"sess-shb\",\"stop_hook_active\":true,\"cwd\":\"$REPO\",\"last_assistant_message\":\"Summarised.\"}"
+    [ -f "$CAGE/stop_guard_state/sess-shb.parked" ]
+}
