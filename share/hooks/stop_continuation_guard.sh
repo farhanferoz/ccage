@@ -95,6 +95,12 @@ ATTENDED_WINDOW_S = 900
 # correctly.
 INJECTION_TOLERANCE_S = 30
 
+# Every way the harness records that a background job has ENDED. Closed set, so
+# it is a named constant rather than a magic string inline: `[exited with code N]`
+# for a job that ran to completion, `[killed]` for one stopped with `TaskStop`.
+# Missing the second made every deliberately-stopped job read as live forever.
+TERMINAL_JOB_MARKERS = ("[exited with code", "[killed]")
+
 
 def allow():
     """Let the turn end. The only safe default."""
@@ -215,11 +221,21 @@ def _unfinished_task_outputs():
     macOS tests red in 0.15.0. Sorted so the MAX_SNAPSHOT cap truncates
     predictably rather than in filesystem order.
 
-    The harness appends `[exited with code N]` when a job really ends: that
-    marker is the signal, and mtime is not. A 180s freshness window called a
+    The harness writes a terminal marker when a job really ends: that marker is
+    the signal, and mtime is not. A 180s freshness window called a
     quiet-but-running job finished, which is how a live sweep read as "nothing
     running" on 2026-08-15. STALE_JOB_S only stops an ancient unmarked file
-    counting forever."""
+    counting forever.
+
+    There is MORE THAN ONE terminal marker, found live 2026-08-17. A job stopped
+    with `TaskStop` gets `[killed]`, never `[exited with code N]` — so keying on
+    the exit form alone left every deliberately-stopped job looking live for the
+    rest of the session. Measured in this session's own tasks dir: two stopped
+    runs sat at 10 bytes reading `\\n[killed]\\n` with no exit marker, and the
+    guard blocked two consecutive turns demanding a watcher for jobs whose
+    processes `pgrep` proved were gone. That is the cry-wolf direction: a guard
+    that fires on a fact anyone can check and lose is one people learn to route
+    around."""
     tasks = os.path.join(_scratch_root(launch_session_id()), "tasks")
     now = time.time()
     try:
@@ -237,7 +253,7 @@ def _unfinished_task_outputs():
                 body = f.read()
         except OSError:
             continue
-        if "[exited with code" in body[-400:]:
+        if any(m in body[-400:] for m in TERMINAL_JOB_MARKERS):
             continue
         yield name[:-len(".output")], body
 

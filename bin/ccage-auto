@@ -232,6 +232,39 @@ WEEKLY_STALE_S = 30 * 60.0      # sensor readings older than this are unknown
 # accepts a COMMAND as the answer, because a marker file is a fact.
 SUPERVISOR_IDLE = 300.0      # transcript quiet this long -> one poke
 SUPERVISOR_ESCALATE = 300.0  # still quiet this long after the poke -> clear
+# Kept EQUAL to share/hooks/stop_continuation_guard.sh's INJECTION_TOLERANCE_S by
+# tests/test_autock.bats, which greps both files: two spellings of one rule is how
+# the slug regex drifted into five copies and turned 28 macOS tests red in 0.15.0.
+INJECTION_TOLERANCE_S = 30
+# Mirrors bin/ccage-watch's Kind.HOLD. A hold spec means "this session declared it
+# is waiting on the user" and is NOT a watcher: it has no pid and no condition.
+HOLD_KIND = "hold"
+# The TUI lays words out with cursor-move escapes rather than spaces, so once the
+# escapes are stripped the screen text has NO spaces in it at all. Screen matching
+# therefore compares whitespace-free forms on both sides.
+_WS = re.compile(rb"\s+")
+
+
+def bypass_screen_visible(clean_buf):
+    """True if the `--dangerously-skip-permissions` acceptance screen is up.
+
+    Takes an ANSI-STRIPPED buffer. Requires the distinctive title AND the
+    accept-option label — never the bare words "Bypass"/"accept", which occur in
+    ordinary repo content (changelogs, licences) where a loose match would fire a
+    spurious Down+Enter into the live TUI.
+
+    MEASURED 2026-08-17, live-firing a nested launch: the spaced needles this
+    used to compare against could never match, because the renderer emits
+    "BypassPermissionsmode" and "Yes,Iaccept" once cursor moves are stripped. The
+    launch sat on the unanswered dialog until it was killed — which is what had
+    been recorded as "a nested ccage-auto cannot authenticate". It was never
+    asked to authenticate; it was stuck one screen earlier."""
+    squeezed = _WS.sub(b"", clean_buf)
+    return b"BypassPermissions" in squeezed and b"Yes,Iaccept" in squeezed
+# Kept in step with share/hooks/stop_continuation_guard.sh's TERMINAL_JOB_MARKERS
+# by tests/test_autock.bats, which greps both files. Two spellings of one closed
+# set is how the `[killed]` case went missing from both readers at once.
+TERMINAL_JOB_MARKERS = ("[exited with code", "[killed]")
 
 
 def _truthy(v, default):
@@ -1080,6 +1113,10 @@ class Watcher:
         self.sup_open = False     # circuit open: stay quiet until real work
         self.sup_acted_at = 0.0   # when the supervisor last typed
         self.sup_seen = {}        # path -> size at the previous poll (Task 7)
+        self.sup_hold_lapsed = False   # the "hold lapsed" line has been logged
+                                   # for the CURRENT hold; the spec lives until
+                                   # the next session start reaps it, so without
+                                   # this the line repeats every poll.
         self.sup_landed_poked = False  # a fresh "a job landed" poke has been
                                    # sent for the CURRENT landing (Task 7) --
                                    # reset whenever a job is next seen growing,
@@ -1521,14 +1558,115 @@ class Watcher:
             "[supervisor] This session has been idle for %.0f minutes.%s "
             "Whichever is true: continue with the work now; or, if there is "
             "genuinely nothing left, run `/checkpoint --final`; or, if you are "
-            "waiting on something, arm a watcher for it with `ccage-watch arm "
-            "--cond '<command, exit 0 = done>' --note '<what this bridges>'` "
-            "and I will not ask again until it finishes."
+            "waiting on a MACHINE, arm a watcher for it with `ccage-watch arm "
+            "--cond '<command, exit 0 = done>' --note '<what this bridges>'`; "
+            "or, if you are waiting on the USER, say so with `ccage-watch hold "
+            "--question '<what you need from them>'`. After either of the last "
+            "two I will not ask again until it resolves."
             % (idle_min, detail)
         )
         self._type(msg)
         self.sup_pokes += 1
         self.sup_acted_at = time.time()
+
+    def _user_typed_since(self, path, when):
+        """True if the HUMAN typed into this session after `when`.
+
+        Same rule as share/hooks/stop_continuation_guard.sh's
+        user_recently_typed(), asked over a different span: the hook asks "within
+        the last N seconds", this asks "since this hold was declared". A genuinely
+        typed turn carries origin.kind == "human" AND promptSource == "typed";
+        injected turns (hook feedback, teammate messages, slash-command bodies)
+        arrive as type == "user" WITHOUT them, which is why "was there a user
+        message" is the wrong question — the supervisor's own poke is one.
+
+        And our own keystrokes DO carry the marker (measured 2026-08-15: the
+        resume nudge at 21:54:19Z was indistinguishable from a real one), so the
+        slot-scoped .injected mtime is subtracted exactly as the hook does it.
+        Without that, the supervisor's own poke would clear the hold it just
+        respected, and the fourth exit would silently be a one-tick no-op."""
+        try:
+            size = os.path.getsize(path)
+            with open(path, "rb") as fh:
+                fh.seek(max(0, size - 400_000))
+                lines = fh.read().decode("utf-8", "replace").splitlines()
+        except OSError:
+            return False
+        try:
+            injected = os.path.getmtime(
+                os.path.join(self._config_dir(), "stop_guard_state",
+                             cwd_slug(self.cwd) + slot_suffix() + ".injected"))
+        except OSError:
+            injected = None
+        for line in reversed(lines):
+            if '"kind": "human"' not in line and '"kind":"human"' not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("type") != "user":
+                continue
+            if (row.get("origin") or {}).get("kind") != "human":
+                continue
+            stamp = str(row.get("timestamp") or "")
+            try:
+                ts = datetime.datetime.fromisoformat(
+                    stamp.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                continue
+            if ts <= when:
+                return False        # newest human turn predates the hold
+            if injected is None:
+                return True
+            if abs(injected - ts) > INJECTION_TOLERANCE_S:
+                return True
+        return False
+
+    def _hold_active(self, path):
+        """True if this session has DECLARED it is blocked on the user and the
+        user has not answered yet — the fourth exit from the idle poke.
+
+        Ends two ways, neither of which the session controls: the user types (the
+        hold is cleared here, and `ccage-watch reap` never sees it), or the ttl
+        lapses and reap records the unanswered question into RESUME. That is what
+        keeps this from being a mute button — the ratified rule is that a
+        model-authored signal may keep the supervisor awake but never send it to
+        sleep (plans/2026-08-16-idle-session-supervisor.md:442), and a hold only
+        qualifies because the silence expires without the session's cooperation.
+
+        Reads the spec directly rather than shelling out to `ccage-watch list`:
+        the supervisor runs on a poll loop and must not fork a python interpreter
+        per tick."""
+        for spath in glob.glob(os.path.join(self._config_dir(), "watch",
+                                            "*.json")):
+            try:
+                with open(spath) as fh:
+                    spec = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            if spec.get("kind") != HOLD_KIND:
+                continue
+            armed = spec.get("armed_epoch") or 0
+            if time.time() - armed > (spec.get("ttl") or 0):
+                # Logged ONCE. The spec survives until `ccage-watch reap` records
+                # it at the next session start, so an unguarded log here would
+                # repeat on every poll for the rest of the run.
+                if not self.sup_hold_lapsed:
+                    self._log("SUPERVISOR: hold lapsed unanswered — resuming "
+                              "the ladder (the question stays open)")
+                    self.sup_hold_lapsed = True
+                return False        # reap writes the RESUME record, not us
+            if self._user_typed_since(path, armed):
+                self._log("SUPERVISOR: the user answered — hold cleared")
+                try:
+                    os.remove(spath)
+                except OSError:
+                    pass
+                self.sup_hold_lapsed = False   # a later hold logs its own lapse
+                return False
+            return True
+        return False
 
     def _watch_armed(self):
         """A live ccage-watch spec is a DECLARATION that this wait is serial —
@@ -1563,6 +1701,8 @@ class Watcher:
                     spec = json.load(fh)
             except (OSError, ValueError):
                 continue                # unreadable/mid-write: not a declaration
+            if spec.get("kind") == HOLD_KIND:
+                continue                # a hold is a wait on the USER, not a job
             pid = spec.get("pid")
             if pid is None or _pid_alive(pid):
                 return True             # freshly armed, or provably still running
@@ -1597,7 +1737,12 @@ class Watcher:
                     body = fh.read()
             except OSError:
                 continue
-            if "[exited with code" in body[-400:]:
+            # Same closed set as the Stop hook's TERMINAL_JOB_MARKERS, and for
+            # the same reason: a job stopped with TaskStop is marked `[killed]`,
+            # never `[exited with code N]`. Keying on the exit form alone meant a
+            # stopped job never read as landed, so the session never got the
+            # "your job finished" poke for it (found 2026-08-17).
+            if any(m in body[-400:] for m in TERMINAL_JOB_MARKERS):
                 return True
         return False
 
@@ -1657,6 +1802,15 @@ class Watcher:
         idle = time.time() - self.last_growth
         if idle < self.cfg.sup_idle:
             return
+        # Evaluated BEFORE the job-state branch below, and deliberately not
+        # inside it. _watch_armed() is consulted only under `state == "growing"`,
+        # which is right for a watcher (it bridges a running job) and WRONG for a
+        # hold: a session blocked on the user usually has no job at all, so
+        # _job_state() returns "none" and a check placed alongside the watcher one
+        # would be dead code in exactly the case it exists for. This call also
+        # CLEARS the hold when the user has answered, so it must run on every idle
+        # tick rather than only when a job happens to be running.
+        held = self._hold_active(path)
         rec = self._parked(path)
         if rec is None:
             return                      # no snapshot: claim nothing
@@ -1690,8 +1844,8 @@ class Watcher:
         state = self._job_state(rec)
         if state == "growing":
             self.sup_landed_poked = False
-            if self._watch_armed():
-                return               # declared serial: silent until it ends
+            if held or self._watch_armed():
+                return               # declared wait: silent until it ends
         elif state == "landed" and not self.sup_landed_poked:
             self._log("SUPERVISOR: a job landed — poking with the path")
             self._supervisor_poke(idle / 60.0, self._sup_detail(rec))
@@ -1700,6 +1854,11 @@ class Watcher:
             # pin it to 1 so THIS poke -- not a stale earlier one -- is what
             # the ladder below measures its escalate timer against.
             self.sup_pokes = 1
+            return
+        if held:
+            # A LANDED job still poked, above: that is news the session can act
+            # on without the user, so a hold must not bury it. Everything else is
+            # silence until they type or the hold lapses.
             return
         if self.sup_pokes == 0:
             self._log("SUPERVISOR: idle %.0f min at %.1f%% — poking once"
@@ -2321,8 +2480,10 @@ def run_proxy(cfg, cwd, sdir, logpath):
                     # label, not the bare words "Bypass"/"accept" — those occur in
                     # ordinary repo content (changelogs, licences) and a loose
                     # match could fire a spurious Down+Enter into the live TUI.
+                    # The match itself is module-level so it can be tested
+                    # against a real render — see bypass_screen_visible().
                     if not bypass_done and scan_window and \
-                       b"Bypass Permissions" in out_buf and b"Yes, I accept" in out_buf:
+                       bypass_screen_visible(out_buf):
                         with write_lock:
                             os.write(master_fd, b"\x1b[B")   # down -> "Yes, I accept"
                             time.sleep(0.3)

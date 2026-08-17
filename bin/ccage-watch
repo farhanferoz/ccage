@@ -50,6 +50,12 @@ import time
 
 DEFAULT_INTERVAL_S = 600
 DEFAULT_TTL_S = 24 * 60 * 60
+# A hold lapses rather than lasting forever. If the user never comes back, the
+# alternative is a run that is silent indefinitely — which is the 11-hour idle
+# incident the supervisor was built to end. On lapse the ladder simply resumes:
+# one poke, not a restart. Longer than a watcher's ttl because a human answering
+# a question is slower than a job finishing.
+DEFAULT_HOLD_TTL_S = 72 * 60 * 60
 CONDITION_TIMEOUT_S = 120          # a probe that hangs must not wedge the watcher
 ID_LEN = 12                        # chars of sha1 used as the watcher id
 SETTLE_S = 0.2                     # parent's grace for the daemon to write state
@@ -59,6 +65,39 @@ MARK_BEGIN = "<!-- ccage-watch:begin -->"
 MARK_END = "<!-- ccage-watch:end -->"
 SECTION = "## Watch results (from ccage-watch — unmerged)"
 PROC_TIMEOUT_S = 5                 # liveness probes must never wedge a session start
+
+
+class Kind(str, enum.Enum):
+    """What a spec in the watch dir IS. Two variants, and every consumer must
+    branch: a WATCH owns a daemon and a condition; a HOLD owns neither.
+
+    A hold is a declared wait on the USER — the fourth exit from the supervisor's
+    idle poke, for the case the other three cannot express (`--cond` needs a
+    command that exits 0, and there is none for "a human must do this"). It is
+    deliberately NOT a watcher with a never-true condition: `liveness(None)` is
+    DEAD, so a pid-less spec dropped into this dir would be reaped at the next
+    session start, written into RESUME as WATCH DIED and deleted — a declared
+    wait silently converted into a fabricated death. `str, enum.Enum` so the
+    value round-trips through json.dump unchanged.
+
+    Specs written before this existed carry no `kind` at all, so every read goes
+    through spec_kind() and defaults to WATCH — the same treatment `report_to`
+    and `resume_file` got when they were added."""
+
+    WATCH = "watch"
+    HOLD = "hold"
+
+
+# One hold per (cwd, slot): the id is keyed on this sentinel instead of a
+# condition, so re-holding REPLACES rather than accumulating stale questions.
+HOLD_KEY = "\0hold"
+
+
+def spec_kind(spec):
+    try:
+        return Kind(spec.get("kind") or Kind.WATCH.value)
+    except ValueError:            # hand-edited spec: treat as the old shape
+        return Kind.WATCH
 
 
 class Liveness(enum.Enum):
@@ -263,14 +302,19 @@ def append_resume(path, block):
 
 
 def resume_block(spec, outcome, detail):
-    cond = spec["cond"]
     note = spec.get("note") or ""
     stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+    # A hold has no condition; its question IS the payload, and losing it would
+    # leave a wait with no addressee — the whole failure this exit exists to fix.
+    if spec_kind(spec) is Kind.HOLD:
+        subject = f"  - waiting on you: **{spec.get('question') or '(not recorded)'}**"
+    else:
+        subject = f"  - condition: `{spec.get('cond')}`"
     lines = [
         MARK_BEGIN,
         f"- **{outcome}** — `ccage-watch` {spec['id']}, armed {spec['armed_at']}, "
         f"reported {stamp}.",
-        f"  - condition: `{cond}`",
+        subject,
         f"  - {detail}",
     ]
     if note:
@@ -411,6 +455,62 @@ def cmd_arm(args):
     return 0
 
 
+def cmd_hold(args):
+    """Declare that this session is blocked on the USER and stand the supervisor
+    down until they type.
+
+    NO DAEMON IS SPAWNED, deliberately. There is nothing to poll: the thing being
+    waited on is a human, and the only observable that resolves it is their next
+    genuine keystroke — which bin/ccage-auto already distinguishes from its own
+    injected ones. A hold is a fact on disk carrying a clear-signal, which is what
+    makes it admissible under the ratified rule that a model-authored signal may
+    keep the supervisor awake but never send it to sleep
+    (plans/2026-08-16-idle-session-supervisor.md:442): the session cannot silence
+    anything by merely asserting it is blocked, it has to name the question, and
+    the silence ends without its cooperation.
+
+    --question is REQUIRED and is the whole point. A session that cannot state
+    what it is waiting for does not know, which is exactly the test `--cond`
+    applies to a watcher."""
+    cwd = os.getcwd()
+    watch_dir(cwd, create=True)
+    wid = watch_id(cwd, HOLD_KEY)
+    path = spec_path(cwd, wid)
+    spec = {
+        "id": wid,
+        "kind": Kind.HOLD.value,
+        "cwd": cwd,
+        "report_to": report_root(cwd),
+        "resume_file": resume_name(),
+        "cond": None,
+        "question": args.question,
+        "note": args.note or "",
+        "ttl": args.ttl,
+        "armed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "armed_epoch": time.time(),
+        "pid": None,
+    }
+    with open(path, "w") as fh:
+        json.dump(spec, fh, indent=2)
+    log(cwd, f"HOLD    {wid} question={args.question!r} ttl={args.ttl}s")
+    # Written NOW, not when the hold ends: the escalation ladder can checkpoint
+    # and /clear this session before the user ever reads the terminal, and a
+    # question that exists only in scrollback does not survive that.
+    try:
+        append_resume(report_target(spec),
+                      resume_block(spec, "HELD — WAITING ON YOU",
+                                   "the session stopped here because it needs "
+                                   "your answer; it resumes on your next "
+                                   "message, no command required."))
+        where = report_target(spec)
+    except OSError as e:
+        where = f"(could NOT be recorded: {e})"
+    print(f"held {wid} — the supervisor will not ask again until you type, "
+          f"or {args.ttl}s pass.\nYour question is recorded in {where}, so it "
+          f"survives a /clear.")
+    return 0
+
+
 def _kill(spec, cwd):
     pid = spec.get("pid")
     if alive(pid):
@@ -454,6 +554,12 @@ def cmd_list(_args):
     for s in rows:
         age = int(now - s.get("armed_epoch", now))
         left = int(s.get("armed_epoch", now) + s.get("ttl", 0) - now)
+        if spec_kind(s) is Kind.HOLD:
+            # A hold has no pid BY DESIGN; printing DEAD here would read as a
+            # crashed watcher and invite someone to "clean it up".
+            print(f"{s['id']:14} {'HELD':>7} {age:>7}s {left:>7}s  "
+                  f"waiting on you: {s.get('question') or '(not recorded)'}")
+            continue
         state = liveness(s.get("pid"))
         shown = str(s.get("pid") or "-") if state is Liveness.LIVE else state.value.upper()
         print(f"{s['id']:14} {shown:>7} {age:>7}s {left:>7}s  {s['cond']}")
@@ -480,6 +586,34 @@ def cmd_reap(_args):
         # be swallowed — reintroducing the silence as an unhandled error.
         wid = spec.get("id") or "unknown"
         cond = spec.get("cond") or "<condition not recorded>"
+        if spec_kind(spec) is Kind.HOLD:
+            # NOT a death. A hold has no process to lose, so the liveness probe
+            # above says DEAD for every hold; falling through would fabricate a
+            # WATCH DIED entry and delete the question. It ends two ways only:
+            # the user types (bin/ccage-auto clears it) or the ttl lapses.
+            left = int(spec.get("armed_epoch", now) + spec.get("ttl", 0) - now)
+            question = spec.get("question") or "(not recorded)"
+            if left > 0:
+                lines.append(f"  - HELD {wid}: waiting on YOU — {question} "
+                             f"(lapses in {left // 60} min). Answer it; no "
+                             f"command is needed to resume.")
+                continue
+            detail = ("nobody answered before the hold lapsed. The question is "
+                      "still open — it was not resolved, only un-silenced.")
+            try:
+                append_resume(report_target(spec),
+                              resume_block(spec, "HOLD LAPSED", detail))
+                where = "recorded in RESUME.md"
+            except OSError as e:
+                where = f"could NOT be recorded in RESUME ({e})"
+            log(cwd, f"LAPSED  {wid} hold expired unanswered; {where}")
+            try:
+                os.remove(spec_path(cwd, wid))
+            except OSError:
+                pass
+            lines.append(f"  - LAPSED {wid}: held for you since "
+                         f"{spec.get('armed_at')} — {question} — {where}.")
+            continue
         if state is Liveness.LIVE:
             left = int(spec.get("armed_epoch", now) + spec.get("ttl", 0) - now)
             lines.append(f"  - LIVE {wid}: waiting on `{cond}` "
@@ -676,6 +810,13 @@ def main(argv=None):
     a.add_argument("--replace", action="store_true",
                    help="restart an identical watcher instead of refusing")
     a.set_defaults(fn=cmd_arm)
+
+    h = sub.add_parser("hold", help="declare this session is blocked on the user")
+    h.add_argument("--question", required=True,
+                   help="what you need from the user, in one line")
+    h.add_argument("--note", help="extra context for the RESUME entry")
+    h.add_argument("--ttl", type=parse_duration, default=DEFAULT_HOLD_TTL_S)
+    h.set_defaults(fn=cmd_hold)
 
     for name in ("list", "status"):
         s = sub.add_parser(name, help="show armed watchers")

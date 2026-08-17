@@ -232,3 +232,74 @@ specs() { ls "$CLAUDE_CONFIG_DIR"/watch/*.json 2>/dev/null | wc -l | tr -d ' '; 
     [[ "$output" == *"PASS"* ]]
     [[ "$output" != *"FAIL"* ]]
 }
+
+# --- hold: the declared wait on the USER -------------------------------------
+# A hold is a spec with no pid and no condition, which is precisely the shape
+# every other code path in this file reads as "a watcher that died". These tests
+# exist because that misreading is silent: it fabricates a death, writes it into
+# RESUME and deletes the question.
+
+@test "hold records the question in RESUME at once, not when it ends" {
+    run python3 "$WATCH" hold --question "declare or detect?"
+    [ "$status" -eq 0 ]
+    # Written immediately: the escalation ladder can checkpoint and /clear this
+    # session before the user ever looks at the terminal.
+    [ -f RESUME.md ]
+    grep -q "HELD — WAITING ON YOU" RESUME.md
+    grep -q "declare or detect?" RESUME.md
+}
+
+@test "hold refuses without a question" {
+    run python3 "$WATCH" hold
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--question"* ]]
+}
+
+@test "a live hold lists as HELD, never as a dead watcher" {
+    python3 "$WATCH" hold --question "which option?" >/dev/null
+    run python3 "$WATCH" list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"HELD"* ]]
+    [[ "$output" == *"which option?"* ]]
+    [[ "$output" != *"DEAD"* ]]
+}
+
+@test "reap leaves a live hold alone instead of recording a death" {
+    python3 "$WATCH" hold --question "still waiting" >/dev/null
+    run python3 "$WATCH" reap
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"HELD"* ]]
+    [[ "$output" != *"DIED"* ]]
+    ! grep -q "WATCH DIED" RESUME.md
+    # and the question is still on disk, so the next session start still sees it
+    [ "$(find "$CLAUDE_CONFIG_DIR/watch" -name '*.json' | wc -l)" -eq 1 ]
+}
+
+@test "an unanswered hold lapses, and says so rather than going quiet" {
+    python3 "$WATCH" hold --question "nobody answered" --ttl 1 >/dev/null
+    sleep 2
+    run python3 "$WATCH" reap
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"LAPSED"* ]]
+    grep -q "HOLD LAPSED" RESUME.md
+    # lapsing is NOT resolution — the question must not read as answered
+    grep -q "still open" RESUME.md
+    [ "$(find "$CLAUDE_CONFIG_DIR/watch" -name '*.json' | wc -l)" -eq 0 ]
+}
+
+@test "re-holding replaces the question instead of accumulating stale ones" {
+    python3 "$WATCH" hold --question "first question" >/dev/null
+    python3 "$WATCH" hold --question "second question" >/dev/null
+    [ "$(find "$CLAUDE_CONFIG_DIR/watch" -name '*.json' | wc -l)" -eq 1 ]
+    run python3 "$WATCH" list
+    [[ "$output" == *"second question"* ]]
+    [[ "$output" != *"first question"* ]]
+}
+
+@test "a hold and a watcher coexist without either masking the other" {
+    python3 "$WATCH" hold --question "user question" >/dev/null
+    python3 "$WATCH" arm --cond "false" --interval 1 --ttl 30 >/dev/null
+    run python3 "$WATCH" list
+    [[ "$output" == *"user question"* ]]
+    [[ "$output" == *"false"* ]]
+}

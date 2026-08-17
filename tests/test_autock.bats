@@ -1668,6 +1668,31 @@ fakewatch() {
     [ -z "$output" ]
 }
 
+# A job stopped with TaskStop is marked `[killed]`, never `[exited with code N]`.
+# Both readers keyed on the exit form alone, so every deliberately-stopped job
+# stayed "running" for the rest of the session: this guard demanded a watcher for
+# it on every later turn (observed twice consecutively, with pgrep proving nothing
+# was alive) and the supervisor never saw it land. Measured in a live tasks dir:
+# the stopped files held exactly "\n[killed]\n" at 10 bytes.
+@test "stop-guard: a TaskStop-killed job has ended, and is not a reason to block" {
+    bgjob bg2k job-k '
+[killed]
+'
+    stopg "{\"session_id\":\"bg2k\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All done here.\"}" \
+        "$(fakewatch)"
+    [ -z "$output" ]
+}
+
+@test "stop-guard: a job with NO terminal marker is still live (the fix did not blunt it)" {
+    # The other half. Widening the marker set until the trigger never fires would
+    # pass the test above and destroy the guard -- this pins the opposite case.
+    bgjob bg2l job-l 'killed the process, still working on it'
+    stopg "{\"session_id\":\"bg2l\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All done here.\"}" \
+        "$(fakewatch)"
+    [[ "$output" == *'"decision"'* ]]
+    [[ "$output" == *"background job"* ]]
+}
+
 @test "stop-guard: no tasks dir at all fails open" {
     stopg "{\"session_id\":\"bg3\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All done here.\"}" \
         "$(fakewatch)"
@@ -2196,4 +2221,199 @@ PLAN
     [ "$status" -eq 0 ]
     grep -q "circuit open" "$CAGE/ccage-autock.log"
     [ ! -f "$REPO/.ccage-session-done" ]
+}
+
+# --- the fourth exit: a declared wait on the USER -----------------------------
+#
+# The other three exits cover MACHINE waits only. `ccage-watch arm` requires a
+# --cond that exits 0, and there is no such command for "a human must do this",
+# so a session blocked on the user had to pick a falsehood -- observed live: it
+# picks "continue" and manufactures speculative work. Worse, the ladder's
+# termination guarantee ("one poke, one restart, then silence") only ever held
+# for an INERT session: _worked_since() resets the episode on any tool call, so a
+# session that is responsive but blocked re-earns a poke every window forever.
+#
+# A hold is admissible under the ratified rule that a model-authored signal may
+# keep the supervisor awake but never send it to sleep (Task 3) only because the
+# silence ends WITHOUT the session's cooperation: the user types, or the ttl
+# lapses. Both are pinned below.
+
+# $1 = seconds since the hold was declared, $2 = ttl, $3 = question
+write_hold() {
+    mkdir -p "$CAGE/watch"
+    python3 - "$CAGE/watch/hold1.json" "$1" "$2" "$3" <<'PY'
+import json, sys, time
+json.dump({"id": "hold1", "kind": "hold", "cwd": "/p", "cond": None,
+           "question": sys.argv[4], "ttl": float(sys.argv[3]),
+           "armed_at": "2026-08-17T00:00:00",
+           "armed_epoch": time.time() - float(sys.argv[2]), "pid": None},
+          open(sys.argv[1], "w"))
+PY
+}
+
+# $1 = seconds ago the human turn is stamped
+write_human_turn() {
+    python3 - "$SDIR/sess.jsonl" "$1" <<'PY'
+import datetime, json, sys
+when = (datetime.datetime.now(datetime.timezone.utc)
+        - datetime.timedelta(seconds=float(sys.argv[2])))
+with open(sys.argv[1], "a") as f:
+    f.write(json.dumps({"type": "user", "origin": {"kind": "human"},
+                        "promptSource": "typed",
+                        "timestamp": when.isoformat().replace("+00:00", "Z")}) + "\n")
+PY
+}
+
+@test "supervisor: the poke names the hold, or nothing would ever use it" {
+    write_parked_record sess '{"jobs":[],"logs":[]}'
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=6 CCAGE_AUTOCK_SUPERVISOR_IDLE=2
+    drive idle "--poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE
+    [ "$status" -eq 0 ]
+    cap_has "b'ccage-watch hold'"
+}
+
+@test "supervisor: a declared wait on the user is silent, with no job running" {
+    # The case the watcher-armed check could NOT cover: _watch_armed() is
+    # consulted only under state == "growing", and a session blocked on the user
+    # usually has no job at all -- so a hold checked alongside it would be dead
+    # code in exactly the situation it exists for.
+    write_parked_record sess '{"jobs":[],"logs":[]}'
+    write_hold 5 3600 "declare or detect?"
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=8 CCAGE_AUTOCK_SUPERVISOR_IDLE=2
+    drive idle "--poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE
+    [ "$status" -eq 0 ]
+    ! cap_has "b'[supervisor]'"
+}
+
+@test "supervisor: a lapsed hold stops silencing anything" {
+    # Expiry is what keeps this from being a mute button. Declared 100s ago with
+    # a 1s ttl: the wait was real, nobody answered, the ladder resumes.
+    write_parked_record sess '{"jobs":[],"logs":[]}'
+    write_hold 100 1 "nobody answered this"
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=8 CCAGE_AUTOCK_SUPERVISOR_IDLE=2
+    drive idle "--poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE
+    [ "$status" -eq 0 ]
+    cap_has "b'[supervisor]'"
+    grep -q "hold lapsed" "$CAGE/ccage-autock.log"
+}
+
+@test "supervisor: the user typing clears the hold" {
+    write_parked_record sess '{"jobs":[],"logs":[]}'
+    write_hold 60 3600 "which option?"
+    write_human_turn 30                      # answered AFTER the hold was declared
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=8 CCAGE_AUTOCK_SUPERVISOR_IDLE=2
+    drive idle "--poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE
+    [ "$status" -eq 0 ]
+    grep -q "the user answered" "$CAGE/ccage-autock.log"
+    [ ! -f "$CAGE/watch/hold1.json" ]
+}
+
+@test "supervisor: its OWN injected keystroke does not clear the hold" {
+    # ccage-auto types through the pty, and the transcript stamps that
+    # origin=human/promptSource=typed -- identical to a real keystroke (measured
+    # 2026-08-15). Without subtracting the .injected marker the supervisor's own
+    # poke would clear the hold it just respected, making this exit a one-tick
+    # no-op that LOOKS implemented.
+    write_parked_record sess '{"jobs":[],"logs":[]}'
+    write_hold 60 3600 "which option?"
+    write_human_turn 0
+    mkdir -p "$CAGE/stop_guard_state"
+    touch "$CAGE/stop_guard_state/$(oracle_slug "$REPO").injected"
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=8 CCAGE_AUTOCK_SUPERVISOR_IDLE=2
+    drive idle "--poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE
+    [ "$status" -eq 0 ]
+    ! grep -q "the user answered" "$CAGE/ccage-autock.log"
+    ! cap_has "b'[supervisor]'"
+    [ -f "$CAGE/watch/hold1.json" ]
+}
+
+@test "supervisor: a landed job still reaches a held session" {
+    # A hold means "waiting on the user", not "deaf". A landed job is news the
+    # session can act on WITHOUT the user, so burying it would turn a wait on a
+    # human into a wait on nothing.
+    local log="$BATS_TEST_TMPDIR/held.log"; printf '0123456789' > "$log"
+    write_parked_record sess "{\"logs\":[{\"path\":\"$log\",\"size\":10}]}"
+    write_hold 5 3600 "which option?"
+    printf 'final output' >> "$log"          # grew, then stops
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=8 CCAGE_AUTOCK_SUPERVISOR_IDLE=2
+    drive idle "--poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE
+    [ "$status" -eq 0 ]
+    cap_has "b'held.log'"
+}
+
+# --- a stopped job is FINISHED, not eternally live (found 2026-08-17) ---------
+#
+# The harness marks a job that ran to completion `[exited with code N]` and a job
+# stopped with TaskStop `[killed]`. Both readers keyed on the first form only, so
+# every deliberately-stopped job stayed "running" for the rest of the session:
+# the Stop guard demanded a watcher for it on every subsequent turn (observed
+# twice in a row, with pgrep proving nothing was alive), and the supervisor never
+# saw it land. Measured in a live tasks dir: the stopped files held exactly
+# "\n[killed]\n" at 10 bytes.
+
+@test "unit: the bypass screen is matched as the TUI actually renders it" {
+    # FOUND BY LIVE-FIRE 2026-08-17, not by inspection. The acceptance screen is
+    # laid out with cursor-move escapes, one per word, so once ANSI is stripped
+    # the text has no spaces in it at all: "BypassPermissionsmode",
+    # "Yes,Iaccept". The spaced needles the matcher used could therefore never
+    # fire against a real screen, and a nested launch sat on the unanswered
+    # dialog forever -- which is what had been written down as "a nested
+    # ccage-auto cannot authenticate".
+    run python3 - "$AUTO" <<'PY'
+import importlib.util, importlib.machinery, re, sys
+loader = importlib.machinery.SourceFileLoader("ccageauto", sys.argv[1])
+spec = importlib.util.spec_from_loader("ccageauto", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+
+# Ask ccage-auto for its own ANSI rule rather than re-deriving one here; a test
+# that spells the rule itself agrees with the code only by coincidence.
+src = open(sys.argv[1]).read()
+line = [l.strip() for l in src.splitlines()
+        if l.strip().startswith("ANSI = re.compile")][0]
+ns = {"re": re}; exec(line, ns); ANSI = ns["ANSI"]
+
+# How the screen really arrives: each word placed by a column escape, no spaces.
+screen = (b"\x1b[2GWARNING:\x1b[11GClaude\x1b[18GCode\x1b[23Grunning\x1b[31Gin"
+          b"\x1b[34GBypass\x1b[41GPermissions\x1b[53Gmode\r\n"
+          b"\x1b[2G\x1b[38;2;153;153;153m1.\x1b[7GNo,\x1b[11Gexit\r\n"
+          b"\x1b[4G2.\x1b[7GYes,\x1b[12GI\x1b[14Gaccept\r\n")
+assert m.bypass_screen_visible(ANSI.sub(b"", screen)), "real render must match"
+
+# The other half: the words in ordinary content must NOT fire a Down+Enter into
+# a live TUI. A changelog or licence mentioning them is not the dialog.
+prose = b"The changelog says Bypass Permissions mode is on; do you accept?\n"
+assert not m.bypass_screen_visible(ANSI.sub(b"", prose)), "prose must not match"
+print("ok")
+PY
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ok"* ]]
+}
+
+@test "the terminal job markers are spelled once, not once per file" {
+    local a b
+    a="$(grep -c '"\[killed\]"' "$AUTO")"
+    b="$(grep -c '"\[killed\]"' \
+        "$BATS_TEST_DIRNAME/../share/hooks/stop_continuation_guard.sh")"
+    [ "$a" -ge 1 ]
+    [ "$b" -ge 1 ]
+}
+
+@test "the injection tolerance is spelled once, not once per file" {
+    # A second spelling of one rule is how the slug regex reached five copies and
+    # turned 28 macOS tests red in 0.15.0. Both readers subtract the same marker,
+    # so they must agree on the window.
+    local a b
+    a="$(grep -oE '^INJECTION_TOLERANCE_S = [0-9]+' "$AUTO" | grep -oE '[0-9]+')"
+    b="$(grep -oE '^INJECTION_TOLERANCE_S = [0-9]+' \
+        "$BATS_TEST_DIRNAME/../share/hooks/stop_continuation_guard.sh" \
+        | grep -oE '[0-9]+')"
+    [ -n "$a" ]
+    [ -n "$b" ]
+    [ "$a" = "$b" ]
 }
