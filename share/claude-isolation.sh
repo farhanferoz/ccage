@@ -30,6 +30,11 @@
 #       _ccage_extra_args array to inject CLI flags, and write UI-only keys
 #       into $CLAUDE_CONFIG_DIR/settings.json (never permissions, plugins, or
 #       other state — those cause cross-session cache-bashing).
+#       The hook runs in a subshell with `command claude`, so anything it
+#       exports is scoped to THAT LAUNCH and is gone when claude exits. A hook
+#       cannot (and must not try to) change the calling shell's environment:
+#       an opt-in route like a proxy base URL would otherwise stay set for the
+#       life of the shell and silently capture every later launch in it.
 #
 # Extension model:
 #   Drop a companion file next to this one that redefines either hook. If you
@@ -1001,16 +1006,24 @@ claude() {
     # picks handoff (in which case we don't exec claude).
     _ccage_intercept_resume "$@" || return $?
 
-    _ccage_extra_args=()
-    _ccage_pre_exec_hook "$PWD" "$CLAUDE_CONFIG_DIR"
-    # After the pre-exec hook on purpose: a statusLine the user's overrides just
-    # seeded into a newborn cage gets wrapped on this same launch.
-    _ccage_seed_statusline_tee "$CLAUDE_CONFIG_DIR"
-    _ccage_collect_plugin_dirs   # opt-in: --plugin-dir flags for CCAGE_PLUGINS_FROM
+    # Subshell: gives the pre-exec hook's `export`s the same guarantee `local -x`
+    # gives the wrapper's own vars above — scoped to this launch, gone when claude
+    # exits, never leaked into the interactive shell. Free: bash execs the last
+    # command in place of the subshell fork, so process tree and fork count are
+    # unchanged (measured). _ccage_intercept_resume stays OUTSIDE — its `return`
+    # has to be able to abort the function.
+    (
+        _ccage_extra_args=()
+        _ccage_pre_exec_hook "$PWD" "$CLAUDE_CONFIG_DIR"
+        # After the pre-exec hook on purpose: a statusLine the user's overrides just
+        # seeded into a newborn cage gets wrapped on this same launch.
+        _ccage_seed_statusline_tee "$CLAUDE_CONFIG_DIR"
+        _ccage_collect_plugin_dirs   # opt-in: --plugin-dir flags for CCAGE_PLUGINS_FROM
 
-    # ${arr[@]+"${arr[@]}"} is the bash-3.2-safe idiom for expanding a possibly-
-    # empty array under `set -u`. On bash 3.2 (macos default), expanding a
-    # declared-empty array as "${arr[@]}" errors as "unbound variable"; bash 4.4+
-    # treats it as empty. The pre-exec hook may have appended to extra_args, or not.
-    command claude ${_ccage_extra_args[@]+"${_ccage_extra_args[@]}"} "$@"
+        # ${arr[@]+"${arr[@]}"} is the bash-3.2-safe idiom for expanding a possibly-
+        # empty array under `set -u`. On bash 3.2 (macos default), expanding a
+        # declared-empty array as "${arr[@]}" errors as "unbound variable"; bash 4.4+
+        # treats it as empty. The pre-exec hook may have appended to extra_args, or not.
+        command claude ${_ccage_extra_args[@]+"${_ccage_extra_args[@]}"} "$@"
+    )
 }

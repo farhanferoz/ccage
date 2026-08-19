@@ -83,3 +83,34 @@ setup() {
     [ -z "${CLAUDE_CONFIG_DIR+x}" ]
     ! grep -q '^CLAUDE_CODE_ATTRIBUTION_HEADER=' "$CHILD_ENV"
 }
+
+# --- pre-exec hook: exports are scoped to the launch, not to the shell ---
+# Regression: the hook ran in the caller's shell, so an `export` in it (e.g. an
+# opt-in ANTHROPIC_BASE_URL pointing at a local proxy) persisted after claude
+# exited and silently captured every later launch in that shell.
+
+@test "pre-exec hook: child claude sees what the hook exports" {
+    _ccage_pre_exec_hook() { export CCAGE_HOOK_PROBE=from-hook; }
+    claude 2>/dev/null || true
+    grep -qx 'CCAGE_HOOK_PROBE=from-hook' "$CHILD_ENV"
+}
+
+@test "no leak: a var the pre-exec hook exports is gone from the shell after claude returns" {
+    _ccage_pre_exec_hook() { export CCAGE_HOOK_PROBE=from-hook; }
+    claude 2>/dev/null || true
+    [ -z "${CCAGE_HOOK_PROBE+x}" ]
+}
+
+@test "no leak: the hook cannot clobber a var the shell already had" {
+    export CCAGE_HOOK_PROBE=mine
+    _ccage_pre_exec_hook() { export CCAGE_HOOK_PROBE=from-hook; }
+    claude 2>/dev/null || true
+    [ "${CCAGE_HOOK_PROBE:-}" = "mine" ]
+}
+
+@test "pre-exec hook: CLI flags appended to _ccage_extra_args still reach claude" {
+    printf '#!/bin/sh\necho "$@" > "$CHILD_ENV"\n' > "$BATS_TEST_TMPDIR/bin/claude"
+    _ccage_pre_exec_hook() { _ccage_extra_args+=(--probe-flag); }
+    claude 2>/dev/null || true
+    grep -q -- '--probe-flag' "$CHILD_ENV"
+}

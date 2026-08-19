@@ -53,7 +53,14 @@ _ccage_pre_exec_hook() {
     #     data["statusLine"] = {"type": "command", "command": "bash ~/.claude/statusline-command.sh"}
     #     p.write_text(json.dumps(data, indent=2) + "\n")
     # PY
+    # Example 3: opt-in routing through a local gateway / translation proxy (e.g. OpenCode Go, LiteLLM).
+    # if [ "${OPENCODE:-0}" = "1" ] || [ "${CCAGE_OPENCODE:-0}" = "1" ]; then
+    #     export ANTHROPIC_BASE_URL="http://127.0.0.1:3456"
+    #     export ANTHROPIC_AUTH_TOKEN="unused"
+    #     unset ANTHROPIC_API_KEY
+    #     export CCAGE_NO_RESUME_PROMPT=1
     # fi
 
     :
 }
+

@@ -2,6 +2,18 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.17.1] — 2026-08-19
+
+### Fixed — a pre-exec hook could not stop exporting into the calling shell
+- **The hook ran in the interactive shell, so its `export`s outlived the launch.** `claude()` calls `_ccage_pre_exec_hook` in-process, with no subshell between the hook and `command claude`. An opt-in route set there — `ANTHROPIC_BASE_URL` pointing at a local translation proxy, guarded by a flag — stayed exported for the life of that shell and silently captured every later `claude` / `ccage` / `ccage-auto` launch in it.
+- **The opt-in flag evaporates correctly; its side effects did not.** bash does not persist an assignment prefix on a *function* call, so `FLAG=1 claude …` leaves the flag unset once the function returns. That is what made the leak silent: the gate read as off while the routing it had installed was still on. Observed as a launch with no `--model` sending the default model to a proxy that maps only open-weight models, which answered 500 to every request until the retry budget ran out.
+- **The wrapper already had the discipline; the extension point sat outside it.** `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_ATTRIBUTION_HEADER` and `DISABLE_AUTOUPDATER` use `local -x` precisely so they cannot bleed into an unrelated tool run after a later `cd`. The hook contract documented a few lines above them said "Can export env vars", and a hook took it literally.
+- **The hook and `command claude` now run in a subshell**, giving a hook's exports the same launch-scoped lifetime `local -x` gives the wrapper's own vars. It costs nothing: bash execs the last command in place of the subshell fork, so process tree and fork count are unchanged (measured, not assumed). `_ccage_intercept_resume` deliberately stays outside — its `return` still has to be able to abort the launch.
+- **Four bats cases in `test_env_defaults.bats`, mutant-verified against the pre-fix file.** Two assert no leak and fail without the subshell; two assert the contract still holds — the child still sees what the hook exports, and hook-appended CLI flags still reach claude.
+
+### Added
+- `share/claude-overrides.sh.example` gains a commented example of the pattern that broke — opt-in routing through a local gateway or translation proxy — which is safe to copy now that hook exports are launch-scoped.
+
 ## [0.17.0] — 2026-08-17
 
 ### Added — a fourth exit from the idle poke: a declared wait on the USER
