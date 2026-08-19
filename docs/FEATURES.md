@@ -717,6 +717,31 @@ Create `~/.claude-master/commands/`, `~/.claude-master/agents/`, `~/.claude-mast
 
 We deliberately do not touch `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BETAS`, `ANTHROPIC_MODEL`, `ANTHROPIC_BASE_URL`. These are user-configured.
 
+### Third-Party Gateways & Translation Proxies (e.g. OpenCode Go, LiteLLM)
+
+When routing Claude Code through custom API gateways or local translation proxies (such as `ogc` for OpenCode Go or LiteLLM):
+
+1. **Do NOT write `ANTHROPIC_BASE_URL` to `~/.claude/settings.json`:** Because `ccage` pivots `CLAUDE_CONFIG_DIR` per project, project cages will not inherit the root settings file.
+2. **Use `_ccage_pre_exec_hook` in `~/.bashrc.d/claude-overrides.sh`:** Exporting variables dynamically in the pre-exec hook ensures all cages inherit the proxy without mutating individual cage configurations:
+
+```bash
+# In ~/.bashrc.d/claude-overrides.sh:
+_ccage_pre_exec_hook() {
+    if [ "${OPENCODE:-0}" = "1" ] || [ "${CCAGE_OPENCODE:-0}" = "1" ]; then
+        export ANTHROPIC_BASE_URL="http://127.0.0.1:3456"
+        export ANTHROPIC_AUTH_TOKEN="unused"
+        unset ANTHROPIC_API_KEY
+        export CCAGE_NO_RESUME_PROMPT=1
+    fi
+}
+```
+
+Since v0.17.1 the hook runs in a subshell together with `command claude`, so these exports last exactly one launch and cannot reach your interactive shell. Before that they persisted: a single opt-in run left `ANTHROPIC_BASE_URL` set for the life of the shell, silently routing every later `claude` / `ccage-auto` launch in it through the proxy — while the opt-in flag itself, being an assignment prefix on a function call, had already evaporated.
+
+3. **Interactive launcher:** a wrapper function in your own `claude-overrides.sh` can present a model and effort selector and pass `--model <name>` / `--effort <level>` into the caged launch. ccage ships no launcher — the hook above is the whole integration point.
+
+
+
 Other Claude env vars surveyed but intentionally *not* defaulted by ccage (users can set them in overrides or shell rc):
 
 | Var | Why we didn't set a default |
