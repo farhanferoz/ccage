@@ -2,6 +2,34 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.18.0] — 2026-08-20
+
+### Added — session docs are delivered whole, in labelled parts
+
+- **A hook cannot inject more than 10,000 characters, and nothing said so.** Claude Code caps every hook injection path — plain stdout, `additionalContext`, `systemMessage`, `initialUserMessage` — at 10,000 characters (the constant `Drp=1e4` in the 2.1.237 binary, applied at all four call sites). Past the cap the output is written to disk and only a **2,000-character preview** reaches the model. A 76 KB `DECISIONS.md` was therefore arriving as 2 KB, and a 19 KB `RESUME.md` had been losing most of itself the same way — silently, for as long as those files had been that size.
+- **`share/hooks/session_doc_chunk.sh` delivers a document as N parts**, registered one hook command per part (`session_doc_chunk.sh <resume|decisions> <k> <n>`, default 12 per document). Each part emits one balanced slice on line boundaries; the parts reassemble to the source byte-for-byte. `/clear` re-runs every part, each re-reading from disk, so delivery stays fresh rather than frozen at launch.
+- **Parts arrive in COMPLETION order, not registration order** — measured, and the reason every part carries its own framing and an explicit `part k/n` label. Six hooks registered 1..6 but made to finish 6..1 were delivered 6,5,4,3,2,1, whether registered as six entries or as one entry with six commands. This cage's own transcripts show the same thing: the autoload hook is registered first and delivered last, because it is the slowest. No hook can promise to precede another, so a framing line that rode only on part 1 would as often as not be read after the content it frames.
+- **`n` is capacity, not a fit.** It is seeded once and never reconciled; the script decides at run time how many parts the current file needs, so documents grow and shrink with no re-seeding, and parts past the end of a short document cost one no-op. Long lines shrink the usable ceiling, because a part is built from whole lines and is sized `CCAGE_DOC_CHUNK_CHARS - longest_line - overhead`.
+- **Nothing is dropped silently.** Every loss notice — a line-budget cut, a capacity overflow, a single line too long to fit any part — is emitted *before* the content, so it survives even when the part it is attached to is itself replaced by a preview. Every invocation, including each no-op, appends one line to `$CLAUDE_CONFIG_DIR/session-doc-chunk.log`, so "did all 9 parts arrive?" is a one-line grep.
+- New knobs: `CCAGE_DOC_CHUNKS` (parts per document, default 12), `CCAGE_DOC_CHUNK_CHARS` (characters per part, default 8500), `CCAGE_DECISIONS_BUDGET_BYTES` (advisory nag, default 48000).
+
+### Changed
+
+- **`resume_autoload.sh` no longer emits document bodies** — it keeps the side effects (stale-marker clearing, watcher reaping, plan-doc pointers) and the one-line health NOTEs. It also stops printing a framing line for the register: hook outputs are unordered, so "the register follows below" was as likely to be read before or after the parts as with them.
+- **The `SessionStart` hook block is rebuilt rather than appended to.** Appending cannot keep `2n+1` entries together once locally-seeded hooks are added between launches. A user hook bundled in the same entry as a ccage hook survives the rebuild.
+- **`DECISIONS.md` is delivered whole, with an advisory size NOTE instead of a cut.** The previous 120-line truncation silently dropped live decisions; the NOTE applies the same pressure without the data loss.
+- **The trust note in `docs/FEATURES.md` now states the real numbers** — up to ~102,000 characters per document rather than a 2 KB preview, `DECISIONS.md` included, and the `=== … ===` part labels explicitly called out as forgeable by document content and not a trust boundary.
+
+### Fixed
+
+- **`ccage-auto` spent 93% of its runtime asking an interactive shell where the cage was.** `resolve_config_dir` probed via `bash -ic`, sourcing the whole `.bashrc`: 1.36 s of a 1.75 s `--status`, paid on every invocation not already inside a cage. `CCAGE_NO_INTERACTIVE_RESOLVE` skips it — 1,585 ms to 153 ms, and 1,749 ms to 73 ms in-process.
+- **The non-interactive fallback ignored an installed cage-dir override**, pointing the session at the wrong cage with no error. It sourced only `claude-isolation.sh`, where `_ccage_config_dir_override` is a stub returning 1, so a `claude-overrides.sh` was never consulted. It now sources the companion file the same way `bin/ccage` does, guards included.
+- **Hook identity was derived from the last token of a command**, which for an argument-carrying registration is a number, not a script. Five places derived it; three were wrong, each failing differently and silently — parts never seeded, entries left behind at uninstall, a ccage hook copied in over a deliberate opt-out. All five now match the first token naming a `.sh`, with a regression test that goes red if any one of them drifts back.
+- **A drifted `settings.json` could never repair itself.** The launch fast-path compared an aggregate count, which a cage holding 24 `decisions` parts and 0 `resume` parts satisfies exactly — so it concluded "already seeded" on every launch and the merge that would fix it never ran. It now counts per document kind.
+- **A relocated hooks directory left every cage calling a path that no longer existed.** Registration identity deliberately excludes the path so a moved directory is not mistaken for a new hook, but nothing then repointed the old commands, and a hook whose script is missing fails silently. The comparison now also checks the raw command strings.
+- **`CCAGE_NO_AUTOLOAD` did nothing in a cage that was already seeded** — the opt-out only skipped registration, leaving the existing hooks firing. It is now honoured at run time as well.
+- **An unvalidated `CCAGE_DOC_CHUNK_CHARS` destroyed the payload.** A value of `0`, or any non-numeric value, reached awk as a divisor: division by zero, the entire register absent from context, and the hook still exiting 0. Validated now, like its sibling.
+
 ## [0.17.1] — 2026-08-19
 
 ### Fixed — a pre-exec hook could not stop exporting into the calling shell

@@ -12,6 +12,10 @@
 # minutes. This suite is also the reason a full-suite run is worth keeping cheap.
 bats_require_minimum_version 1.5.0
 
+# See tests/test_autock.bats: skip ccage-auto's interactive-shell cage-dir probe,
+# which sources the developer's whole .bashrc on every invocation.
+export CCAGE_NO_INTERACTIVE_RESOLVE=1
+
 setup() {
     command -v python3 >/dev/null 2>&1 || skip "python3 required"
     WATCH="$BATS_TEST_DIRNAME/../bin/ccage-watch"

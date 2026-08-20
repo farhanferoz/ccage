@@ -5,6 +5,10 @@
 # inherits from the claude process).
 bats_require_minimum_version 1.5.0
 
+# See tests/test_autock.bats: skip ccage-auto's interactive-shell cage-dir probe,
+# which sources the developer's whole .bashrc on every invocation.
+export CCAGE_NO_INTERACTIVE_RESOLVE=1
+
 HOOK="$BATS_TEST_DIRNAME/../share/hooks/resume_autoload.sh"
 
 setup() {
@@ -38,27 +42,45 @@ memdir() {
     [ -z "$output" ]
 }
 
-@test "RESUME present: contents echoed to stdout" {
+# The RESUME/DECISIONS BODY moved to session_doc_chunk.sh (see
+# tests/test_session_doc_chunk.bats): a hook's output is capped at 10,000 chars,
+# so this hook could never carry a full register and stopped trying. What must
+# not regress is the division of labour — this hook emits side effects and
+# NOTES, never the body, or the two would deliver the document twice.
+@test "RESUME present: the body is NOT echoed here (the chunk hook carries it)" {
     printf '# Resume\n\nthread one\n' > "$REPO/RESUME.md"
     run run_hook
     [ "$status" -eq 0 ]
-    [[ "$output" == *"thread one"* ]]
+    [[ "$output" != *"thread one"* ]]
 }
 
-@test "CCAGE_SLOT=review: reads RESUME.review.md, not RESUME.md" {
-    printf 'PLAIN FILE\n' > "$REPO/RESUME.md"
-    printf 'SLOT FILE\n'  > "$REPO/RESUME.review.md"
-    CCAGE_SLOT=review run run_hook
+@test "DECISIONS present: no framing line here either (each part frames itself)" {
+    # Hook outputs arrive in COMPLETION order, so a "the register follows below"
+    # line would as often as not be read before or after the parts it refers to.
+    printf '# Resume\n' > "$REPO/RESUME.md"
+    printf -- '- D1 ratified\n' > "$REPO/DECISIONS.md"
+    run run_hook
     [ "$status" -eq 0 ]
-    [[ "$output" == *"SLOT FILE"* ]]
-    [[ "$output" != *"PLAIN FILE"* ]]
+    [[ "$output" != *"RATIFIED DECISIONS"* ]]
+    [[ "$output" != *"D1 ratified"* ]]
 }
 
-@test "unsafe CCAGE_SLOT: falls back to plain RESUME.md" {
-    printf 'PLAIN FILE\n' > "$REPO/RESUME.md"
-    CCAGE_SLOT="bad/slot" run run_hook
+# The hook still resolves the slot — for the BUDGET NOTE now, not the body. A
+# regression here nags about the wrong file, silently, so it is still pinned.
+@test "CCAGE_SLOT=review: budgets RESUME.review.md, not RESUME.md" {
+    seq 1 400 > "$REPO/RESUME.review.md"     # over budget
+    printf 'lean\n' > "$REPO/RESUME.md"      # under it
+    CCAGE_SLOT=review CCAGE_RESUME_BUDGET_LINES=250 run run_hook
     [ "$status" -eq 0 ]
-    [[ "$output" == *"PLAIN FILE"* ]]
+    [[ "$output" == *"over budget"* ]]
+}
+
+@test "unsafe CCAGE_SLOT: falls back to the plain RESUME.md" {
+    seq 1 400 > "$REPO/RESUME.md"            # over budget
+    printf 'lean\n' > "$REPO/RESUME.bad.md"
+    CCAGE_SLOT="bad/slot" CCAGE_RESUME_BUDGET_LINES=250 run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"over budget"* ]]
 }
 
 @test "RESUME over line budget: emits trim NOTE" {
@@ -183,22 +205,19 @@ memdir() {
 }
 
 # ===== bounded injection =====
+#
+# The runaway-RESUME cut (2x the line budget) moved with the body to
+# session_doc_chunk.sh, which now applies it — still resolved at run time from
+# CCAGE_RESUME_BUDGET_LINES, still with a loud NOTE. Pinned in
+# tests/test_session_doc_chunk.bats. What is pinned here is that this hook no
+# longer cuts anything, so the two cannot disagree about where the cut is.
 
-@test "huge RESUME: injection truncated at 2x budget with a NOTE" {
+@test "huge RESUME: this hook emits no body and therefore no truncation NOTE" {
     seq 1 600 > "$REPO/RESUME.md"
     CCAGE_RESUME_BUDGET_LINES=250 run run_hook
     [ "$status" -eq 0 ]
-    [[ "$output" == *"truncated at 500 lines"* ]]
-    [[ "$output" == *$'\n500\n'* ]]     # last injected line
-    [[ "$output" != *$'\n501\n'* ]]     # nothing beyond the cut
-}
-
-@test "RESUME within 2x budget: injected whole, no truncation NOTE" {
-    seq 1 300 > "$REPO/RESUME.md"
-    CCAGE_RESUME_BUDGET_LINES=250 run run_hook
-    [ "$status" -eq 0 ]
-    [[ "$output" == *$'\n300'* ]]
-    [[ "$output" != *"truncated"* ]]
+    [[ "$output" != *"truncated at"* ]]
+    [[ "$output" != *$'\n500\n'* ]]
 }
 
 # ===== byte budget (dense content can bloat under the line cap) =====
@@ -272,7 +291,6 @@ memdir() {
     run run_hook
     [ "$status" -eq 0 ]
     [[ "$output" != *"DISPATCHER"* ]]
-    [[ "$output" == *"just prose"* ]]
 }
 
 @test "plan pointer: programme-plan layout under ### Plan (MASTER.md + strand) is detected" {
@@ -780,7 +798,7 @@ stub_bin() {
     printf '%s/bin:%s' "$BATS_TEST_TMPDIR" "$PATH"
 }
 
-@test "a watcher that died is reported, ahead of the RESUME body it annotates" {
+@test "a watcher that died is reported at session start" {
     local p
     p=$(stub_bin <<'EOF'
 #!/bin/sh
@@ -793,8 +811,11 @@ EOF
     run run_hook_env "$p" "$HOME"
     [ "$status" -eq 0 ]
     [[ "$output" == *"DIED deadbeef00"* ]]
-    # Order is the point: the death must be in context before the state it corrects.
-    [[ "${output%%the resume body*}" == *"DIED deadbeef00"* ]]
+    # The old form of this test also asserted the death landed AHEAD of the
+    # RESUME body it corrects. That claim is gone with the body: hook outputs are
+    # injected in COMPLETION order, not registration order (measured 2026-08-20),
+    # so no hook can promise to precede another. Presence is what is pinned.
+    [[ "$output" != *"the resume body"* ]]
 }
 
 @test "no watcher armed: reap contributes nothing to session start" {
@@ -807,7 +828,6 @@ EOF
     printf 'the resume body\n' > "$REPO/RESUME.md"
     run run_hook_env "$p" "$HOME"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"the resume body"* ]]
     # Not "no output" — this RESUME has no ### Plan section, so the plan-state
     # block speaks. The claim is narrower: the watcher path adds nothing.
     [[ "$output" != *"WATCHERS"* ]]
@@ -819,6 +839,5 @@ EOF
     printf 'the resume body\n' > "$REPO/RESUME.md"
     run run_hook_env "$BATS_TEST_TMPDIR/empty:/usr/bin:/bin" "$BATS_TEST_TMPDIR/nohome"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"the resume body"* ]]
     [[ "$output" != *"WATCHERS"* ]]
 }

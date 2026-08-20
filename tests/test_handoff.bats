@@ -8,6 +8,10 @@
 # likewise grouped one test per helper (all cases inside).
 bats_require_minimum_version 1.5.0
 
+# See tests/test_autock.bats: skip ccage-auto's interactive-shell cage-dir probe,
+# which sources the developer's whole .bashrc on every invocation.
+export CCAGE_NO_INTERACTIVE_RESOLVE=1
+
 setup() {
     REPO_ROOT="$BATS_TEST_DIRNAME/.."
     FIXTURES="$BATS_TEST_DIRNAME/fixtures/sessions"

@@ -166,7 +166,8 @@ has_cmd() {
     has_cmd "$cage/settings.json" SessionStart "echo hi"
     has_cmd "$cage/settings.json" PreToolUse  "echo pre"
     has_cmd "$cage/settings.json" SessionStart "$AUTOLOAD_CMD"
-    [ "$(jq '[.hooks.SessionStart[]?.hooks[]?.command] | length' "$cage/settings.json")" -eq 2 ]
+    # 1 foreign + autoload + 2 docs x CCAGE_DOC_CHUNKS parts.
+    [ "$(jq '[.hooks.SessionStart[]?.hooks[]?.command] | length' "$cage/settings.json")" -eq "$((2 + 2 * ${CCAGE_DOC_CHUNKS:-12}))" ]
 }
 
 @test "doctor honors CCAGE_NO_AUTOLOAD (backfills only the budget hook)" {
@@ -178,12 +179,12 @@ has_cmd() {
 }
 
 # Adversarial regression: a differing CCAGE_HOOKS_DIR must not append a second
-# entry (dedup is on the script basename, not the full command path).
+# set of entries (identity is (script basename, arguments), not the full path).
 @test "doctor is idempotent across a differing CCAGE_HOOKS_DIR" {
     local cage; cage=$(mkcage proj14 "$BATS_TEST_TMPDIR/repo14")
     "$CCAGE" doctor >/dev/null
     CCAGE_HOOKS_DIR="/somewhere/else/hooks" "$CCAGE" doctor >/dev/null
-    [ "$(jq '[.hooks.SessionStart[]?.hooks[]?.command] | length' "$cage/settings.json")" -eq 1 ]
+    [ "$(jq '[.hooks.SessionStart[]?.hooks[]?.command] | length' "$cage/settings.json")" -eq "$((1 + 2 * ${CCAGE_DOC_CHUNKS:-12}))" ]
 }
 
 # ---- --unseed: the inverse of the backfill (used by uninstall.sh) --------
@@ -211,6 +212,42 @@ PY
     ! has_cmd "$cage/settings.json" PostToolUse  "$BUDGET_CMD"
     has_cmd "$cage/settings.json" SessionStart "echo foreign"
     [ "$(jq -r '.statusLine.command' "$cage/settings.json")" = "my-statusline" ]
+    # Every chunk entry goes too — see the drift test below for why this is the
+    # assertion that catches a whole class of bug.
+    [ "$(jq '[.hooks.SessionStart[]?.hooks[]?.command | select(test("session_doc_chunk"))] | length' "$cage/settings.json")" -eq 0 ]
+}
+
+# DRIFT NET. Five separate places extract "which script does this hook command
+# run" from a command string, in three files and four python heredocs that
+# cannot import each other. The chunk hook is registered WITH ARGUMENTS
+# ("... session_doc_chunk.sh decisions 3 12"), so the obvious last-token rule
+# returns "12" and the hook stops being recognised as ccage's. That is not
+# hypothetical: three of the five carried exactly that bug, each failing
+# SILENTLY and differently — parts never seeded, entries left behind at
+# uninstall, a ccage hook copied in over a deliberate opt-out.
+#
+# Extracting one shared implementation needs a real importable module plus
+# install wiring plus path resolution from both install locations. This test is
+# the cheap half of that trade: it pins the BEHAVIOUR the five must share, so
+# drift shows up as a red test rather than as silence.
+@test "an argument-carrying ccage hook is recognised as ours by every consumer" {
+    local cage; cage=$(mkcage proj15b "$BATS_TEST_TMPDIR/repo15b")
+    "$CCAGE" doctor >/dev/null
+
+    # 1. The seeder registers each part as a DISTINCT hook (not one, deduped by
+    #    a shared basename).
+    local n; n=$(jq '[.hooks.SessionStart[].hooks[].command | select(test("session_doc_chunk"))] | unique | length' "$cage/settings.json")
+    [ "$n" -gt 1 ]
+
+    # 2. The local-hook seeder must SKIP it: it is ccage-owned, and copying it
+    #    in would override a deliberate CCAGE_NO_AUTOLOAD opt-out.
+    grep -q 'session_doc_chunk.sh' "$BATS_TEST_DIRNAME/../share/claude-isolation.sh"
+    run grep -A4 'CCAGE_OWNED = ' "$BATS_TEST_DIRNAME/../share/claude-isolation.sh"
+    [[ "$output" == *"session_doc_chunk.sh"* ]]
+
+    # 3. Unseed removes every one of them, leaving nothing behind.
+    "$CCAGE" doctor --unseed >/dev/null
+    [ "$(jq '[.hooks.SessionStart[]?.hooks[]?.command | select(test("session_doc_chunk"))] | length' "$cage/settings.json")" -eq 0 ]
 }
 
 @test "doctor --unseed --dry-run changes nothing on disk" {

@@ -15,6 +15,7 @@
 #   <prefix>/share/ccage/lib/subagent_watch.py — circuit-breaker watcher lib
 #   <prefix>/bin/ccb-report       — circuit-breaker ledger evaluation report CLI
 #   ~/.claude/hooks/resume_autoload.sh      — SessionStart auto-read hook
+#   ~/.claude/hooks/session_doc_chunk.sh    — SessionStart doc-part hook
 #   ~/.claude/hooks/resume_budget_check.sh  — PostToolUse RESUME budget guard
 #   <share-from>/skills/checkpoint/         — /checkpoint skill (reaches cages
 #                                             via the existing skills symlink)
@@ -205,6 +206,7 @@ fi
 if [ "$install_session_docs" = 1 ]; then
     hooks_dir="${CCAGE_HOOKS_DIR:-$HOME/.claude/hooks}"
     install_file "$REPO_ROOT/share/hooks/resume_autoload.sh"     "$hooks_dir/resume_autoload.sh"     0755
+    install_file "$REPO_ROOT/share/hooks/session_doc_chunk.sh"   "$hooks_dir/session_doc_chunk.sh"   0755
     install_file "$REPO_ROOT/share/hooks/resume_budget_check.sh" "$hooks_dir/resume_budget_check.sh" 0755
 
     share_from="${CCAGE_SHARE_FROM:-$HOME/.claude}"

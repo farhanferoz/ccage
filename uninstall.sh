@@ -102,13 +102,13 @@ if command -v python3 >/dev/null 2>&1; then
 else
     printf 'warning: python3 not found — per-cage hook entries NOT removed.\n'
     printf '         run "ccage doctor --unseed" before deleting the CLI, or remove the\n'
-    printf '         resume_autoload/resume_budget_check entries and any wrapped statusLine\n'
+    printf '         resume_autoload/session_doc_chunk/resume_budget_check entries and any wrapped statusLine\n'
     printf '         from each cage settings.json.\n'
 fi
 
 # Session-docs assets (Phase 7): hooks, /checkpoint skill, CLAUDE.md anchor.
 hooks_dir="${CCAGE_HOOKS_DIR:-$HOME/.claude/hooks}"
-for f in "$hooks_dir/resume_autoload.sh" "$hooks_dir/resume_budget_check.sh" "$hooks_dir/ccage-statusline-tee.sh"; do
+for f in "$hooks_dir/resume_autoload.sh" "$hooks_dir/session_doc_chunk.sh" "$hooks_dir/resume_budget_check.sh" "$hooks_dir/ccage-statusline-tee.sh"; do
     if [ -f "$f" ]; then run rm -f "$f"; printf 'removed %s\n' "$f"; fi
 done
 

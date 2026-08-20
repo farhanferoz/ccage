@@ -5,6 +5,10 @@
 # See docs/WEEKLY-LIMIT-GUARD.md for the design this implements.
 bats_require_minimum_version 1.5.0
 
+# See tests/test_autock.bats: skip ccage-auto's interactive-shell cage-dir probe,
+# which sources the developer's whole .bashrc on every invocation.
+export CCAGE_NO_INTERACTIVE_RESOLVE=1
+
 load helpers
 
 TEE_SRC="$BATS_TEST_DIRNAME/../share/hooks/ccage-statusline-tee.sh"

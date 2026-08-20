@@ -5,6 +5,10 @@
 # CLAUDE_CONFIG_DIR bleeding into a later `cd` + tool run was the bug).
 bats_require_minimum_version 1.5.0
 
+# See tests/test_autock.bats: skip ccage-auto's interactive-shell cage-dir probe,
+# which sources the developer's whole .bashrc on every invocation.
+export CCAGE_NO_INTERACTIVE_RESOLVE=1
+
 load helpers
 
 setup() {

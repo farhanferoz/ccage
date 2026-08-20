@@ -19,6 +19,9 @@ setup() {
     HOOKS_DIR="$BATS_TEST_TMPDIR/hooks"
     export CCAGE_HOOKS_DIR="$HOOKS_DIR"
     AUTOLOAD_CMD="bash $HOOKS_DIR/resume_autoload.sh"
+    CHUNKS="${CCAGE_DOC_CHUNKS:-12}"
+    # autoload + one command per part, for each of DECISIONS and RESUME.
+    SS_TOTAL=$((1 + 2 * CHUNKS))
     BUDGET_CMD="bash $HOOKS_DIR/resume_budget_check.sh"
 }
 
@@ -68,8 +71,48 @@ JSON
     CCAGE_SESSION_DOCS=1
     _ccage_seed_session_docs_hooks "$CAGE"
     _ccage_seed_session_docs_hooks "$CAGE"
-    [ "$(jq '.hooks.SessionStart | length' "$SETTINGS")" -eq 1 ]
+    [ "$(jq '.hooks.SessionStart | length' "$SETTINGS")" -eq "$SS_TOTAL" ]
     [ "$(jq '.hooks.PostToolUse  | length' "$SETTINGS")" -eq 1 ]
+}
+
+@test "the chunk hook is seeded once per part, for both docs, with the count baked in" {
+    CCAGE_SESSION_DOCS=1
+    _ccage_seed_session_docs_hooks "$CAGE"
+    local cmds; cmds=$(jq -r '[.hooks.SessionStart[].hooks[].command] | .[]' "$SETTINGS")
+    [ "$(printf '%s\n' "$cmds" | grep -c 'session_doc_chunk.sh decisions ')" -eq "$CHUNKS" ]
+    [ "$(printf '%s\n' "$cmds" | grep -c 'session_doc_chunk.sh resume ')"    -eq "$CHUNKS" ]
+    # Each part is a DISTINCT registration — the bug a basename-only dedup key
+    # would cause is exactly one part seeded and the rest silently dropped.
+    [ "$(printf '%s\n' "$cmds" | grep 'session_doc_chunk.sh' | sort -u | wc -l)" -eq "$((2 * CHUNKS))" ]
+    printf '%s\n' "$cmds" | grep -qF "session_doc_chunk.sh decisions 1 $CHUNKS"
+    printf '%s\n' "$cmds" | grep -qF "session_doc_chunk.sh resume $CHUNKS $CHUNKS"
+}
+
+@test "CCAGE_DOC_CHUNKS rewrites the block; a bogus value falls back to the default" {
+    CCAGE_SESSION_DOCS=1
+    _ccage_seed_session_docs_hooks "$CAGE"
+    # Rewritten in place, not appended to — otherwise the parts drift apart from
+    # each other as _ccage_seed_local_hooks adds entries between launches.
+    CCAGE_DOC_CHUNKS=4 _ccage_seed_session_docs_hooks "$CAGE"
+    [ "$(jq '[.hooks.SessionStart[].hooks[].command | select(test("session_doc_chunk"))] | length' "$SETTINGS")" -eq 8 ]
+    [ "$(jq '[.hooks.SessionStart[].hooks[].command | select(test("resume_autoload"))]  | length' "$SETTINGS")" -eq 1 ]
+    # The value is baked into every registration, so it is validated first.
+    CCAGE_DOC_CHUNKS="; rm -rf /" _ccage_seed_session_docs_hooks "$CAGE"
+    [ "$(jq '.hooks.SessionStart | length' "$SETTINGS")" -eq "$SS_TOTAL" ]
+    run jq -e '[.hooks.SessionStart[].hooks[].command] | any(test("rm -rf"))' "$SETTINGS"
+    [ "$status" -ne 0 ]
+}
+
+@test "a user hook bundled in the SAME entry as ours survives the rebuild" {
+    CCAGE_SESSION_DOCS=1
+    cat > "$SETTINGS" <<JSON
+{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[
+  {"type":"command","command":"bash $HOOKS_DIR/resume_autoload.sh"},
+  {"type":"command","command":"echo mine"}]}]}}
+JSON
+    _ccage_seed_session_docs_hooks "$CAGE"
+    jq -e '[.hooks.SessionStart[]?.hooks[]?.command] | any(. == "echo mine")' "$SETTINGS" >/dev/null
+    [ "$(jq '[.hooks.SessionStart[].hooks[].command | select(test("resume_autoload"))] | length' "$SETTINGS")" -eq 1 ]
 }
 
 @test "CCAGE_NO_AUTOLOAD=1: only the budget hook is seeded" {
@@ -114,7 +157,7 @@ JSON
     jq -e '[ .hooks.SessionStart[]?.hooks[]?.command ] | any(. == "echo hi")' "$SETTINGS" >/dev/null
     # Ours is appended.
     has_cmd SessionStart "$AUTOLOAD_CMD"
-    [ "$(jq '.hooks.SessionStart | length' "$SETTINGS")" -eq 2 ]
+    [ "$(jq '.hooks.SessionStart | length' "$SETTINGS")" -eq "$((1 + SS_TOTAL))" ]
 }
 
 @test "preserves a malformed (non-JSON) settings.json without crashing" {
@@ -138,11 +181,11 @@ JSON
     [ "$(ls -ld "$SETTINGS" | cut -c1-10)" = "-rw-------" ]
 }
 
-@test "seeding is idempotent across a differing CCAGE_HOOKS_DIR (basename dedup)" {
+@test "seeding is idempotent across a differing CCAGE_HOOKS_DIR (path is not identity)" {
     CCAGE_SESSION_DOCS=1
     _ccage_seed_session_docs_hooks "$CAGE"
     # Re-seed with a different hooks dir baked into the command path.
     CCAGE_HOOKS_DIR="/somewhere/else/hooks" _ccage_seed_session_docs_hooks "$CAGE"
-    # Still exactly one SessionStart entry — no duplicate from the path change.
-    [ "$(jq '[.hooks.SessionStart[]?.hooks[]?.command] | length' "$SETTINGS")" -eq 1 ]
+    # Same commands as before — no duplicate set from the path change.
+    [ "$(jq '[.hooks.SessionStart[]?.hooks[]?.command] | length' "$SETTINGS")" -eq "$SS_TOTAL" ]
 }

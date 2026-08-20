@@ -444,13 +444,35 @@ Closes the loop between the structural `ccage handoff` brief and a repo's durabl
 
 ### Auto-read hook (SessionStart)
 
-`share/hooks/resume_autoload.sh`, registered on `SessionStart` for `startup|resume|clear|compact`. A SessionStart hook's stdout is injected into the model's context, so after `/clear` the prior `RESUME.md` is reloaded automatically — that is the whole point of the `clear` source. The hook is slot-aware (mirrors the wrapper's `CCAGE_SLOT` validation), always exits 0, and emits at most two one-line health NOTEs: *RESUME over budget → run `/checkpoint`* and *memory dir messy → run `/checkpoint --tidy`*.
+`share/hooks/resume_autoload.sh`, registered on `SessionStart` for `startup|resume|clear|compact`. A SessionStart hook's stdout is injected into the model's context, so after `/clear` the prior state is reloaded automatically — that is the whole point of the `clear` source. This hook carries the *side effects* (stale-marker clearing, watcher reaping, plan-doc pointers) and the one-line health NOTEs: *RESUME over budget → run `/checkpoint`*, *DECISIONS over budget → retire spent entries*, and *memory dir messy → run `/checkpoint --tidy`*. It always exits 0.
+
+The **document bodies** are delivered by a second hook — see below.
+
+### Part-wise doc delivery (`session_doc_chunk.sh`)
+
+Claude Code caps **every** hook injection path — plain stdout, JSON `additionalContext`, `systemMessage`, `initialUserMessage` — at **10,000 characters** per hook output (verified in the 2.1.237 binary: the constant `Drp=1e4` feeding `nvt()`, called at all four sites). Past the cap, the output is written to disk and only a **2,000-character preview** reaches the model. A 76 KB decisions register therefore arrived as a 2 KB preview, and a 19 KB `RESUME.md` was silently losing most of itself the same way.
+
+`share/hooks/session_doc_chunk.sh` is registered once per **part**: `session_doc_chunk.sh <resume|decisions> <k> <n>`. Each invocation emits one balanced slice of the file, comfortably under the cap; together the slices reconstruct the document byte-for-byte. `/clear` re-runs every part, each of which re-reads from disk, so delivery stays fresh.
+
+Three properties are worth knowing:
+
+- **Parts arrive OUT OF ORDER.** SessionStart hooks run concurrently and their outputs are injected in *completion* order, not registration order — measured 2026-08-20 against a real session: six hooks registered 1..6 but made to finish 6..1 were delivered 6,5,4,3,2,1, whether registered as six entries or as one entry with six commands. So every part carries its own framing and an explicit `part k/n` label, and the model reassembles by number. No hook can promise to precede another.
+- **`n` is capacity, not a fit.** It is seeded once (`CCAGE_DOC_CHUNKS`, default 12 → ~102,000 chars per doc) and never reconciled. Long lines shrink that ceiling: a part is built from whole lines and so is sized `CCAGE_DOC_CHUNK_CHARS - longest_line - overhead`, which takes a register of 1,900-char lines from ~102,000 down to ~74,000. A single line longer than one part cannot be made to fit at all — it lands whole, takes that part past the hook cap, and says so in a warning emitted *before* the content so it survives the truncation. Wrapping the line is the fix. The *script* decides at run time how many parts the current file actually needs; parts past the end of a short document cost one `stat` and emit nothing. Files may grow and shrink freely with no re-seeding.
+- **Nothing is dropped silently.** A document that outgrows capacity is truncated at the end with a loud warning on the last delivered part, naming exactly how many characters were lost. The RESUME line cap (2× `CCAGE_RESUME_BUDGET_LINES`) behaves the same way. Every invocation — including each no-op — appends one line to `$CLAUDE_CONFIG_DIR/session-doc-chunk.log`, so "did all 9 parts arrive?" is a one-line grep.
+
+The file is resolved at **run time** from `CLAUDE_PROJECT_DIR` and `CCAGE_SLOT`, never from a path baked in when the hook was seeded — a seed-time path would silently deliver nothing if the repo moved.
 
 > Auto-read, **not** auto-clear. `/clear` stays a deliberate user action (consistent with the PHASE-6 non-goal). The hook only re-injects state; it never clears for you.
 
 It also calls `ccage-watch reap` first, when that command is installed. A watcher armed by a previous session writes to `RESUME.md` only when its condition fires or its TTL expires; killed any other way (reboot, OOM, a stray `kill`) it wrote nothing at all, so "armed and died" read exactly like "never armed" — found by live-firing the unconfigured path, 2026-08-11. `reap` records a death in `RESUME.md` the same way a firing is recorded, names any watcher still live so a pending one is never mistaken for done, and prints nothing when none is armed. It runs *before* the injection below it, so a death recorded now is part of the same session's context.
 
-> **Trust note.** `RESUME.md` is normally a *personal, locally-authored* file (it's added to `.git/info/exclude`, so it never travels with the repo). But if you clone a repo that ships a `RESUME.md`, the auto-read hook will inject that attacker-authored text into your session context at every `SessionStart` — a prompt-injection surface. This is no worse than Claude Code already reading repo files, but it happens automatically; treat an inherited `RESUME.md` as untrusted repo content.
+> **Trust note.** `RESUME.md` and `DECISIONS.md` are normally *personal, locally-authored* files. But if you clone a repo that ships either one, the session-doc hooks inject that attacker-authored text into your context at every `SessionStart` — a prompt-injection surface. Three things changed with part-wise delivery and are worth knowing precisely:
+>
+> - **Volume.** Delivery used to be bounded at ~2,000 characters per document by Claude Code's own preview truncation. It is now bounded by `CCAGE_DOC_CHUNKS x CCAGE_DOC_CHUNK_CHARS` — about **102,000 characters per document** by default, roughly 50x more.
+> - **A second file.** `DECISIONS.md` is now delivered too, verbatim and uncapped by line count, framed as *"in force — do NOT re-derive or re-open"*. That is a stronger imperative than RESUME's framing, which makes it a more attractive thing for hostile content to sit inside. Note also that `checkpoint-init.sh` adds `RESUME.md` and `CHANGELOG.md` to `.git/info/exclude` but **not** `DECISIONS.md`, so `DECISIONS.md` is the likelier of the two to be committed and shared by accident.
+> - **The `=== ... ===` part labels are not a trust boundary.** They are plain text emitted around plain text, with no escaping and no nonce. A document containing a line like `=== end DECISIONS.md part 1/1 ===` followed by its own framing block is delivered verbatim and is indistinguishable from the hook's own labels. Do not treat a label as evidence that what follows it came from ccage.
+>
+> Treat an inherited `RESUME.md` or `DECISIONS.md` as untrusted repo content, exactly as you would any other file in a repo you did not write.
 
 ### Budget guard hook (PostToolUse)
 
@@ -458,7 +480,9 @@ It also calls `ccage-watch reap` first, when that command is installed. A watche
 
 ### Per-cage seeding (merge, never share)
 
-`_ccage_seed_session_docs_hooks` in `share/claude-isolation.sh` merges the two hook entries into the cage's own `settings.json` on bootstrap when `CCAGE_SESSION_DOCS=1`. It is a **merge** — every pre-existing key (`statusLine`, `theme`, `plugins`, `effortLevel`, …) is preserved; only a missing `SessionStart`/`PostToolUse` entry is added. `settings.json` is never symlink-shared between cages (consistent with the UI-only-seeding discipline). A grep fast-path skips the python merge once a cage is already seeded.
+`_ccage_seed_session_docs_hooks` in `share/claude-isolation.sh` merges the hook entries into the cage's own `settings.json` on bootstrap when `CCAGE_SESSION_DOCS=1`: `resume_autoload.sh`, `2 x CCAGE_DOC_CHUNKS` chunk commands, and the `PostToolUse` budget guard. It is a **merge** — every pre-existing key (`statusLine`, `theme`, `plugins`, `effortLevel`, …) is preserved. `settings.json` is never symlink-shared between cages (consistent with the UI-only-seeding discipline). A grep fast-path skips the python merge once a cage is already seeded.
+
+The `SessionStart` block is **rebuilt**, not appended to: every ccage-owned command is stripped and the canonical set re-added in one pass (a user hook bundled in the same entry survives). Appending incrementally cannot keep the `2n+1` entries together once `_ccage_seed_local_hooks` has added the user's own hooks between launches. Registration identity is `(script basename, arguments)` — the path is excluded so a differing `CCAGE_HOOKS_DIR` re-points a command rather than duplicating it, and the arguments are included because `session_doc_chunk.sh decisions 3 12` and `... 4 12` are different hooks that share a basename. A basename-only key would collapse them into one and seed a single part of a nine-part register.
 
 ### `ccage doctor` — one-shot cross-cage sweep
 
@@ -482,7 +506,11 @@ It also calls `ccage-watch reap` first, when that command is installed. A watche
 | Var | Default | Effect |
 |---|---|---|
 | `CCAGE_SESSION_DOCS` | unset | Master opt-in. Seed the hooks block into a cage's `settings.json` on bootstrap. |
-| `CCAGE_NO_AUTOLOAD` | unset | Skip seeding the SessionStart auto-read hook. |
+| `CCAGE_NO_AUTOLOAD` | unset | Skip seeding the SessionStart auto-read hook **and the doc-part hooks**. |
+| `CCAGE_NO_INTERACTIVE_RESOLVE` | unset | Skip `ccage-auto`'s interactive-shell probe for the cage dir. The probe sources the user's whole `.bashrc` — measured at 1.36 s of a 1.75 s `--status`, i.e. 93% of the runtime. The fallback still sources `claude-isolation.sh` **and** your `claude-overrides.sh`, so a `_ccage_config_dir_override` is honoured either way; what it gives up is a `_ccage_config_dir_for` redefined inline in raw `.bashrc`, bypassing the companion-file convention. Set it for scripted or high-volume callers. |
+| `CCAGE_DOC_CHUNKS` | `12` | Parts registered per session doc (capacity = parts x `CCAGE_DOC_CHUNK_CHARS`). Changing it rebuilds the block. |
+| `CCAGE_DOC_CHUNK_CHARS` | `8500` | Characters per delivered part. The hard cap is 10,000; the headroom covers awk's byte-vs-character counting across platforms. |
+| `CCAGE_DECISIONS_BUDGET_BYTES` | `48000` | `DECISIONS.md` size past which the session start nags to retire spent entries. Advisory — nothing is dropped. |
 | `CCAGE_NO_BUDGET_HOOK` | unset | Skip seeding the PostToolUse budget hook. |
 | `CCAGE_RESUME_BUDGET_LINES` | `250` | Line budget before the auto-read hook / doctor flag a bloated RESUME. |
 | `CCAGE_RESUME_BUDGET_BYTES` | `14000` | Byte budget (alongside the line/block budgets) — a dense file can bloat well under the line cap. |
@@ -500,7 +528,7 @@ It also calls `ccage-watch reap` first, when that command is installed. A watche
 
 A hook script under `~/.claude/hooks` is inert until some `settings.json` registers it, and every cage has its own — so a policy hook the user maintains globally (an orchestration gate, a write-set guard, …) reached a cage only if someone hand-edited that cage's `settings.json`. `_ccage_seed_local_hooks` in `share/claude-isolation.sh` closes that gap: on every bootstrap it reads the user's real `~/.claude/settings.json` and merges into the cage's `settings.json` **every hook that registers a script under `~/.claude/hooks`**, judged one hook at a time — a matcher group carrying N hooks is split into N single-hook entries on the way in, so hook #2+ in a group is never invisible to the seeder the way it would be if the group were judged by its first hook alone.
 
-Ownership line: **ccage owns cage wiring, the policy content is the user's.** Registrations are copied from the user's own `settings.json` — no hook name is hardcoded, the same principle as `CCAGE_SHARE_DIRS` sharing `commands`/`agents`/`skills` without owning their content. ccage's own hooks (`resume_autoload.sh`, `resume_budget_check.sh`, `autonomous_ask_guard.sh`) are always skipped — `_ccage_seed_session_docs_hooks` seeds those and they have their own opt-outs (`CCAGE_NO_AUTOLOAD`, `CCAGE_NO_BUDGET_HOOK`); copying them here would silently override a deliberate opt-out. Anything not under the hooks dir (an inline `curl` notification integration, say) is left alone — not ccage's to spread.
+Ownership line: **ccage owns cage wiring, the policy content is the user's.** Registrations are copied from the user's own `settings.json` — no hook name is hardcoded, the same principle as `CCAGE_SHARE_DIRS` sharing `commands`/`agents`/`skills` without owning their content. ccage's own hooks (`resume_autoload.sh`, `session_doc_chunk.sh`, `resume_budget_check.sh`, `autonomous_ask_guard.sh`) are always skipped — `_ccage_seed_session_docs_hooks` seeds those and they have their own opt-outs (`CCAGE_NO_AUTOLOAD`, `CCAGE_NO_BUDGET_HOOK`); copying them here would silently override a deliberate opt-out. Anything not under the hooks dir (an inline `curl` notification integration, say) is left alone — not ccage's to spread.
 
 Idempotent (dedups on script basename), preserves every unrelated key and every pre-existing hook, tilde-form (`bash ~/.claude/hooks/x.sh`) and absolute-form registrations are treated as the same hook, atomic write (`mkstemp` + `os.replace`, mode preserved), and never clobbers a present-but-unparseable `settings.json`.
 

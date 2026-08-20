@@ -27,7 +27,13 @@
 # THREE KINDS OF FILE, one mechanism (state file, previous value, never-punish-
 # progress rule). Each has a different notion of "too big":
 #   RESUME.md     byte budget + session-block cap, and '### Next' must not shrink
-#   DECISIONS.md  no size budget; a live entry may not vanish unarchived
+#   DECISIONS.md  no size budget HERE; a live entry may not vanish unarchived.
+#                 (A size budget does exist, as an advisory NOTE at session
+#                 start — resume_autoload.sh, CCAGE_DECISIONS_BUDGET_BYTES. It
+#                 belongs there because that is where the cost is paid: the
+#                 register is delivered WHOLE now, on every startup, resume,
+#                 clear and compact. Nothing truncates it; the NOTE is the only
+#                 pressure on its growth.)
 #   startup tier  ONE byte budget for the whole always-loaded set (see below)
 #
 # Escape hatches (for a human reading this source, per D15 — the refusals below

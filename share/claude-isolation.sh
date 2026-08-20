@@ -177,20 +177,54 @@ _ccage_bootstrap_dir() {
 # the cage's settings.json (preserving statusLine, enabledPlugins, effortLevel,
 # and any other keys) referencing the fixed scripts in ~/.claude/hooks/:
 #   SessionStart (startup|resume|clear|compact) → resume_autoload.sh
+#                                               → session_doc_chunk.sh, 2N times
 #   PostToolUse  (Write|Edit)                   → resume_budget_check.sh
 # Because the scripts live at a FIXED path (they don't rotate per request) this
 # does NOT bash the prompt cache — a documented exception to ccage's "UI-only
 # seeding" rule. Runs every launch, so it self-heals and backfills existing
 # cages on their next `claude`.
 #
-# Sub-opt-outs: CCAGE_NO_AUTOLOAD=1 (skip the auto-read), CCAGE_NO_BUDGET_HOOK=1
-# (skip the budget guard). CCAGE_HOOKS_DIR overrides the script dir.
+# WHY 2N CHUNK ENTRIES, and why N is a fixed constant rather than a fit: the
+# reasoning, with its measurements, lives in the header of
+# share/hooks/session_doc_chunk.sh — the script that owns it. In short: a hook's
+# output is capped at 10,000 chars, so each doc ships as N parts; N is CAPACITY,
+# seeded once, and the script decides at run time how many parts the current
+# file needs, so the docs may grow and shrink with no re-seeding.
+#
+# The SessionStart block is REBUILT, not appended to: every ccage-owned command
+# is stripped and the canonical set re-added in one pass. Incremental appending
+# cannot keep 2N+1 entries together once _ccage_seed_local_hooks has added the
+# user's own hooks between launches.
+#
+# Sub-opt-outs: CCAGE_NO_AUTOLOAD=1 (skip the auto-read AND the chunk hooks),
+# CCAGE_NO_BUDGET_HOOK=1 (skip the budget guard). CCAGE_HOOKS_DIR overrides the
+# script dir; CCAGE_DOC_CHUNKS overrides N (default 12 → ~102,000 chars/doc).
 _ccage_seed_session_docs_hooks() {
     [ -n "${CCAGE_SESSION_DOCS:-}" ] || return 0
     command -v python3 >/dev/null 2>&1 || return 0
 
     local dir="$1"
     local hooks_dir="${CCAGE_HOOKS_DIR:-$HOME/.claude/hooks}"
+
+    # N parts per doc. Validated here, not in the hook: a garbage value would
+    # otherwise be baked into every registration.
+    local chunks="${CCAGE_DOC_CHUNKS:-12}"
+    case "$chunks" in
+        ''|*[!0-9]*) chunks=12 ;;
+    esac
+    { [ "$chunks" -ge 1 ] && [ "$chunks" -le 64 ]; } 2>/dev/null || chunks=12
+
+    # The session docs delivered part-wise. Declared ONCE per file and the
+    # cardinality derived from it: the fast-path check below needs "how many
+    # docs", and a hand-typed "* 2" is a second, independent statement of that
+    # fact which fails SILENTLY when a third doc is added (the check simply
+    # concludes the wrong thing — no error). KEEP IN SYNC with the identical
+    # declaration in the sibling file; the 5-line chunk validation stays
+    # duplicated too, deliberately: uninstall.sh sources ccage-doctor.sh ALONE,
+    # without claude-isolation.sh, so a shared helper would be one refactor away
+    # from an undefined function in the middle of an uninstall.
+    local doc_kinds="decisions resume" kind_count=0 _k
+    for _k in $doc_kinds; do kind_count=$((kind_count + 1)); done
 
     local want_autoload=1 want_budget=1
     [ -n "${CCAGE_NO_AUTOLOAD:-}" ] && want_autoload=0
@@ -203,19 +237,67 @@ _ccage_seed_session_docs_hooks() {
     local settings="$dir/settings.json"
     if [ -f "$settings" ]; then
         local need=0
-        { [ "$want_autoload" = 1 ] && ! grep -q 'resume_autoload.sh'     "$settings" 2>/dev/null; } && need=1
-        { [ "$want_budget"   = 1 ] && ! grep -q 'resume_budget_check.sh' "$settings" 2>/dev/null; } && need=1
+        if [ "$want_autoload" = 1 ]; then
+            # Match the FULL path, not the basename. A basename match is true even
+            # when every command points at a hooks dir that no longer exists, so
+            # the fast path would answer "already seeded" forever and the merge
+            # below — the thing that would repair the paths — would never run.
+            grep -qF "$hooks_dir/resume_autoload.sh" "$settings" 2>/dev/null || need=1
+            # Count PER KIND, not in aggregate. An aggregate count is satisfied by
+            # the wrong mix: a settings.json that drifted to 24 "decisions" parts
+            # and 0 "resume" parts (hand edit, restored backup, a merge tool)
+            # still totals 24, so the fast path concluded "already seeded" on
+            # every launch and the python rebuild that would repair it never ran
+            # — RESUME silently never delivered again, and only `ccage doctor`
+            # (which has no fast path) could fix it. REPRODUCED 2026-08-20.
+            # One line per command, because the merge writes indent=2.
+            for _k in $doc_kinds; do
+                [ "$(grep -cF "$hooks_dir/session_doc_chunk.sh $_k " "$settings" 2>/dev/null)" = "$chunks" ] || need=1
+            done
+        fi
+        { [ "$want_budget" = 1 ] && ! grep -q 'resume_budget_check.sh' "$settings" 2>/dev/null; } && need=1
         [ "$need" = 0 ] && return 0
     fi
 
-    python3 - "$settings" "$hooks_dir" "$want_autoload" "$want_budget" <<'PY' 2>/dev/null || true
+    python3 - "$settings" "$hooks_dir" "$want_autoload" "$want_budget" "$chunks" "$doc_kinds" <<'PY' 2>/dev/null || true
 import json, os, sys, tempfile
 # KEEP IN SYNC with _ccage_doctor_seed in share/ccage-doctor.sh (same merge;
 # the doctor copy adds an apply flag + a changed/unchanged stdout signal).
 settings_path, hooks_dir = sys.argv[1], sys.argv[2]
 want_autoload, want_budget = sys.argv[3] == "1", sys.argv[4] == "1"
+chunks = int(sys.argv[5])
+DOC_KINDS = sys.argv[6].split()      # declared in the shell above, not re-typed here
+
+SS_MATCHER = "startup|resume|clear|compact"
 autoload_cmd = "bash " + os.path.join(hooks_dir, "resume_autoload.sh")
+chunk_cmd    = "bash " + os.path.join(hooks_dir, "session_doc_chunk.sh")
 budget_cmd   = "bash " + os.path.join(hooks_dir, "resume_budget_check.sh")
+# SessionStart scripts ccage owns. Anything else under SessionStart belongs to
+# the user (or _ccage_seed_local_hooks) and is never touched.
+OWNED_SS = {"resume_autoload.sh", "session_doc_chunk.sh"}
+
+# The canonical SessionStart command list. Order is irrelevant to delivery —
+# hooks run concurrently and land in completion order (measured; see
+# session_doc_chunk.sh) — but a stable order keeps settings.json diffable.
+wanted_ss = []
+if want_autoload:
+    wanted_ss.append(autoload_cmd)
+    for kind in DOC_KINDS:
+        for i in range(1, chunks + 1):
+            wanted_ss.append("%s %s %d %d" % (chunk_cmd, kind, i, chunks))
+
+def sig(cmd):
+    # Identity of a registration = (script basename, its arguments). The path is
+    # excluded so a differing CCAGE_HOOKS_DIR is not mistaken for a DIFFERENT
+    # hook and appended beside the old one; the arguments are included because
+    # `session_doc_chunk.sh decisions 3 12` and `... 4 12` are different hooks
+    # that happen to share a basename — the case a basename-only key would have
+    # collapsed into one, seeding a single part of a 9-part register.
+    toks = (cmd or "").split()
+    for i, t in enumerate(toks):
+        if t.endswith(".sh"):
+            return (os.path.basename(t), tuple(toks[i + 1:]))
+    return ((os.path.basename(toks[-1]), ()) if toks else ("", ()))
 
 # Preserve an existing file's mode; never clobber a present-but-unparseable
 # settings.json (Claude Code rejects it too — leave it for the user to fix).
@@ -241,39 +323,59 @@ hooks = data.get("hooks")
 if not isinstance(hooks, dict):
     hooks = {}
 
-def script_base(cmd):
-    return os.path.basename(cmd.split()[-1]) if cmd else ""
+def entries(event):
+    e = hooks.get(event)
+    return e if isinstance(e, list) else []
 
-def has_cmd(entries, cmd):
-    # Dedup on the hook script's BASENAME, not the full path, so a differing
-    # CCAGE_HOOKS_DIR never appends a duplicate entry (matches the basename
-    # semantics of the wrapper's grep fast-path and the doctor copy).
-    want = script_base(cmd)
-    if not isinstance(entries, list):
-        return False
-    for e in entries:
+def commands(event, only=None):
+    out = []
+    for e in entries(event):
         if not isinstance(e, dict):
             continue
         for h in (e.get("hooks") or []):
-            if isinstance(h, dict) and script_base(h.get("command") or "") == want:
-                return True
-    return False
+            if not isinstance(h, dict):
+                continue
+            c = h.get("command") or ""
+            if only is None or sig(c)[0] in only:
+                out.append(c)
+    return out
 
 changed = False
 
-if want_autoload and not has_cmd(hooks.get("SessionStart"), autoload_cmd):
-    ss = hooks.get("SessionStart")
-    if not isinstance(ss, list):
-        ss = []
-    ss.append({"matcher": "startup|resume|clear|compact",
-               "hooks": [{"type": "command", "command": autoload_cmd}]})
-    hooks["SessionStart"] = ss
-    changed = True
+if want_autoload:
+    have_cmds = commands("SessionStart", OWNED_SS)
+    # Two comparisons, because they answer different questions. sig() (path
+    # excluded) decides whether the SET of registrations is right, so a moved
+    # hooks dir is not read as a batch of new hooks to append beside the old
+    # ones. The raw command strings decide whether those registrations still
+    # POINT anywhere real: without this second check, changing CCAGE_HOOKS_DIR
+    # or reinstalling under a different prefix left every cage pointing at the
+    # old path forever, and a hook whose script no longer exists fails silently
+    # — which for these hooks means the session docs just stop arriving, with
+    # nothing to notice it.
+    if (sorted(sig(c) for c in have_cmds) != sorted(sig(c) for c in wanted_ss)
+            or sorted(have_cmds) != sorted(wanted_ss)):
+        # Rebuild: drop every ccage-owned command, keep everything else (an
+        # entry that bundled one of ours alongside a user hook survives with
+        # the user hook intact), then append the canonical set in one block.
+        kept = []
+        for e in entries("SessionStart"):
+            if not isinstance(e, dict):
+                kept.append(e)
+                continue
+            hs = [h for h in (e.get("hooks") or [])
+                  if not (isinstance(h, dict) and sig(h.get("command") or "")[0] in OWNED_SS)]
+            if hs:
+                kept.append(dict(e, hooks=hs))
+        for c in wanted_ss:
+            kept.append({"matcher": SS_MATCHER,
+                         "hooks": [{"type": "command", "command": c}]})
+        hooks["SessionStart"] = kept
+        changed = True
 
-if want_budget and not has_cmd(hooks.get("PostToolUse"), budget_cmd):
-    ptu = hooks.get("PostToolUse")
-    if not isinstance(ptu, list):
-        ptu = []
+if want_budget and not any(sig(c)[0] == "resume_budget_check.sh"
+                           for c in commands("PostToolUse")):
+    ptu = entries("PostToolUse")
     ptu.append({"matcher": "Write|Edit",
                 "hooks": [{"type": "command", "command": budget_cmd}]})
     hooks["PostToolUse"] = ptu
@@ -351,7 +453,8 @@ settings_path, src_path, hooks_dir = sys.argv[1], sys.argv[2], sys.argv[3]
 
 # ccage seeds these itself, with their own opt-out flags. Copying them here
 # would override a deliberate --no-session-docs.
-CCAGE_OWNED = {"resume_autoload.sh", "resume_budget_check.sh", "autonomous_ask_guard.sh"}
+CCAGE_OWNED = {"resume_autoload.sh", "session_doc_chunk.sh",
+               "resume_budget_check.sh", "autonomous_ask_guard.sh"}
 
 
 def expand(cmd):
@@ -366,7 +469,15 @@ def expand(cmd):
 
 
 def script_base(cmd):
-    return os.path.basename(expand(cmd).split()[-1]) if cmd else ""
+    # The chunk hook is registered WITH ARGUMENTS ("... session_doc_chunk.sh
+    # decisions 3 12"), so the last token is a number, not the script — a
+    # last-token rule would fail to recognise it as ccage-owned and copy it in
+    # over a deliberate opt-out. Match the first token that names a .sh.
+    toks = expand(cmd).split() if cmd else []
+    for t in toks:
+        if t.endswith(".sh"):
+            return os.path.basename(t)
+    return os.path.basename(toks[-1]) if toks else ""
 
 
 def has_cmd(entries, name):

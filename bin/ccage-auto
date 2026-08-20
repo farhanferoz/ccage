@@ -594,6 +594,21 @@ def resolve_config_dir(cwd):
     if cc:
         return cc
 
+    # 0b. Skip the interactive shell when asked. The step-1 probe below sources
+    #     the user's full .bashrc (conda init and all): MEASURED 2026-08-20 at
+    #     1.36s of the 1.75s a bare `--status` takes, i.e. 93% of the runtime,
+    #     paid on every invocation that is not already inside a cage. It buys
+    #     faithfulness to a .bashrc-level override of _ccage_config_dir_for —
+    #     worth it when a human runs the command, worthless when the caller has
+    #     no such override and is invoking this hundreds of times (the bats
+    #     suite, which must unset CLAUDE_CONFIG_DIR to own its own env, spent
+    #     ~4 minutes here). Step 2 sources the shipped library AND the user's
+    #     companion claude-overrides.sh, so the sanctioned override survives the
+    #     skip; what is given up is a _ccage_config_dir_for redefined inline in
+    #     raw .bashrc, bypassing the companion-file convention entirely.
+    if os.environ.get("CCAGE_NO_INTERACTIVE_RESOLVE"):
+        return _resolve_config_dir_noninteractive(cwd, shell)
+
     # 1. Ask the real function through an interactive shell (sees .bashrc + overrides).
     try:
         out = subprocess.run(
@@ -605,12 +620,51 @@ def resolve_config_dir(cwd):
     except Exception:
         pass
 
-    # 2. Source the shipped library directly (no interactive init).
+    return _resolve_config_dir_noninteractive(cwd, shell)
+
+
+def _resolve_config_dir_noninteractive(cwd, shell):
+    """Steps 2 and 3 of resolve_config_dir, with no interactive shell.
+
+    Split out so the CCAGE_NO_INTERACTIVE_RESOLVE path and the ordinary
+    fall-through cannot drift apart."""
+    # 2. Source the shipped library directly, THEN the user's companion override
+    #    file — the same pair, in the same order, that bin/ccage's
+    #    _ccage_source_isolation loads. Sourcing only the library resolves the
+    #    DEFAULT scheme and silently ignores an installed override: the stub
+    #    _ccage_config_dir_override returns 1 and _CCAGE_OVERRIDE_ACTIVE stays 0,
+    #    so _ccage_config_dir_for never consults it. REPRODUCED 2026-08-20 with
+    #    the shipped claude-overrides.sh.example: the override path resolved to
+    #    the override's answer and this one to the default cage — a silently
+    #    WRONG cage, i.e. someone else's session state. That gap was harmless
+    #    while this was a rare fallback; CCAGE_NO_INTERACTIVE_RESOLVE makes it
+    #    the common path, so it is closed here rather than documented.
+    #
+    #    The guards around the override source are NOT optional and are copied
+    #    from bin/ccage, where each was paid for: output is suppressed because a
+    #    stray `echo` in a user's file once landed as the first line of a
+    #    generated handoff; and `set -e`/`set -u` are snapshotted and restored
+    #    because a user's `set -e` persisted into the calling shell and aborted
+    #    cage resolution — whose earlier rungs are EXPECTED to fail — on the
+    #    macOS CI leg. KEEP IN SYNC with _ccage_source_isolation in bin/ccage.
     lib = library_path()
     if lib:
+        script = (
+            f'. {shlex.quote(lib)}\n'
+            'for _rcd in "$HOME/.bashrc.d" "$HOME/.zshrc.d"; do\n'
+            '  if [ -r "$_rcd/claude-overrides.sh" ]; then\n'
+            '    _ccage_rc_opts="$-"\n'
+            '    { . "$_rcd/claude-overrides.sh"; } >/dev/null 2>&1 || true\n'
+            '    case "$_ccage_rc_opts" in *e*) ;; *) set +e ;; esac\n'
+            '    case "$_ccage_rc_opts" in *u*) ;; *) set +u ;; esac\n'
+            '    break\n'
+            '  fi\n'
+            'done\n'
+            '_ccage_config_dir_for "$PWD"\n'
+        )
         try:
             out = subprocess.run(
-                [shell, "-c", f'. {shlex.quote(lib)}; _ccage_config_dir_for "$PWD"'],
+                [shell, "-c", script],
                 cwd=cwd, capture_output=True, text=True, timeout=15,
             ).stdout.strip()
             if out:

@@ -21,12 +21,43 @@
 # ---------------------------------------------------------------------------
 _ccage_doctor_seed() {
     local settings="$1" hooks_dir="$2" apply="$3" want_autoload="$4" want_budget="$5"
-    python3 - "$settings" "$hooks_dir" "$apply" "$want_autoload" "$want_budget" <<'PY' 2>/dev/null
+    local chunks="${CCAGE_DOC_CHUNKS:-12}"
+    case "$chunks" in
+        ''|*[!0-9]*) chunks=12 ;;
+    esac
+    { [ "$chunks" -ge 1 ] && [ "$chunks" -le 64 ]; } 2>/dev/null || chunks=12
+    # Declared here as well as in _ccage_seed_session_docs_hooks, deliberately:
+    # uninstall.sh sources THIS file alone, without claude-isolation.sh, so a
+    # shared helper would be one refactor away from an undefined function in the
+    # middle of an uninstall. KEEP IN SYNC with the declaration there.
+    local doc_kinds="decisions resume"
+    python3 - "$settings" "$hooks_dir" "$apply" "$want_autoload" "$want_budget" "$chunks" "$doc_kinds" <<'PY' 2>/dev/null
 import json, os, sys, tempfile
 settings_path, hooks_dir, apply = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
 want_autoload, want_budget = sys.argv[4] == "1", sys.argv[5] == "1"
+chunks = int(sys.argv[6])
+DOC_KINDS = sys.argv[7].split()      # declared in the shell above, not re-typed here
+SS_MATCHER = "startup|resume|clear|compact"
 autoload_cmd = "bash " + os.path.join(hooks_dir, "resume_autoload.sh")
+chunk_cmd    = "bash " + os.path.join(hooks_dir, "session_doc_chunk.sh")
 budget_cmd   = "bash " + os.path.join(hooks_dir, "resume_budget_check.sh")
+OWNED_SS = {"resume_autoload.sh", "session_doc_chunk.sh"}
+wanted_ss = []
+if want_autoload:
+    wanted_ss.append(autoload_cmd)
+    for kind in DOC_KINDS:
+        for i in range(1, chunks + 1):
+            wanted_ss.append("%s %s %d %d" % (chunk_cmd, kind, i, chunks))
+def sig(cmd):
+    # (script basename, arguments) — path excluded so a differing CCAGE_HOOKS_DIR
+    # is not mistaken for a different hook and appended beside the old one;
+    # arguments INCLUDED so the N chunk registrations are N distinct hooks and
+    # not one repeated basename.
+    toks = (cmd or "").split()
+    for i, t in enumerate(toks):
+        if t.endswith(".sh"):
+            return (os.path.basename(t), tuple(toks[i + 1:]))
+    return ((os.path.basename(toks[-1]), ()) if toks else ("", ()))
 # Preserve an existing file's mode; never clobber a present-but-unparseable
 # settings.json (report it as unchanged and leave it for the user to fix).
 mode = None
@@ -49,29 +80,50 @@ else:
 hooks = data.get("hooks")
 if not isinstance(hooks, dict):
     hooks = {}
-def script_base(cmd):
-    return os.path.basename(cmd.split()[-1]) if cmd else ""
-def has_cmd(entries, cmd):
-    # Dedup on the script BASENAME so a differing CCAGE_HOOKS_DIR never appends
-    # a duplicate entry. KEEP IN SYNC with _ccage_seed_session_docs_hooks.
-    want = script_base(cmd)
-    if not isinstance(entries, list):
-        return False
-    for e in entries:
+def entries(event):
+    e = hooks.get(event)
+    return e if isinstance(e, list) else []
+def commands(event, only=None):
+    out = []
+    for e in entries(event):
         if not isinstance(e, dict):
             continue
         for h in (e.get("hooks") or []):
-            if isinstance(h, dict) and script_base(h.get("command") or "") == want:
-                return True
-    return False
+            if not isinstance(h, dict):
+                continue
+            c = h.get("command") or ""
+            if only is None or sig(c)[0] in only:
+                out.append(c)
+    return out
 changed = False
-if want_autoload and not has_cmd(hooks.get("SessionStart"), autoload_cmd):
-    ss = hooks.get("SessionStart"); ss = ss if isinstance(ss, list) else []
-    ss.append({"matcher": "startup|resume|clear|compact",
-               "hooks": [{"type": "command", "command": autoload_cmd}]})
-    hooks["SessionStart"] = ss; changed = True
-if want_budget and not has_cmd(hooks.get("PostToolUse"), budget_cmd):
-    ptu = hooks.get("PostToolUse"); ptu = ptu if isinstance(ptu, list) else []
+if want_autoload:
+    have_cmds = commands("SessionStart", OWNED_SS)
+    # Two comparisons, because they answer different questions. sig() (path
+    # excluded) decides whether the SET of registrations is right, so a moved
+    # hooks dir is not read as a batch of new hooks to append beside the old
+    # ones. The raw command strings decide whether those registrations still
+    # POINT anywhere real: without this second check, changing CCAGE_HOOKS_DIR
+    # or reinstalling under a different prefix left every cage pointing at the
+    # old path forever, and a hook whose script no longer exists fails silently
+    # — which for these hooks means the session docs just stop arriving, with
+    # nothing to notice it.
+    if (sorted(sig(c) for c in have_cmds) != sorted(sig(c) for c in wanted_ss)
+            or sorted(have_cmds) != sorted(wanted_ss)):
+        kept = []
+        for e in entries("SessionStart"):
+            if not isinstance(e, dict):
+                kept.append(e); continue
+            hs = [h for h in (e.get("hooks") or [])
+                  if not (isinstance(h, dict) and sig(h.get("command") or "")[0] in OWNED_SS)]
+            if hs:
+                kept.append(dict(e, hooks=hs))
+        for c in wanted_ss:
+            kept.append({"matcher": SS_MATCHER,
+                         "hooks": [{"type": "command", "command": c}]})
+        hooks["SessionStart"] = kept; changed = True
+if want_budget and not any(sig(c)[0] == "resume_budget_check.sh"
+                           for c in commands("PostToolUse")):
+    ptu = entries("PostToolUse")
     ptu.append({"matcher": "Write|Edit",
                 "hooks": [{"type": "command", "command": budget_cmd}]})
     hooks["PostToolUse"] = ptu; changed = True
@@ -106,9 +158,16 @@ _ccage_doctor_local_hooks_status() {
     python3 - "$settings" "$src" "$hooks_dir" <<'PY' 2>/dev/null
 import json, os, sys
 settings_path, src_path, hooks_dir = sys.argv[1:4]
-OWNED = {"resume_autoload.sh", "resume_budget_check.sh", "autonomous_ask_guard.sh"}
+OWNED = {"resume_autoload.sh", "session_doc_chunk.sh", "resume_budget_check.sh", "autonomous_ask_guard.sh"}
 def expand(c): return " ".join(os.path.expanduser(t) for t in c.split()) if c else ""
-def base(c): return os.path.basename(expand(c).split()[-1]) if c else ""
+def base(c):
+    # First token naming a .sh — the chunk hook carries arguments, so the last
+    # token is a number. KEEP IN SYNC with script_base in _ccage_seed_local_hooks.
+    toks = expand(c).split() if c else []
+    for t in toks:
+        if t.endswith(".sh"):
+            return os.path.basename(t)
+    return os.path.basename(toks[-1]) if toks else ""
 def load(p):
     try:
         d = json.load(open(p))
@@ -147,7 +206,7 @@ _ccage_doctor_unseed() {
     python3 - "$settings" "$apply" <<'PY' 2>/dev/null
 import json, os, shlex, sys, tempfile
 settings_path, apply = sys.argv[1], sys.argv[2] == "1"
-targets = {"resume_autoload.sh", "resume_budget_check.sh"}
+targets = {"resume_autoload.sh", "session_doc_chunk.sh", "resume_budget_check.sh"}
 TEE = "ccage-statusline-tee.sh"
 if not os.path.exists(settings_path):
     print("unchanged"); sys.exit(0)
@@ -167,7 +226,14 @@ hooks = data.get("hooks")
 changed = False
 if isinstance(hooks, dict):
     def script_base(cmd):
-        return os.path.basename(cmd.split()[-1]) if cmd else ""
+        # The chunk hook is registered WITH ARGUMENTS ("... session_doc_chunk.sh
+        # decisions 3 12"), so the last token is a number, not the script. Match
+        # the first token that names a .sh — same rule as sig() in the seeder.
+        toks = (cmd or "").split()
+        for t in toks:
+            if t.endswith(".sh"):
+                return os.path.basename(t)
+        return os.path.basename(toks[-1]) if toks else ""
     for event in ("SessionStart", "PostToolUse"):
         entries = hooks.get(event)
         if not isinstance(entries, list):

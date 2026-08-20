@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# ccage SessionStart hook — auto-load RESUME into context + cheap health check.
+# ccage SessionStart hook — session-doc housekeeping + advisory NOTES.
 #
 # Registered (by _ccage_seed_session_docs_hooks in claude-isolation.sh) on
-# SessionStart for all four sources: startup, resume, clear, compact. A
-# SessionStart hook's plain stdout is injected into the model's context for the
-# next request, so after `/clear` the prior RESUME is reloaded with zero
-# copy/paste — that is the whole point of the `clear` source.
+# SessionStart for all four sources: startup, resume, clear, compact — so it
+# re-runs after `/clear`, which is the whole point of the `clear` source.
 #
-# Behavior:
-#   1. cat the slot-aware RESUME file (component G) to stdout, if present.
-#   2. Emit at most two one-line NOTEs when state needs maintenance:
-#        - RESUME over budget   → "run /checkpoint"
-#        - memory dir messy      → "run /checkpoint --tidy"
+# Division of labour with session_doc_chunk.sh (v0.18.0): the RESUME.md and
+# DECISIONS.md CONTENT is delivered by the chunk hook (one byte-balanced slice
+# per registered command, because Claude Code caps a single hook's output at
+# 10,000 chars and a whole register cannot fit). This hook keeps only the
+# side effects and the small advisory NOTES:
+#   1. housekeeping — clear stale ccage-auto state on fresh starts, reap watchers.
+#   2. plan-doc pointers + plan readiness (the read-the-plan directive).
+#   3. compact nudge, RESUME/memory hygiene NOTES.
 #
 # Always exits 0 — a SessionStart hook must never block a session from starting.
 # Deliberately no `set -e`: a parse hiccup should no-op, not abort the start.
@@ -20,6 +21,7 @@
 #   CCAGE_SLOT                slot suffix; validated, unsafe value → plain file
 #   CCAGE_RESUME_BUDGET_LINES RESUME line budget before nagging (default 250)
 #   CCAGE_RESUME_BUDGET_BYTES RESUME byte budget before nagging (default 14000)
+#   CCAGE_DECISIONS_BUDGET_BYTES DECISIONS byte budget before nagging (def 48000)
 #   CCAGE_MEMORY_ORPHAN_MAX   max un-indexed memory files before nagging (def 3)
 #   CLAUDE_PROJECT_DIR        project root (falls back to $PWD)
 #   CLAUDE_CONFIG_DIR         cage dir, for locating this cage's memory/
@@ -207,53 +209,19 @@ if [ -n "$watch_bin" ]; then
     )
 fi
 
-# ---- 1. inject RESUME into context ----
-# Bounded: a runaway RESUME (the exact failure the budget NOTE below nags about)
-# must degrade instead of flooding every session start. 2× budget is generous —
-# the budget NOTE fires long before the cut is ever reached.
-if [ -f "$resume" ]; then
-    head -n $((budget * 2)) "$resume"
-    if [ "$(wc -l < "$resume" 2>/dev/null | tr -d '[:space:]')" -gt "$((budget * 2))" ] 2>/dev/null; then
-        printf '\nNOTE: RESUME truncated at %d lines for injection — run /checkpoint to trim it.\n' "$((budget * 2))"
-    fi
-fi
-
-# ---- 1a. inject the RATIFIED DECISIONS (in-force only) ----
-# WHY (2026-08-11, user-reported as recurring across sessions): a decision
-# ratified one day was re-opened the next and re-derived from scratch — the
-# measured case proposed new code against a ratified "reuse the existing readers,
-# NOT new code", and proposed re-measuring a per-tier cost average that the guard
-# beside it already calls invalid. The mechanism is mechanical, not forgetfulness:
-# RESUME kept a POINTER ("full text in CHANGELOG") and nothing reads CHANGELOG at
-# session start, so the budget advice below ("roll Decisions into CHANGELOG") is
-# precisely what evicted the evidence. A pointer does not survive a fresh context;
-# content does.
+# ---- 1. session-doc CONTENT is delivered by session_doc_chunk.sh ----
+# RESUME.md and DECISIONS.md are injected by the chunk hook (session_doc_chunk.sh,
+# registered once per part), NOT here: Claude Code caps a hook's output at 10,000
+# chars, so a single hook can never carry a full register — the measured failure
+# was a 76 KB decisions register arriving as a 2 KB preview. /clear re-runs every
+# chunk hook, which re-reads from disk, so the delivery stays fresh.
 #
-# Injected HERE rather than in CLAUDE.md / .claude/rules deliberately: that whole
-# hierarchy loads into EVERY subagent, and this file grows over time, so it would
-# re-inflate worker context that was just cut 5,218 -> 2,909 tokens. A SessionStart
-# hook's stdout reaches the MAIN session only — the same asymmetry RESUME already
-# relies on. MEMORY.md was rejected for the opposite reason: it is capped at 200
-# lines / 25 KB with the harness actively nagging to merge or drop entries, i.e.
-# the very eviction pressure that caused this bug.
-#
-# The file holds IN-FORCE decisions only; retired ones move to CHANGELOG.md, which
-# nothing auto-loads. resume_budget_check.sh enforces that direction: a live entry
-# cannot be dropped, a retired one cannot linger. Bounded here like RESUME so a
-# runaway file degrades instead of flooding every session start.
-decisions="$base/DECISIONS.md"
-dec_budget="${CCAGE_DECISIONS_BUDGET_LINES:-120}"
-if [ -f "$decisions" ]; then
-    printf '\nRATIFIED DECISIONS (in force — do NOT re-derive or re-open; cite what changed instead):\n'
-    # Block-level HTML comments are stripped, mirroring what Claude Code already
-    # does for CLAUDE.md: the file's own editing rules are for whoever maintains
-    # it, and paying for them in every session start is exactly the waste this
-    # file is supposed to bound.
-    sed '/<!--/,/-->/d' "$decisions" 2>/dev/null | head -n "$dec_budget"
-    if [ "$(sed '/<!--/,/-->/d' "$decisions" 2>/dev/null | wc -l | tr -d '[:space:]')" -gt "$dec_budget" ] 2>/dev/null; then
-        printf '\nNOTE: DECISIONS truncated at %d lines for injection — retire spent decisions to CHANGELOG.md.\n' "$dec_budget"
-    fi
-fi
+# Nothing is said here about the register's content or its framing. Hook outputs
+# arrive in COMPLETION order, not registration order (measured 2026-08-20 — see
+# the header of session_doc_chunk.sh), so a "the register follows below" line
+# would as often as not be read before or after the parts it refers to. Each
+# part frames itself instead. This hook keeps only the housekeeping and the
+# small advisory NOTES.
 
 # ---- 1b. plan-doc pointers: the plan must be READ, not summarized from ----
 # Measured failure (2026-07-16, user-reported, recurring): a resumed session
@@ -407,6 +375,22 @@ if [ -f "$resume" ]; then
     [ -n "$bytes" ] || bytes=0
     if { [ "$lines" -gt "$budget" ] || [ "$blocks" -gt 3 ] || [ "$bytes" -gt "$budget_bytes" ]; } 2>/dev/null; then
         printf 'NOTE: RESUME is over budget — run /checkpoint to trim (shipped Threads to CHANGELOG; ### Decisions to DECISIONS.md, which is auto-loaded — never to CHANGELOG).\n'
+    fi
+fi
+
+# DECISIONS budget. The register is delivered WHOLE now, so nothing truncates it
+# and nothing would otherwise ever push back on its growth — while every char is
+# paid on every startup, resume, clear AND compact. The old 120-line cut carried
+# that pressure as a side effect of silently dropping live decisions; this is the
+# same pressure without the data loss. Advisory only: it never drops a line.
+decisions="$base/DECISIONS.md"
+dec_budget_bytes="${CCAGE_DECISIONS_BUDGET_BYTES:-48000}"
+if [ -f "$decisions" ]; then
+    dec_bytes=$(wc -c < "$decisions" 2>/dev/null | tr -d '[:space:]')
+    [ -n "$dec_bytes" ] || dec_bytes=0
+    if [ "$dec_bytes" -gt "$dec_budget_bytes" ] 2>/dev/null; then
+        printf 'NOTE: DECISIONS.md is %s bytes (budget %s) and every byte is re-injected on every session start and every /clear — retire spent decisions to CHANGELOG.md. Nothing was dropped.\n' \
+            "$dec_bytes" "$dec_budget_bytes"
     fi
 fi
 

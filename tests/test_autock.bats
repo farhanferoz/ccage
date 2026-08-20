@@ -11,6 +11,14 @@
 # temp dir we get a deterministic transcript location regardless of the host's
 # shell init.
 bats_require_minimum_version 1.5.0
+
+# ccage-auto resolves the cage dir by asking the user's INTERACTIVE shell first,
+# which sources their whole .bashrc — measured 2026-08-20 at 1.36s per call, and
+# this suite must unset CLAUDE_CONFIG_DIR (below) to own its own environment, so
+# every invocation paid it. The non-interactive resolution reaches the same
+# answer here; the interactive probe only adds faithfulness to a .bashrc-level
+# override of _ccage_config_dir_for, which no test defines.
+export CCAGE_NO_INTERACTIVE_RESOLVE=1
 load helpers
 
 AUTO="$BATS_TEST_DIRNAME/../bin/ccage-auto"
@@ -92,6 +100,38 @@ status() { ( cd "$REPO" && "$AUTO" --status ); }
     run status
     [[ "$output" == *"soft / hard  : 40% / 60%"* ]]
     [[ "$output" == *"re-nudge     : 55%"* ]]
+}
+
+@test "CCAGE_NO_INTERACTIVE_RESOLVE still honours an installed cage-dir override" {
+    # The earlier form of this test compared the interactive and non-interactive
+    # answers and asserted they matched. On a machine where ccage is NOT
+    # installed into the shell rc — every CI runner — both paths fall through to
+    # the same fallback, so it compared a value to itself and could never fail.
+    #
+    # What actually needs pinning is the bug the skip introduced: the fallback
+    # sourced only claude-isolation.sh, where _ccage_config_dir_override is a
+    # stub returning 1, so an installed override was silently ignored and the
+    # session was pointed at the WRONG cage — someone else's state. Install a
+    # real override and assert the skip path still obeys it.
+    write_transcript 100000
+    local fake_home="$BATS_TEST_TMPDIR/fakehome"
+    mkdir -p "$fake_home/.bashrc.d"
+    cat > "$fake_home/.bashrc.d/claude-overrides.sh" <<'EOF'
+_ccage_config_dir_override() { printf '%s\n' "/tmp/ccage-override-target"; }
+_CCAGE_OVERRIDE_ACTIVE=1
+EOF
+    local got
+    got=$(cd "$REPO" && HOME="$fake_home" CCAGE_NO_INTERACTIVE_RESOLVE=1 \
+              "$AUTO" --status 2>/dev/null | sed -n 's/.*config dir *: //p')
+    [ "$got" = "/tmp/ccage-override-target" ]
+
+    # And with no override installed it must still resolve the default scheme,
+    # not inherit anything from the run above.
+    rm -f "$fake_home/.bashrc.d/claude-overrides.sh"
+    got=$(cd "$REPO" && HOME="$fake_home" CCAGE_NO_INTERACTIVE_RESOLVE=1 \
+              "$AUTO" --status 2>/dev/null | sed -n 's/.*config dir *: //p')
+    [ "$got" != "/tmp/ccage-override-target" ]
+    [ -n "$got" ]
 }
 
 @test "derivation table: soft=40 -> hard=60, renudge=55 (explicit --soft, default hard)" {

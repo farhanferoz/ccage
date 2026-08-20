@@ -10,9 +10,10 @@ description: >-
 # /checkpoint
 
 One command that keeps a durable, lean `RESUME.md` so a session's state survives
-`/clear`. ccage seeds a `SessionStart` hook (`resume_autoload.sh`) that `cat`s
-`RESUME.md` into the model's context on every (re)entry — including right after
-`/clear`. So the workflow is just:
+`/clear`. ccage seeds `SessionStart` hooks that deliver `RESUME.md` (and
+`DECISIONS.md`) into the model's context on every (re)entry — including right
+after `/clear`. Both are delivered in labelled parts, because a single hook's
+output is capped at 10,000 characters. So the workflow is just:
 
 ```
 /checkpoint      # write current state into RESUME.md, roll detail into CHANGELOG.md
@@ -298,7 +299,7 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    as a dated prose line (lossless move, keep any still-open sub-question in
    `### Next` if it is WORK, or in `DECISIONS.md` with its `Revisit if:` trigger if it is a
    QUESTION); (b) a `### Decisions` bullet **moves to
-   `DECISIONS.md`** (create it if absent — `resume_autoload.sh` injects it into
+   `DECISIONS.md`** (create it if absent — ccage injects it into
    every session, workers excluded), one line, with the condition that should
    prompt revisiting it; (c) never prune a bullet that is the only record of
    something still open.
