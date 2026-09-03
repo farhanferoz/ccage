@@ -729,18 +729,14 @@ def test_run_tick_non_teams_forces_observe_only_and_logs_once(tmp_path, monkeypa
 # --- Task 11 Step 3: the bin SubagentWatcher wiring, end to end -------------
 
 def _load_ccage_auto():
-    """Import bin/ccage-auto as a module (it has no .py extension). Module-level
-    code is import-safe: main() is guarded by __main__, and _load_ccb() only
-    resolves lib/. Returns the module, or None if CB failed to load."""
-    import importlib.util
-    from importlib.machinery import SourceFileLoader
+    """Import bin/ccage-auto as a module (it has no .py extension).
 
-    path = str(Path(__file__).resolve().parent.parent / "bin" / "ccage-auto")
-    loader = SourceFileLoader("ccage_auto", path)
-    spec = importlib.util.spec_from_loader("ccage_auto", loader)
-    mod = importlib.util.module_from_spec(spec)
-    loader.exec_module(mod)
-    return mod
+    The loading itself lives in tests/conftest.py — this was the third
+    hand-rolled copy of the same SourceFileLoader dance.
+    """
+    from conftest import load_ccage_auto
+
+    return load_ccage_auto("ccage_auto")
 
 
 def test_subagent_watcher_class_tick_end_to_end(tmp_path, monkeypatch):

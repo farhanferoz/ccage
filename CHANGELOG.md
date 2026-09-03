@@ -2,6 +2,36 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.19.0] — 2026-09-03
+
+Minor, not a patch: this adds four knobs and changes what an existing user gets by default — a session that marks itself done now closes instead of staying open.
+
+### Added — the session closes itself when the work is done
+
+- **`ccage-auto` closes the Claude session once `.ccage-session-done` appears (`/checkpoint --final`), and hands the terminal back.** It types `/exit`; when Claude goes, the pty read loop hits EOF, raw mode is restored, and the caller's shell prompt returns — the terminal window and any SSH session stay up. Opt out with `--no-exit-on-done` or `CCAGE_AUTOCK_EXIT_ON_DONE=0`.
+- **The close waits for the marker-writing turn to finish.** `/exit` is preceded by an Escape, which interrupts a running turn, and the marker is written *part-way* through one — the checkpoint skill writes it at step 8 and `--final --tidy` then runs the whole tidy pass. So the watcher waits for the transcript itself to stop growing (a fact on disk, not a model claim) before closing, with a ceiling so a session that never goes quiet still closes. Tunable with `CCAGE_AUTOCK_DONE_GRACE` (default 10s; `0` closes immediately).
+- **`/clear` is typed once, and the resume prompt waits for proof that it ran.** The watcher enters a `CLEARING` state and polls for transcript *rotation* — the fact on disk that says the clear happened. Only then is the resume prompt typed. If the rotation never comes within `--clear-timeout`, it gives up **without** resuming and returns to normal, where the ladder re-nudges from a fresh confirmation.
+- New knobs: `--exit-on-done` / `--no-exit-on-done` (`CCAGE_AUTOCK_EXIT_ON_DONE`), `CCAGE_AUTOCK_DONE_GRACE` (default 10s), `--clear-timeout N` (`CCAGE_AUTOCK_CLEAR_TIMEOUT`, default 300s).
+
+### Fixed
+
+- **A dirty prompt line turned `/clear` into `leftover-text/clear`.** The watcher now sends Escape (dismiss any menu), then Ctrl+E, then Ctrl+U (wipe the line) before typing a slash command — as **three separate keypresses**. They cannot share a write: a terminal keypress parser decodes Escape followed within ~500ms by another byte as one Alt-modified key, so `\x1b\x15` sent together emits neither `escape` nor `ctrl+u` and clears nothing. Measured against node's readline parser, the one Ink forks: one chunk and a 300ms gap both merge; 700ms separates. Ctrl+E comes first because Ctrl+U deletes to line *start* only. Still deliberately never `\x03` (Ctrl+C), which would raise `SIGINT` in the session's own child processes.
+- **The done-marker close signalled the wrong process with a signal it ignores.** The fallback was `SIGTERM` on the pty child. In a real cage that child is the interactive bash running the `claude` shell function — whose body ends in a subshell, so Claude is bash's *child* — and an interactive bash ignores `SIGTERM`. Measured on that exact process tree: `SIGTERM` leaves both alive, `killpg` leaves both alive (job control gives the command its own process group), and only `SIGHUP` takes both down. The fallback is now `SIGHUP`, then `SIGKILL`, and waits on the child rather than on an internal flag that races the read loop.
+- **A queued `/clear` swallowed the resume prompt and left the session idle with no instruction.** Observed live. The session was mid-turn, so Claude Code *queued* the `/clear`; three seconds later the watcher typed the resume prompt on a timer, the still-live **old** session consumed it, and only then did the queued clear run and wipe it. The new session came up with nothing to do. Two things that look like fixes make it worse and are gone: resuming anyway after retries reproduces the incident exactly, and re-typing `/clear` queues a second copy that fires *after* the resume and clears the session just resumed. So the resume prompt is now typed only on rotation, never on a timer, and `/clear` is never re-typed. `--clear-retries` is retired; `--clear-timeout` goes 5s → 300s, since it now bounds a wait rather than a retry.
+- **A `pause` arriving mid-clear stranded the session too — the same defect through a third door.** `/checkpoint-threshold pause` was checked *above* the CLEARING branch, so a pause landing between `/clear` and the rotation withheld the resume prompt for as long as the pause lasted: context gone, nothing typed after, and no timeout to rescue it because the whole state machine was being skipped. Pause means "start no NEW nudges or clears"; a cycle already in flight is bounded by `--clear-timeout` regardless, so it now resolves before the pause is honoured.
+- **The stand-down marker could silently swallow an in-flight `/clear`, leaving a cleared session with no instruction.** The done-marker check sits above the `CLEARING` branch and ends the poll loop, so a marker arriving mid-cycle dropped the resume prompt. Two directions, both closed. The supervisor no longer *starts* a clear it is about to abandon: when a confirmed escalation writes the marker and the session is going to close, it stands down without clearing (nothing is lost — the next launch starts fresh — and a `/clear` racing `/exit` is exactly the queued-clear interleaving to avoid). And when the marker arrives from the model's own `/checkpoint --final` while an ordinary clear is in flight, the cycle is resolved explicitly rather than dropped: under `--no-exit-on-done`, where the session keeps running, the resume prompt is typed **before** standing down; under the default, where the session closes, the cycle is abandoned with a log line saying so. This was invisible before 0.19.0 because the old code typed `/clear` and the resume prompt synchronously in one poll.
+- **The `COOLDOWN` state could wedge permanently.** It only returned to `NORMAL` when `pct < soft`, so a `/clear` that did not take left occupancy high and every later poll hit `continue` with no branch able to fire again. It now releases on the cooldown clock alone.
+- `/exit` no longer leaves the stop guard's `injected` marker behind — it ends a session rather than starting a turn.
+- `run_proxy` no longer reports success when its child has vanished with nobody holding the exit status.
+
+### Tests
+
+- The three defects above were all invisible to the bats suite by construction: it launches via `CCAGE_AUTOCK_EXEC`, a bare command bash execs in place, so the pty child is the stub and the wrong signal happens to work; and the fake session matches raw bytes, so it has no keypress parser to reveal the merged Escape. `tests/test_session_close.py` pins both directly — decoding the bytes the watcher actually writes through a real keypress parser, and asserting `SIGTERM` cannot kill a subshell launcher while `SIGHUP` can. New bats cases cover the `SIGHUP` path end to end, the close waiting for a still-producing turn, a queued `/clear`, a `/clear` that never takes, and a done marker arriving mid-clear from both directions.
+- **The Python tests were running nowhere, and that is fixed.** `ci.yml` is a shell-only matrix with no pytest; `tests/ci-local.sh` named a single file; and no `.bats` file invokes a `.py` test. So `tests/test_weekly_floor.py` and `tests/test_session_close.py` — the latter pinning this release's two central fixes — were executed by nothing. `ci-local.sh` now runs `pytest tests/`, the whole directory: a new test file must be picked up by being written, not by being remembered in a list.
+- **The suite stops sleeping on timers it does not need.** The fake session took `FAKE_EXIT_ON_LOG` / `FAKE_EXIT_ON_N`, ending a scenario on the condition the test actually asserts instead of on `FAKE_DEADLINE`. Measured, per test, counting only stub modes that genuinely never exited early: ~90s off the suite. The remaining time is the scenarios' own `SUPERVISOR_IDLE` / `ESCALATE` / `done_grace` clocks, not idling — so the deadline stays as the backstop, and a genuine failure still fails the way it always did.
+- `tests/conftest.py` holds the one copy of the `SourceFileLoader` import of `bin/ccage-auto` (it has no `.py` suffix); three test files had grown their own. The fake session's transcript-rotation writer is likewise one helper rather than three near-identical copies with the token arithmetic spelled differently in each.
+- `test_transcript_quiet_for_tracks_the_active_transcript` was passing for the wrong reason: it backdated the transcript 60s, which put it *before* the watcher's `start_time`, so `active_jsonl` filtered it out and the assertion was satisfied by the "nothing to read" sentinel rather than by a measured gap. It now pins `start_time` and asserts the sentinel is *not* what came back.
+
 ## [0.18.0] — 2026-08-20
 
 ### Added — session docs are delivered whole, in labelled parts
@@ -469,3 +499,30 @@ When cutting a release:
 2. Insert a fresh empty [Unreleased] section above it.
 3. Tag the commit: `git tag v0.1.0`.
 -->
+
+---
+
+## Session history — 2026-08-19 (rolled out of RESUME)
+
+Started from a screenshot: `ccage-auto-yolo` in `baseline_tooling_v2` retry-looping on
+`500 no model mapping found`. Diagnosed from `journalctl --user -u ogc` — the session was talking
+to the local `ogc` proxy, which maps 26 open-weight models and no Anthropic one, so Claude Code's
+default `claude-opus-5` had nowhere to go. Root cause was ccage's own: `_ccage_pre_exec_hook` runs
+in the calling shell, so its `export`s outlived the launch. bash does not persist an assignment
+prefix on a *function* call, so the `OPENCODE=1` gate evaporated while the routing it installed
+stayed — the leak was invisible by construction. Fixed by running the hook and `command claude` in
+a subshell (measured: no extra process, bash execs the last command in place of the fork). Shipped
+as **v0.17.1**, CI 4/4, four mutant-verified bats cases.
+
+Then untangled where OpenCode lives. The material was scattered across four regions, three of them
+outside `~/dev`, which is why neither knowledge-vault (walks `~/dev` only) nor corpus-search (13
+research repos) had ever captured it. Two false starts on the docs home — `~/.claude/SYSTEMS.md`,
+then a `~/dev/systems` index repo — before the actual requirement surfaced: a **project folder for
+OpenCode work**, not a map. Settled on `/home/ff235/dev/opencode` with code, GUIDE, PATCHES and
+`_knowledge/` together, forked so the work is finally pushed rather than sitting uncommitted in a
+third party's clone.
+
+Worth carrying: **a doc that names paths goes stale the moment those paths move.** Moving the ogc
+tree silently invalidated `GUIDE.md`'s own setup instructions in three places, and the ccage copy
+of the same guide diverged into being actively wrong. `MAP.md` now carries a runnable drift check
+rather than a claim, which is the only version of this that survives contact.

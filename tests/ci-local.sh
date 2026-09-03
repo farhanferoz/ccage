@@ -66,13 +66,21 @@ else
     bad "bats"
 fi
 
-# 5. pytest — circuit-breaker unit tests (Python). Local superset (see header):
-#    guarded so a checkout without python3/pytest skips cleanly. `-p no:hydra_pytest`
-#    disables a conda-registered plugin that otherwise crashes collection; it is a
-#    no-op where that plugin is absent.
-step "pytest (circuit-breaker unit tests)"
+# 5. pytest — the Python unit tests. Local superset (see header): guarded so a
+#    checkout without python3/pytest skips cleanly. `-p no:hydra_pytest` disables
+#    a conda-registered plugin that otherwise crashes collection; it is a no-op
+#    where that plugin is absent.
+#
+#    RUN THE WHOLE DIRECTORY, never a hand-listed file. Naming files individually
+#    is how two of them ended up running NOWHERE: this step listed only
+#    test_subagent_watch.py, ci.yml is a shell matrix with no pytest at all, and
+#    no .bats file invokes a .py test -- so tests/test_weekly_floor.py and
+#    tests/test_session_close.py (which pins 0.19.0's keystroke-decoding and
+#    SIGHUP-close fixes) were executed by nothing. A new test file must be picked
+#    up by being written, not by being remembered here.
+step "pytest (Python unit tests)"
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import pytest' >/dev/null 2>&1; then
-    if python3 -m pytest tests/test_subagent_watch.py -p no:hydra_pytest -q; then
+    if python3 -m pytest tests/ -p no:hydra_pytest -q; then
         ok "pytest"
     else
         bad "pytest"

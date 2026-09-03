@@ -306,7 +306,31 @@ mode = os.environ.get("FAKE_MODE", "hard")
 sentinel = os.environ.get("FAKE_SENTINEL", "CHECKPOINTED")
 tokens0 = int(os.environ.get("FAKE_TOKENS", "300000"))   # opening occupancy
 exit_on = os.environ.get("FAKE_EXIT_ON", "").encode()    # break when this is seen
+# ...on the Nth occurrence, not merely the first. Some assertions are about a
+# REPEAT -- "poked twice", "the job id reached the second poke" -- where the
+# first occurrence is mid-scenario and stopping there cuts off the very thing
+# under test. Default 1 keeps every existing caller's meaning unchanged.
+exit_on_n = int(os.environ.get("FAKE_EXIT_ON_N", "1"))
 jsonl = os.path.join(sdir, "sess.jsonl")
+# The watcher's own log, and the generic EARLY EXIT built on it.
+#
+# Without this a stub sits out its whole FAKE_DEADLINE even though the thing the
+# test asserts happened seconds earlier: measured, the suite was 6m40s wall
+# against 1m41s CPU, five of those six minutes spent asleep on these timers.
+# FAKE_EXIT_ON_LOG names the log line the test is waiting for, so the run ends
+# when the ASSERTED CONDITION is true rather than when a timer lapses. The
+# deadline stays as the backstop for the case where the line never comes -- so a
+# genuine failure still fails, it just fails after the timer as it always did.
+logpath = os.path.join(os.path.dirname(os.path.dirname(sdir)), "ccage-autock.log")
+exit_on_log = os.environ.get("FAKE_EXIT_ON_LOG", "")
+exit_on_log_matched = False
+
+def log_has(needle):
+    try:
+        with open(logpath) as fh:
+            return needle in fh.read()
+    except OSError:
+        return False
 
 def append_turn(tokens, text="working"):
     half = tokens // 2
@@ -317,6 +341,25 @@ def append_turn(tokens, text="working"):
                   "cache_creation_input_tokens": 0},
         "content": [{"type": "text", "text": text}]}}
     with open(jsonl, "a") as f:
+        f.write(json.dumps(obj) + "\n")
+
+def write_cleared_transcript():
+    """Rotate: drop a NEW, low-occupancy transcript beside the old one.
+
+    That rotation is exactly what the watcher's _is_cleared() looks for, so
+    every mode that simulates a /clear taking effect needs it. Three modes did,
+    and each had its own copy of this block with the token arithmetic spelled
+    differently -- one copy diverging silently was a matter of time, and no
+    assertion would have caught it."""
+    fresh = os.path.join(sdir, "sess_cleared_%d.jsonl" % int(time.time() * 1000))
+    tokens = 10000
+    half = tokens // 2
+    obj = {"type": "assistant", "message": {
+        "model": "claude-opus-4-8",
+        "usage": {"input_tokens": half, "cache_read_input_tokens": tokens - half,
+                  "cache_creation_input_tokens": 0},
+        "content": [{"type": "text", "text": "cleared"}]}}
+    with open(fresh, "w") as f:
         f.write(json.dumps(obj) + "\n")
 
 # Open at the configured occupancy (default: above the soft+hard line so the
@@ -330,6 +373,10 @@ cap.write(("ENV_CCAGE_AUTONOMOUS=%s\n"
            % os.environ.get("CCAGE_AUTONOMOUS", "unset")).encode())
 buf = b""
 confirmed = False
+cleared = False
+busy_until = 0.0      # done_busy: keep the turn producing output until this time
+clear_seen_at = 0.0   # clear_queued: when /clear was typed (rotation comes later)
+busy_logged = False
 deadline = time.time() + float(os.environ.get("FAKE_DEADLINE", "30"))
 while time.time() < deadline:
     r, _, _ = select.select([0], [], [], 0.5)
@@ -342,9 +389,25 @@ while time.time() < deadline:
             break
         cap.write(d)
         buf += d
-    if exit_on and exit_on in buf:   # generic exit hook (e.g. init-prompt marker)
+    if exit_on and buf.count(exit_on) >= exit_on_n:   # generic exit hook
         time.sleep(0.3)
         break
+    if exit_on_log and log_has(exit_on_log):
+        # Settle before leaving: the watcher may still be mid-way through the
+        # burst that line belongs to, and a test that also asserts the NEXT line
+        # would go flaky if the stub vanished between the two.
+        exit_on_log_matched = True
+        time.sleep(0.6)
+        break
+    # A session that refuses to close on /exit, so the signal fallback is what
+    # ends the run. FAKE_IGNORE_EXIT is how the SIGHUP path gets exercised.
+    if b"/exit" in buf and not os.environ.get("FAKE_IGNORE_EXIT"):
+        time.sleep(0.3)
+        break
+    if b"/clear" in buf and not cleared and mode not in (
+            "clear_queued", "clear_never", "done_mid_clear", "pause_mid_clear"):
+        cleared = True
+        write_cleared_transcript()
     if mode == "hard":
         if b"\x1b" in buf:           # watcher Escape-interrupted at the hard line
             time.sleep(0.3)
@@ -359,6 +422,86 @@ while time.time() < deadline:
             confirmed = True
         if b"Resume the task" in buf:  # watcher cleared and typed the resume nudge
             break
+    elif mode == "clear_queued":
+        # THE OBSERVED INCIDENT. The session is busy, so /clear is QUEUED: the
+        # rotation does not happen when it is typed, but QUEUE_DELAY seconds
+        # later. Anything the watcher types before that lands in the OLD session
+        # and is destroyed by the clear when it finally runs, so the watcher must
+        # type NOTHING between /clear and the rotation.
+        if not confirmed and len(buf) > 20:
+            append_turn(300000, text=sentinel + " done")
+            with open(os.path.join(os.getcwd(), "RESUME.md"), "a") as f:
+                f.write("checkpoint\n")
+            confirmed = True
+        if b"/clear" in buf and not cleared and clear_seen_at == 0.0:
+            clear_seen_at = time.time()
+        if clear_seen_at and not cleared and \
+           time.time() - clear_seen_at >= float(os.environ.get("QUEUE_DELAY", "6")):
+            cleared = True
+            # Record what the watcher typed while the clear was still queued --
+            # the test asserts this is empty.
+            cap.write(b"QUEUE_WINDOW_END\n")
+            write_cleared_transcript()
+        if b"Resume the task" in buf:
+            break
+    elif mode == "clear_never":
+        # /clear is confirmed by transcript ROTATION; this mode never rotates, so
+        # the clear never demonstrably ran. The watcher must NOT type the resume
+        # prompt: it would land in the un-cleared session and be wiped when a
+        # queued clear finally fires.
+        if not confirmed and len(buf) > 20:
+            append_turn(300000, text=sentinel + " done")
+            with open(os.path.join(os.getcwd(), "RESUME.md"), "a") as f:
+                f.write("checkpoint\n")
+            confirmed = True
+    elif mode == "pause_mid_clear":
+        # THE THIRD DOOR. `/checkpoint-threshold pause` lands between /clear and
+        # the rotation. Pause means "start no new nudges or clears", not
+        # "abandon one already in flight" -- but the pause check used to sit
+        # ABOVE the CLEARING branch, so the resume prompt was withheld for as
+        # long as the pause lasted, leaving a wiped session holding no
+        # instruction. Same stranding as the done-marker case, different entry.
+        if not confirmed and len(buf) > 20:
+            append_turn(300000, text=sentinel + " done")
+            with open(os.path.join(os.getcwd(), "RESUME.md"), "a") as f:
+                f.write("checkpoint\n")
+            confirmed = True
+        if b"/clear" in buf and clear_seen_at == 0.0:
+            clear_seen_at = time.time()
+            with open(os.path.join(os.getcwd(), ".ccage-autock.conf"), "w") as f:
+                f.write("paused=1\n")
+        # Rotate only after the pause has had polls to be seen, so the watcher
+        # is genuinely paused WHILE in CLEARING -- the exact window.
+        if clear_seen_at and not cleared and time.time() - clear_seen_at >= 3:
+            cleared = True
+            write_cleared_transcript()
+        if b"Resume the task" in buf:
+            deadline = min(deadline, time.time() + 2)
+    elif mode == "done_mid_clear":
+        # The completion marker lands WHILE a clear is in flight, written by the
+        # model's own `/checkpoint --final`. This is an ORDINARY occupancy cycle,
+        # so sup_driving is False and the watcher's stand-down-without-clearing
+        # path cannot apply -- only the done-marker block's CLEARING handling
+        # can. Under --no-exit-on-done the claude session keeps running, so the
+        # resume prompt MUST still be typed; abandoning the cycle is what leaves
+        # a wiped session with no instruction.
+        if not confirmed and len(buf) > 20:
+            append_turn(300000, text=sentinel + " done")
+            with open(os.path.join(os.getcwd(), "RESUME.md"), "a") as f:
+                f.write("checkpoint\n")
+            confirmed = True
+        if b"/clear" in buf and clear_seen_at == 0.0:
+            clear_seen_at = time.time()
+            with open(os.path.join(os.getcwd(), ".ccage-session-done"), "w") as f:
+                f.write("done\n")
+        # Rotate only AFTER the marker has had polls to be seen, so the watcher
+        # genuinely sits in CLEARING with the marker present -- the exact window
+        # the old code fell through and dropped.
+        if clear_seen_at and not cleared and time.time() - clear_seen_at >= 3:
+            cleared = True
+            write_cleared_transcript()
+        if b"Resume the task" in buf:
+            deadline = min(deadline, time.time() + 3)   # let the stand-down log land
     elif mode == "done":
         # Play the model running `/checkpoint --final`: drop the completion
         # marker after the first injected byte (the soft nudge), so it is newer
@@ -368,7 +511,30 @@ while time.time() < deadline:
             with open(os.path.join(os.getcwd(), ".ccage-session-done"), "w") as f:
                 f.write("done\n")
             confirmed = True
-            deadline = time.time() + 3
+            # Long enough for the done-close grace (the watcher waits for the
+            # transcript to go quiet before typing /exit, so it never cuts off
+            # the turn that wrote the marker) plus _clean_input's ESC gap. The
+            # SIGHUP test raises it so the stub cannot self-exit first and mask
+            # the signal that actually ended the run.
+            deadline = time.time() + float(os.environ.get("FAKE_DONE_LINGER", "12"))
+    elif mode == "done_busy":
+        # The marker is written PART-WAY through a turn that goes on producing
+        # output — the `/checkpoint --final --tidy` shape, where the tidy pass
+        # runs after the marker. The watcher must not ESC-interrupt it, so it
+        # waits for the transcript to stop growing before typing /exit.
+        if not confirmed and len(buf) > 0:
+            with open(os.path.join(os.getcwd(), ".ccage-session-done"), "w") as f:
+                f.write("done\n")
+            confirmed = True
+            busy_until = time.time() + 6
+        if confirmed and time.time() < busy_until:
+            append_turn(300000, text="still tidying")
+        elif confirmed and not busy_logged:
+            # Stamp the capture so the test can prove /exit came AFTER the turn
+            # finished, not during it.
+            cap.write(b"MARKER_DONE\n")
+            busy_logged = True
+            deadline = time.time() + 20
     elif mode == "confirm_then_raise":
         # Play the incident: the model checkpoints (sentinel + RESUME), and a
         # live `--set soft=N` raises the threshold above the session's current
@@ -436,8 +602,7 @@ while time.time() < deadline:
         # {"type": "tool_use"}, which append_turn() never emits. Proves the
         # supervisor's episode-reset fires on genuine work and a fresh poke
         # follows, even after the circuit opened.
-        logpath = os.path.join(os.path.dirname(os.path.dirname(sdir)), "ccage-autock.log")
-        if not confirmed and os.path.exists(logpath) and "circuit open" in open(logpath).read():
+        if not confirmed and log_has("circuit open"):
             obj = {"type": "assistant", "message": {
                 "model": "claude-opus-4-8",
                 "usage": {"input_tokens": 100, "cache_read_input_tokens": 100,
@@ -448,6 +613,16 @@ while time.time() < deadline:
             with open(jsonl, "a") as f:
                 f.write(json.dumps(obj) + "\n")
             confirmed = True
+
+# DRIFT ALARM. FAKE_EXIT_ON_LOG names a log line the watcher is expected to
+# write; if that wording changes the needle silently stops matching and the test
+# quietly goes back to sleeping out its whole FAKE_DEADLINE. Nothing would ever
+# fail -- the suite just gets slower, forever, and nobody notices until it is
+# egregious. So say so, loudly, and let drive() turn it into a red test.
+# Only when the DEADLINE is what ended the run: any other break means the
+# scenario finished on its own terms and the needle simply was not the exit.
+if exit_on_log and not exit_on_log_matched and time.time() >= deadline:
+    cap.write(b"EXIT_ON_LOG_NEVER_MATCHED:" + exit_on_log.encode() + b"\n")
 sys.exit(0)
 PY
 }
@@ -467,6 +642,20 @@ drive() {
         CCAGE_AUTOCK_EXEC='python3 \"$STUB\"' \
         FAKE_SDIR='$SDIR' FAKE_CAPTURE='$CAP' FAKE_MODE='$1' \
         '$AUTO' $2 </dev/null"
+    # One shared place to catch a FAKE_EXIT_ON_LOG needle that no longer matches
+    # the watcher's wording. Without this the only symptom is a slower suite,
+    # which is invisible until it is egregious -- and a CI wall-clock ceiling
+    # cannot serve instead, because runner variance would have to be absorbed by
+    # a bound too loose to catch anything.
+    if grep -qa 'EXIT_ON_LOG_NEVER_MATCHED' "$CAP" 2>/dev/null; then
+        echo "FAKE_EXIT_ON_LOG never matched, so this test silently waited out" \
+             "its whole FAKE_DEADLINE. Either the watcher's log wording drifted," \
+             "the needle names a NEGATED assertion (it can never match — this is" \
+             "how the first one was caught), or the line lands after the" \
+             "deadline. Fix the needle or drop it:" >&2
+        grep -ao 'EXIT_ON_LOG_NEVER_MATCHED:.*' "$CAP" >&2
+        return 1
+    fi
 }
 
 @test "hard threshold Escape-interrupts a session that won't checkpoint" {
@@ -632,6 +821,188 @@ PY
     grep -q "standing down" "$CAGE/ccage-autock.log"
     ! cap_has "b'/clear'"                           # stood down before clearing
     ! cap_has "b'Resume the task from RESUME.md'"   # ...and before resuming
+    cap_has "b'/exit'"                              # closed claude session
+}
+
+@test "a --final completion marker with --no-exit-on-done does not type /exit" {
+    drive done "--no-exit-on-done --soft 10 --hard 90 --poll 1"
+    [ "$status" -eq 0 ]
+    [ -f "$REPO/.ccage-session-done" ]
+    grep -q "standing down; no more nudges/clears" "$CAGE/ccage-autock.log"
+    ! cap_has "b'/exit'"
+}
+
+@test "a PAUSE arriving MID-CLEAR still resumes — pause stops new clears, not one in flight" {
+    # The third door onto the same stranding. `/checkpoint-threshold pause`
+    # lands between /clear and the rotation. Before this fix the pause check sat
+    # ABOVE the CLEARING branch, so the resume prompt was withheld for as long
+    # as the pause lasted: /clear typed, context gone, nothing typed after, and
+    # no timeout to rescue it because the whole state machine was skipped.
+    #
+    # Pause means "start no NEW nudges or clears". A cycle already in flight is
+    # bounded by clear_timeout regardless, so finishing it costs the pause
+    # nothing and is the only reading that cannot strand a live session.
+    drive pause_mid_clear "--soft 10 --hard 90 --poll 1"
+    [ "$status" -eq 0 ]
+    grep -q '^paused=1$' "$REPO/.ccage-autock.conf"   # the pause really landed
+    cap_has "b'/clear'"
+    cap_has "b'Resume the task from RESUME.md'"       # ...and the cycle finished anyway
+    grep -q "clear confirmed after" "$CAGE/ccage-autock.log"
+}
+
+@test "a done marker arriving MID-CLEAR still resumes before standing down" {
+    # THE STRANDING REGRESSION, from the other entry point. Here the marker is
+    # the model's own `/checkpoint --final` landing while an ORDINARY occupancy
+    # clear is in flight -- sup_driving is False, so the stand-down-without-
+    # clearing path cannot apply and only the done-marker block's CLEARING
+    # branch can save the cycle. With --no-exit-on-done the claude session keeps
+    # running, so dropping the cycle here leaves the user in a wiped session
+    # holding no instruction: /clear typed, context gone, nothing typed after.
+    #
+    # The done-marker check sits ABOVE the CLEARING branch (deliberately -- a
+    # just-cleared transcript has no usage row, so the occupancy guards below
+    # would skip exactly the polls that matter), and it ends the loop. So the
+    # ordering has to be handled where the marker is read, not where the clear
+    # is watched. The fake delays its rotation past the marker so the watcher
+    # genuinely sits in CLEARING with the marker present -- the exact window.
+    drive done_mid_clear "--no-exit-on-done --soft 10 --hard 90 --poll 1"
+    [ "$status" -eq 0 ]
+    [ -f "$REPO/.ccage-session-done" ]
+    cap_has "b'/clear'"
+    cap_has "b'Resume the task from RESUME.md'"      # the cycle was NOT abandoned
+    grep -q "resuming before standing down" "$CAGE/ccage-autock.log"
+    grep -q "standing down; no more nudges/clears" "$CAGE/ccage-autock.log"
+}
+
+@test "a done marker arriving MID-CLEAR abandons the cycle OUT LOUD when closing" {
+    # Same window, default --exit-on-done. The session is being closed, so there
+    # is nothing to resume into -- _close_session leads with an ESC that would
+    # interrupt the very turn a resume prompt started. Abandoning is correct
+    # here; abandoning SILENTLY is not. The log line is the whole assertion:
+    # a /clear with no resume after it must never be an unexplained gap in the
+    # record (D14 -- a branch is done only when it logs its decision).
+    drive done_mid_clear "--soft 10 --hard 90 --poll 1"
+    [ "$status" -eq 0 ]
+    cap_has "b'/clear'"
+    ! cap_has "b'Resume the task from RESUME.md'"
+    grep -q "abandoning the clear cycle" "$CAGE/ccage-autock.log"
+    cap_has "b'/exit'"
+}
+
+@test "a QUEUED /clear does not swallow the resume prompt (the observed incident)" {
+    # The session was busy, so /clear sat in Claude Code's input queue. The old
+    # code typed the resume prompt 3s later on a timer; the still-live OLD
+    # session consumed it, the queued clear then ran, and the new session came up
+    # with no instruction and sat idle. The watcher must type NOTHING between
+    # /clear and the rotation that proves it ran.
+    export FAKE_DEADLINE=40 QUEUE_DELAY=6
+    drive clear_queued "--soft 10 --hard 90 --poll 1"
+    unset FAKE_DEADLINE QUEUE_DELAY
+    [ "$status" -eq 0 ]
+    cap_has "b'Resume the task from RESUME.md'"      # it did eventually resume
+    grep -q "clear confirmed after" "$CAGE/ccage-autock.log"
+    python3 - "$CAP" <<'PY'
+import sys
+cap = open(sys.argv[1], "rb").read()
+i = cap.index(b"/clear")
+end = cap.index(b"QUEUE_WINDOW_END")          # stamped when the clear finally ran
+window = cap[i + len(b"/clear"):end]
+assert b"Resume the task" not in window, \
+    "resume prompt typed while the /clear was still queued: %r" % window
+assert window.count(b"/clear") == 0, \
+    "a second /clear was typed while the first was still queued: %r" % window
+r = cap.index(b"Resume the task")
+assert r > end, "resume prompt preceded the rotation"
+PY
+}
+
+@test "a /clear that never takes must NOT be followed by a resume prompt" {
+    # Withholding it is the correct failure: a resume typed into the un-cleared
+    # session is destroyed the moment a queued clear fires, which strands the run.
+    export FAKE_DEADLINE=25
+    export FAKE_EXIT_ON_LOG='back to NORMAL'   # end on the asserted condition, not the timer
+    drive clear_never "--clear-timeout 6 --soft 10 --hard 90 --poll 1"
+    unset FAKE_DEADLINE
+    [ "$status" -eq 0 ]
+    cap_has "b'/clear'"                              # it did try
+    ! cap_has "b'Resume the task from RESUME.md'"    # ...and did not resume blind
+    grep -q "NOT typing the resume prompt" "$CAGE/ccage-autock.log"
+    grep -q "back to NORMAL" "$CAGE/ccage-autock.log"
+}
+
+@test "/clear is typed once per cycle, never retried while one may be queued" {
+    export FAKE_DEADLINE=25
+    drive clear_never "--clear-timeout 6 --soft 10 --hard 90 --poll 1"
+    unset FAKE_DEADLINE
+    [ "$status" -eq 0 ]
+    python3 - "$CAP" <<'PY'
+import sys
+cap = open(sys.argv[1], "rb").read()
+n = cap.count(b"/clear")
+assert n == 1, "expected exactly one /clear in the cycle, saw %d" % n
+PY
+}
+
+@test "the done-close SIGHUPs a subshell launcher that ignores /exit" {
+    # THE PRODUCTION SHAPE, which CCAGE_AUTOCK_EXEC='python3 ...' cannot produce.
+    # A real cage runs `bash -ic 'claude "$@"'` where `claude` is a shell
+    # function whose body ends in a subshell, so the pty child is an interactive
+    # bash — which IGNORES SIGTERM — with claude beneath it. The original
+    # fallback signalled SIGTERM and was therefore a no-op in every real cage
+    # while this suite stayed green. Here the stub refuses to close on /exit, so
+    # only the signal can end the run.
+    STUB="$BATS_TEST_TMPDIR/fakeclaude.py"
+    CAP="$BATS_TEST_TMPDIR/capture.bin"
+    make_fake_claude "$STUB"
+    : > "$CAP"
+    start=$SECONDS
+    run bash -c "cd '$REPO' && \
+        CCAGE_AUTOCK_NO_BYPASS_ACCEPT=1 \
+        CCAGE_AUTOCK_EXEC='( : ; python3 \"$STUB\" )' \
+        CCAGE_AUTOCK_DONE_GRACE=1 \
+        FAKE_SDIR='$SDIR' FAKE_CAPTURE='$CAP' FAKE_MODE='done' \
+        FAKE_IGNORE_EXIT=1 FAKE_DEADLINE=90 FAKE_DONE_LINGER=90 \
+        '$AUTO' --soft 10 --hard 90 --poll 1 </dev/null"
+    elapsed=$(( SECONDS - start ))
+    [ -f "$REPO/.ccage-session-done" ]
+    cap_has "b'/exit'"                                  # graceful attempt first
+    grep -q "SIGHUP to the pty child" "$CAGE/ccage-autock.log"
+    # SIGHUP was enough. Asserted through the line logged BEFORE the escalation,
+    # never through a "closed on SIGHUP" success line: the watcher is a daemon
+    # thread, so once the signal lands the child dies, the pty hits EOF, main()
+    # returns and the interpreter tears the thread down — any log line written
+    # AFTER the wait races that teardown and usually loses. Measured: the run
+    # ends in ~13s having logged the SIGHUP line and nothing after it.
+    ! grep -q "still alive after SIGHUP" "$CAGE/ccage-autock.log"
+    # It returned on the signal, not by the stub timing out at 90s.
+    [ "$elapsed" -lt 60 ]
+    # ...and it died of SIGHUP (1), not SIGKILL (9): run_proxy returns
+    # waitstatus_to_exitcode == -signum, which the shell reports as 256-signum.
+    [ "$status" -eq 255 ]
+}
+
+@test "the done-close waits for the marker-writing turn to finish" {
+    # /exit is preceded by an ESC, which interrupts a RUNNING turn. The marker is
+    # written part-way through one (`--final --tidy` runs the tidy pass after
+    # it), so closing on the next poll would cut it off. The close must wait for
+    # the transcript to go quiet.
+    export FAKE_DEADLINE=40 CCAGE_AUTOCK_DONE_GRACE=2
+    drive done_busy "--soft 10 --hard 90 --poll 1"
+    unset FAKE_DEADLINE CCAGE_AUTOCK_DONE_GRACE
+    [ "$status" -eq 0 ]
+    [ -f "$REPO/.ccage-session-done" ]
+    grep -q "closing the claude session once the turn goes quiet" "$CAGE/ccage-autock.log"
+    # the transcript kept growing for 6s after the marker; nothing was typed
+    # into it during that window
+    python3 - "$CAP" <<'PY'
+import sys
+cap = open(sys.argv[1], "rb").read()
+assert b"/exit" in cap, "never closed the session"
+# the stub records a MARKER_DONE line once it stops writing turns; /exit must
+# come after it, never before.
+assert cap.index(b"MARKER_DONE") < cap.index(b"/exit"), \
+    "typed /exit while the marker-writing turn was still producing output"
+PY
 }
 
 # --- Live control file (/checkpoint-threshold) --------------------------------
@@ -1992,6 +2363,7 @@ PLAN
     write_parked_record sess '{"jobs":[{"id":"job-x","size":5}],"logs":[]}'
     export FAKE_TOKENS=50000 FAKE_DEADLINE=10 \
         CCAGE_AUTOCK_SUPERVISOR_IDLE=2 CCAGE_AUTOCK_SUPERVISOR_ESCALATE=2
+    export FAKE_EXIT_ON_LOG='circuit open'   # end on the asserted condition, not the timer
     drive idle "--soft 40 --poll 1"
     unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE CCAGE_AUTOCK_SUPERVISOR_ESCALATE
     [ "$status" -eq 0 ]
@@ -2007,11 +2379,23 @@ PLAN
     python3 -c "import sys; sys.exit(0 if open('$CAP','rb').read().count(b'auto-checkpoint') == 1 else 1)"
 }
 
-@test "supervisor: the escalation reaches a real /clear when the model does confirm" {
+@test "supervisor: a confirmed escalation stands down WITHOUT clearing when it will close the session" {
     # The success path for the same fix: confirming (echoing the sentinel,
-    # touching RESUME.md) after the escalation nudge must still clear, proving
-    # sup_driving suppresses ONLY the below-soft cancellation and leaves
-    # _confirmed() and _do_clear() untouched.
+    # touching RESUME.md) after the escalation nudge must reach the end of the
+    # ladder, proving sup_driving suppresses ONLY the below-soft cancellation
+    # and leaves _confirmed() untouched.
+    #
+    # 0.19.0 changed what "the end of the ladder" IS here. The confirmation
+    # makes _maybe_mark_done write the stand-down marker, and with the default
+    # --exit-on-done that marker CLOSES the session -- so no /clear is typed at
+    # all. Before 0.19.0 one was, and the resume prompt went with it, because
+    # the old _do_clear typed both synchronously in this poll. Once the resume
+    # moved to a later poll (rotation-confirmed), the marker written one line
+    # earlier ended the loop first: the /clear was typed and then silently
+    # abandoned, every time. Typing a clear into a session about to receive
+    # /exit is pure risk -- a queued clear racing the exit -- for a session the
+    # next launch starts fresh anyway. The --no-exit-on-done sibling below
+    # covers the case where the session lives on and the clear DOES belong.
     write_parked_record sess '{"jobs":[],"logs":[]}'
     # ONE tunable gates TWO windows: how long after the poke before the
     # escalation arms, AND how long the armed escalation waits before giving up.
@@ -2023,16 +2407,42 @@ PLAN
     # own test above, which does not depend on this margin.
     export FAKE_TOKENS=50000 FAKE_DEADLINE=30 \
         CCAGE_AUTOCK_SUPERVISOR_IDLE=2 CCAGE_AUTOCK_SUPERVISOR_ESCALATE=6
+    export FAKE_EXIT_ON_LOG='standing down without clearing'   # end on the asserted condition, not the timer
     drive idle_then_confirm "--soft 40 --poll 1"
     unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE CCAGE_AUTOCK_SUPERVISOR_ESCALATE
     [ "$status" -eq 0 ]
     cap_has "b'[supervisor]'"
     cap_has "b'auto-checkpoint'"
-    cap_has "b'/clear'"
-    cap_has "b'Resume the task from RESUME.md'"
     grep -q "checkpoint confirmed" "$CAGE/ccage-autock.log"
+    grep -q "wrote .ccage-session-done" "$CAGE/ccage-autock.log"
+    grep -q "standing down without clearing" "$CAGE/ccage-autock.log"
+    # The invariant, stated as an assertion: no /clear was typed, so there is no
+    # cleared-but-uninstructed session to strand. Neither half may appear.
+    ! cap_has "b'/clear'"
+    ! cap_has "b'Resume the task from RESUME.md'"
     ! grep -q "cancelling nudge cycle" "$CAGE/ccage-autock.log"
     ! grep -q "circuit open" "$CAGE/ccage-autock.log"
+}
+
+@test "supervisor: a confirmed escalation DOES clear and resume with --no-exit-on-done" {
+    # The other half of the contract above. Here the stand-down leaves the
+    # claude session RUNNING for the user, so the clear+resume is the right
+    # ending and must still happen -- and the resume must be typed BEFORE the
+    # watcher stands down, or the user is left in a wiped session that was told
+    # nothing. That ordering is the whole point of the done-marker block's
+    # CLEARING branch; without it the "standing down" break swallows the cycle.
+    write_parked_record sess '{"jobs":[],"logs":[]}'
+    export FAKE_TOKENS=50000 FAKE_DEADLINE=30 \
+        CCAGE_AUTOCK_SUPERVISOR_IDLE=2 CCAGE_AUTOCK_SUPERVISOR_ESCALATE=6
+    export FAKE_EXIT_ON_LOG='standing down; no more nudges/clears'   # end on the asserted condition, not the timer
+    drive idle_then_confirm "--no-exit-on-done --soft 40 --poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE CCAGE_AUTOCK_SUPERVISOR_ESCALATE
+    [ "$status" -eq 0 ]
+    cap_has "b'/clear'"
+    cap_has "b'Resume the task from RESUME.md'"
+    grep -q "wrote .ccage-session-done" "$CAGE/ccage-autock.log"
+    grep -q "resuming before standing down" "$CAGE/ccage-autock.log"
+    grep -q "standing down; no more nudges/clears" "$CAGE/ccage-autock.log"
 }
 
 @test "supervisor: the circuit stays open until the transcript grows with real work, then pokes again" {
@@ -2045,6 +2455,10 @@ PLAN
     # round-trip each time it bites.
     export FAKE_TOKENS=50000 FAKE_DEADLINE=24 \
         CCAGE_AUTOCK_SUPERVISOR_IDLE=2 CCAGE_AUTOCK_SUPERVISOR_ESCALATE=2
+    # End on the asserted condition, not the timer. The condition here is the
+    # SECOND poke -- the episode-reset log line lands before it, so exiting
+    # there would cut off the very poke this test counts.
+    export FAKE_EXIT_ON='[supervisor]' FAKE_EXIT_ON_N=2
     drive idle_then_work "--soft 40 --poll 1"
     unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE CCAGE_AUTOCK_SUPERVISOR_ESCALATE
     [ "$status" -eq 0 ]
@@ -2150,6 +2564,7 @@ PLAN
     local writer=$!
     export FAKE_TOKENS=50000 FAKE_DEADLINE=16 \
         CCAGE_AUTOCK_SUPERVISOR_IDLE=2 CCAGE_AUTOCK_SUPERVISOR_ESCALATE=2
+    export FAKE_EXIT_ON_LOG='still idle after the poke'   # end on the asserted condition, not the timer
     drive idle "--soft 40 --poll 1"
     unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE CCAGE_AUTOCK_SUPERVISOR_ESCALATE
     kill "$writer" 2>/dev/null || true; wait "$writer" 2>/dev/null || true
@@ -2177,6 +2592,9 @@ PLAN
     ( sleep 3; printf 'still running\n[exited with code 0]' > "$(tasks_dir sess)/job-y.output" ) &
     local writer=$!
     export FAKE_TOKENS=50000 FAKE_DEADLINE=10 CCAGE_AUTOCK_SUPERVISOR_IDLE=2
+    # End on the asserted condition: the job id reaching the poke. "a job
+    # landed" is logged BEFORE that poke is typed, so it is the wrong marker.
+    export FAKE_EXIT_ON='job-y'
     drive idle "--poll 1"
     unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE
     wait "$writer" 2>/dev/null || true
@@ -2232,13 +2650,18 @@ PLAN
     write_parked_record sess '{"jobs":[],"logs":[]}'
     export FAKE_TOKENS=50000 FAKE_DEADLINE=30 \
         CCAGE_AUTOCK_SUPERVISOR_IDLE=2 CCAGE_AUTOCK_SUPERVISOR_ESCALATE=6
+    export FAKE_EXIT_ON_LOG='wrote .ccage-session-done'   # end on the asserted condition, not the timer
     drive idle_then_confirm "--soft 40 --poll 1"
     unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE CCAGE_AUTOCK_SUPERVISOR_ESCALATE
     [ "$status" -eq 0 ]
-    cap_has "b'/clear'"                              # the existing clear still happens
     grep -q "checkpoint confirmed" "$CAGE/ccage-autock.log"
     grep -q "wrote .ccage-session-done" "$CAGE/ccage-autock.log"
     [ -f "$REPO/.ccage-session-done" ]
+    # 0.19.0: the clear no longer follows on this path. The marker closes the
+    # session, and the resume prompt now waits for a rotation on a LATER poll
+    # than the marker's own stand-down -- so a /clear typed here could only ever
+    # be abandoned. See the escalation test above for the full reasoning.
+    ! cap_has "b'/clear'"
 }
 
 @test "supervisor: no done marker while a job is present at confirmation" {
@@ -2256,6 +2679,7 @@ PLAN
     write_parked_record sess '{"jobs":[],"logs":[]}'
     export FAKE_TOKENS=50000 FAKE_DEADLINE=10 \
         CCAGE_AUTOCK_SUPERVISOR_IDLE=2 CCAGE_AUTOCK_SUPERVISOR_ESCALATE=2
+    export FAKE_EXIT_ON_LOG='circuit open'   # end on the asserted condition, not the timer
     drive idle "--soft 40 --poll 1"
     unset FAKE_TOKENS FAKE_DEADLINE CCAGE_AUTOCK_SUPERVISOR_IDLE CCAGE_AUTOCK_SUPERVISOR_ESCALATE
     [ "$status" -eq 0 ]

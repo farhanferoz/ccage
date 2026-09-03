@@ -7,8 +7,6 @@ bin/ccage-auto has no .py suffix, so it is loaded via SourceFileLoader --
 same pattern as tests/test_subagent_watch.py's _load_ccage_auto(). Module-level
 code is import-safe: main() is guarded by __name__ == "__main__".
 """
-import importlib.machinery
-import importlib.util
 import json
 import os
 import threading
@@ -18,19 +16,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from conftest import load_ccage_auto
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def _load_ccage_auto():
-    path = str(ROOT / "bin" / "ccage-auto")
-    loader = importlib.machinery.SourceFileLoader("ccage_auto_weekly", path)
-    spec = importlib.util.spec_from_loader("ccage_auto_weekly", loader)
-    mod = importlib.util.module_from_spec(spec)
-    loader.exec_module(mod)
-    return mod
-
-
-ccage_auto = _load_ccage_auto()
+ccage_auto = load_ccage_auto("ccage_auto_weekly")
 
 
 def _write_state(config_root, used_percentage, ts, resets_at=None):

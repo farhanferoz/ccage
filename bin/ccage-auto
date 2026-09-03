@@ -49,6 +49,10 @@
 #   --poll N                       poll interval, seconds        (default: 12)
 #   --weekly-floor N               stand down when remaining weekly capacity
 #                                  drops to N percent            (default: off)
+#   --exit-on-done / --no-exit-on-done
+#                                  close claude session on done  (default: on)
+#   --clear-timeout N              how long to wait for a typed /clear to
+#                                  actually run before giving up  (default: 300)
 #   --status                       diagnostics only, do not launch
 #
 # Env equivalents (flags win): CCAGE_AUTOCK, CCAGE_AUTOCK_SOFT, CCAGE_AUTOCK_HARD,
@@ -75,6 +79,12 @@
 #   CCAGE_AUTOCK_COOLDOWN (s to ignore thresholds after a reset; default 30),
 #   CCAGE_AUTOCK_NO_ASK_GUARD (1 = don't register the AskUserQuestion guard),
 #   CCAGE_AUTOCK_WEEKLY_FLOOR (remaining-% weekly-limit floor; see below).
+#   CCAGE_AUTOCK_EXIT_ON_DONE (1 = close claude session when done, default 1).
+#   CCAGE_AUTOCK_DONE_GRACE (s the transcript must be quiet before the done
+#     close types /exit, so the marker-writing turn is never cut off; default 10).
+#   CCAGE_AUTOCK_CLEAR_TIMEOUT (s to wait for a typed /clear to take effect
+#     before giving up without resuming; a /clear typed while a turn is running
+#     is QUEUED until that turn ends, so this is minutes, not seconds. Default 300).
 #   CCAGE_SLOT is honoured for RESUME naming.
 #
 # Weekly-limit floor (opt-in, off by default). The context watcher manages the
@@ -128,6 +138,7 @@ import threading
 import time
 import tty
 from pathlib import Path
+from typing import Optional
 
 
 # ----------------------------------------------------------------------------
@@ -181,6 +192,13 @@ DEFAULT_WINDOW = WINDOW_1M    # fallback when the model is unknown / ambiguous
 # entry, so we settle generously before pressing Enter.
 KEY_DELAY = 0.25        # pause between typing a line and submitting it
 CLEAR_SETTLE = 3.0      # wait after /clear for the SessionStart hook + reload
+ESC_TAIL = 0.2          # _clean_input: extra gap after _interrupt's 0.5s, so ESC
+                        # and the next key clear the ~500ms escape timeout and are
+                        # decoded as two keypresses, not one Alt-modified one
+EXIT_GRACE = 8.0        # wait for /exit to take before signalling the pty child
+EXIT_KILL_GRACE = 3.0   # wait after SIGHUP, then after SIGKILL
+DONE_IDLE_GRACE = 10.0  # transcript quiet for this long before closing on done
+DONE_CLOSE_CEILING = 180.0   # ...but never wait longer than this to close
 COOLDOWN = 30.0         # ignore thresholds for this long after a reset
 NUDGE_TIMEOUT = 600.0   # weekly-floor stand-down only: re-nudge if the model
                         # hasn't confirmed after this long (no occupancy signal
@@ -407,6 +425,17 @@ class Config:
         # time. CCAGE_AUTOCK_CHROME=1 keeps chrome (also the escape hatch for a
         # CLI too old to know --no-chrome, which would otherwise exit at launch).
         self.chrome = _truthy(os.environ.get("CCAGE_AUTOCK_CHROME"), False)
+        self.exit_on_done = _truthy(os.environ.get("CCAGE_AUTOCK_EXIT_ON_DONE"), True)
+        # How long the transcript must stay quiet before the done-marker close
+        # types /exit. The close leads with an ESC, which interrupts a running
+        # turn, and the marker is written PART-WAY through one (`--final --tidy`
+        # runs the tidy pass after it), so closing on the next poll would cut it
+        # off. 0 closes immediately.
+        self.done_grace = _num(os.environ.get("CCAGE_AUTOCK_DONE_GRACE"), DONE_IDLE_GRACE)
+        # Not seconds: a /clear typed while a turn is running is queued until
+        # that turn ends, and the resume prompt must not be typed until the
+        # clear has demonstrably run.
+        self.clear_timeout = _num(os.environ.get("CCAGE_AUTOCK_CLEAR_TIMEOUT"), 300.0)
         self.status_only = False
         self.claude_args = self._parse(args)
 
@@ -460,6 +489,13 @@ class Config:
                 i += 1
             elif a == "--weekly-floor":
                 self.weekly_floor = _num(take(), self.weekly_floor)
+                i += 1
+            elif a == "--exit-on-done":
+                self.exit_on_done = True
+            elif a == "--no-exit-on-done":
+                self.exit_on_done = False
+            elif a == "--clear-timeout":
+                self.clear_timeout = _num(take(), self.clear_timeout)
                 i += 1
             else:
                 # Not ours: hand it to claude, in order, and keep scanning for
@@ -1122,18 +1158,38 @@ class Watcher:
     NORMAL = "normal"
     NUDGED = "nudged"
     COOLDOWN = "cooldown"
+    CLEARING = "clearing"   # /clear typed, waiting for the rotation that proves it ran
+    # How a CLEARING cycle stands right now. TWO readers test this (the
+    # done-marker block and the ordinary CLEARING branch) and they MUST agree:
+    # while each open-coded the test, they had already drifted to describing the
+    # same event with different log wording. Named, not bare strings, for the
+    # same reason the states above are.
+    CLEAR_CONFIRMED = "confirmed"   # rotation seen: the clear demonstrably ran
+    CLEAR_TIMEOUT = "timeout"       # waited past clear_timeout, no rotation
+    CLEAR_PENDING = "pending"       # still inside the window, keep waiting
     # nudge kinds (_arm_nudge)
     SOFT = "soft"
     HARD = "hard"
     STALL = "stall"
 
-    def __init__(self, cfg, master_fd, write_lock, cwd, sdir, logf):
+    def __init__(self, cfg, master_fd, write_lock, cwd, sdir, logf, pid: Optional[int] = None):
         self.cfg = cfg
         self.fd = master_fd
         self.lock = write_lock
         self.cwd = cwd
         self.sdir = sdir
         self.log = logf
+        self.pid = pid
+        # Set by _await_exit when THIS thread reaps the pty child, so run_proxy
+        # can report a real exit code instead of guessing after its own waitpid
+        # finds the child already gone.
+        self.child_status = None
+        # First poll at which the done marker was seen; 0 = not yet. The close
+        # waits for the marker-writing turn to actually finish (see run()).
+        self.done_seen_at = 0.0
+        # CLEARING: the transcript path current when /clear was typed, and when.
+        self.clear_path = None
+        self.clear_at = 0.0
         self.state = self.NORMAL
         self.stop = False
         # Launch-time thresholds, kept so the live control file can be *removed*
@@ -1214,13 +1270,19 @@ class Watcher:
             self.stop = True
             return False
 
-    def _type(self, text, submit=True, settle=KEY_DELAY):
+    def _type(self, text, submit=True, settle=KEY_DELAY, mark=True):
         with self.lock:
             if not self._write(text.encode()):
                 return
             if submit:
                 time.sleep(settle)
                 self._write(b"\r")
+        if not mark:
+            # mark=False is for keystrokes that are not a turn the Stop guard
+            # could ever mis-read as an attended user prompt -- currently only
+            # /exit, which ends the session rather than starting a turn. Leaving
+            # a marker there would stamp "injected" on a session that is closing.
+            return
         # Our keystrokes reach the pty exactly as a human's do, so the
         # transcript stamps them origin=human, promptSource=typed. MEASURED
         # 2026-08-15: the resume nudge at 21:54:19Z carries that exact shape.
@@ -1244,6 +1306,32 @@ class Watcher:
             os.utime(marker, None)
         except OSError:
             pass
+
+    def _clean_input(self) -> None:
+        """Dismiss an open menu and wipe the prompt line, without sending SIGINT.
+
+        ESC and Ctrl+U have to land as TWO keypresses, separated by more than the
+        reader's escape timeout. MEASURED against node's readline keypress parser
+        -- the parser Ink forks, and `escapeCodeTimeout` appears in the 2.1.259
+        bundle -- b"\\x1b\\x15" written in one go decodes as a SINGLE Alt-modified
+        keypress (meta=True, name=None): neither `escape` nor `ctrl+u` is emitted,
+        so the menu is not dismissed and the line is not cleared. A 300ms gap is
+        still merged; only past ~500ms do the two keys separate. That is the whole
+        bug this method exists to avoid, so the gap is not optional.
+
+        _interrupt() already owns the ESC plus a 0.5s settle; ESC_TAIL buys margin
+        over the 500ms boundary. Ctrl+U deletes to line START only, so Ctrl+E parks
+        the cursor at the end first and the whole line goes. Both bindings verified
+        present in the bundle (`ctrl+e`/`ctrl+k` with `endOfLine`/`deleteToLineEnd`,
+        `ctrl+u` with `deleteToLineStart`). Deliberately NOT \\x03 (Ctrl+C): that
+        raises SIGINT in the session's own child processes."""
+        self._interrupt()                     # ESC + 0.5s settle
+        time.sleep(ESC_TAIL)
+        with self.lock:
+            self._write(b"\x05")              # Ctrl+E -> end of line
+            time.sleep(KEY_DELAY)
+            self._write(b"\x15")              # Ctrl+U -> delete to line start
+        time.sleep(0.3)
 
     def _interrupt(self):
         # Escape interrupts a running turn (forces the model to yield) and also
@@ -1365,8 +1453,9 @@ class Watcher:
                 # Un-pausing: re-arm from a clean slate so occupancy re-triggers
                 # -- UNLESS a checkpoint was confirmed while paused.
                 #
-                # While paused the whole state machine is skipped (see the
-                # `if self.paused: continue` in run()), so a model that was
+                # While paused the state machine is skipped (see the
+                # `if self.paused: continue` in run() -- everything below it;
+                # an already-typed /clear is resolved above it), so a model that was
                 # nudged, then paused, then checkpointed and printed the
                 # sentinel has its confirmation read by nobody. Resetting to
                 # NORMAL here threw that away: the /clear the checkpoint existed
@@ -1491,10 +1580,141 @@ class Watcher:
             self.wf_stage = "warned"
         return False
 
-    def _do_clear(self):
-        self._interrupt()                # dismiss any menu / ensure clean line
+    def _signal(self, sig) -> None:
+        if self.pid is None:
+            return
+        try:
+            os.kill(self.pid, sig)
+        except OSError:
+            pass
+
+    def _await_exit(self, timeout: float) -> bool:
+        """True once the pty child is gone, polling waitpid(WNOHANG) for `timeout`.
+
+        Polls the CHILD, not self.stop: stop is set by run_proxy's `finally`,
+        which races this thread, so a stop-based wait can decide "still alive"
+        for a session that has already exited (and vice versa). Reaping here is
+        deliberate and recorded in self.child_status -- run_proxy reads it when
+        its own waitpid finds the child already reaped."""
+        deadline = time.time() + timeout
+        while True:
+            if self.pid is None:
+                return False
+            try:
+                wpid, status = os.waitpid(self.pid, os.WNOHANG)
+            except ChildProcessError:
+                return True                 # run_proxy's waitpid got there first
+            except OSError:
+                return False
+            if wpid == self.pid:
+                self.child_status = status
+                return True
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.2)
+
+    def _close_session(self) -> None:
+        """Close the claude session, leaving the caller's terminal and shell alive.
+
+        Typing /exit is the graceful path. The fallback is SIGHUP, NOT SIGTERM.
+        self.pid is run_proxy's pty child, and in a real cage that is the
+        interactive bash running the `claude` shell FUNCTION, whose body ends in
+        a subshell (claude-isolation.sh, the v0.17.1 export-scoping fix) -- so
+        claude is bash's CHILD, not the pty child itself. MEASURED on exactly
+        that shape: SIGTERM leaves both alive (an interactive bash ignores it),
+        killpg leaves both alive (job control puts the command in its own process
+        group), and only SIGHUP kills both and lets the wait reap. A launcher
+        that is a bare simple command -- CCAGE_AUTOCK_EXEC, and every bats case
+        -- execs in place instead, and SIGHUP is correct there too, which is why
+        the test harness alone could never have caught the SIGTERM version.
+
+        Every log line here that comes BEFORE a wait is guaranteed; the "closed
+        on ..." lines after one are best-effort. This thread is a daemon, so the
+        moment the child actually goes the pty hits EOF, run_proxy returns and
+        the interpreter tears the thread down mid-line. Do not "fix" that by
+        joining the watcher in run_proxy -- it would add shutdown latency to
+        every ordinary exit to chase a line whose information ("we escalated") is
+        already in the line above it."""
+        self._clean_input()
+        self._type("/exit", settle=KEY_DELAY, mark=False)
+        if self._await_exit(EXIT_GRACE):
+            self._log("claude session closed on /exit")
+            return
+        self._log("no exit %gs after /exit — SIGHUP to the pty child" % EXIT_GRACE)
+        self._signal(signal.SIGHUP)
+        if self._await_exit(EXIT_KILL_GRACE):
+            self._log("claude session closed on SIGHUP")
+            return
+        self._log("still alive after SIGHUP — SIGKILL")
+        self._signal(signal.SIGKILL)
+        if not self._await_exit(EXIT_KILL_GRACE):
+            self._log("WARNING: pty child %s survived SIGKILL" % self.pid)
+
+    def _clear_outcome(self):
+        """Where the in-flight /clear stands: CONFIRMED, TIMEOUT or PENDING.
+
+        One place decides, two places act on it. The callers deliberately do
+        DIFFERENT things with the same answer -- the done-marker block must fall
+        through to its stand-down/close logic, the ordinary CLEARING branch is a
+        leaf -- so only the TEST is shared, not the transitions or the logging.
+        Returns the outcome and the seconds waited, since every caller logs it."""
+        waited = time.time() - self.clear_at
+        if self._is_cleared(self.clear_path):
+            return self.CLEAR_CONFIRMED, waited
+        if waited >= self.cfg.clear_timeout:
+            return self.CLEAR_TIMEOUT, waited
+        return self.CLEAR_PENDING, waited
+
+    def _is_cleared(self, pre_clear_path) -> bool:
+        """True once the session has actually cleared.
+
+        Transcript rotation is the whole test. MEASURED over 7 real /clear cycles
+        in this cage: the new transcript's first timestamped entry lands ~3.05s
+        BEFORE the injected resume prompt, i.e. the file appears within ~0.1s of
+        /clear being submitted and long before anything is typed into it. So a
+        rotation check has ~4.7s of margin inside the default 5s window.
+
+        There is deliberately no occupancy fallback. The earlier one only ran
+        when the path had NOT rotated, and re-read the same file -- where the
+        token count cannot drop below the pre-clear reading, so it could never
+        fire; the parameter it needed is gone with it. pre_clear_path is
+        required: defaulting it to None made every attempt fail silently for any
+        caller that omitted it."""
+        current_path = active_jsonl(self.sdir, self.start_time)
+        return (current_path is not None
+                and pre_clear_path is not None
+                and current_path != pre_clear_path)
+
+    def _begin_clear(self, pre_clear_path) -> None:
+        """Type /clear ONCE, then hand off to the CLEARING state to watch for it.
+
+        The resume prompt is NOT typed here, and /clear is NOT retried. Both of
+        those were wrong, and the same OBSERVED incident kills them:
+
+        A session was mid-turn when the ladder fired. Claude Code QUEUES input
+        typed during a running turn, so /clear sat in the queue. Three seconds
+        later the old code typed the resume prompt -- which the still-live OLD
+        session consumed -- and only then did the queued /clear run, wiping it.
+        The new session came up with no instruction at all and sat idle.
+
+        So: never type the resume prompt on a timer, only on the ROTATION that
+        proves the clear has actually happened (_is_cleared). And never re-type
+        /clear while one may still be queued: a second copy queues behind the
+        first and fires AFTER the resume prompt, clearing the session we just
+        resumed -- the same stranding through a second door.
+
+        _clean_input's Escape is the other half of the fix: it interrupts the
+        running turn, so the prompt is idle and /clear is not queued in the first
+        place. That Escape was inert before 0.19.0 (see _clean_input), which is
+        why the queue was reachable at all."""
+        self._clean_input()
         self._type("/clear", settle=KEY_DELAY)
-        time.sleep(CLEAR_SETTLE)         # let SessionStart:clear reload RESUME
+        self.clear_path = pre_clear_path
+        self.clear_at = time.time()
+
+    def _finish_clear(self) -> None:
+        """Rotation seen: let SessionStart:clear reload RESUME, then resume."""
+        time.sleep(CLEAR_SETTLE)
         self._type("Resume the task from RESUME.md — continue from the ### Next "
                    "section. Do not re-do completed work.")
 
@@ -2042,6 +2262,20 @@ class Watcher:
                   "wrote %s; standing down" % SESSION_DONE_MARKER)
         return True
 
+    def _transcript_quiet_for(self):
+        """Seconds since the active transcript last grew, or a large number when
+        there is nothing to read. Used by the done-marker close to tell "the turn
+        that wrote the marker has finished" from "it is still running", without
+        depending on self.last_growth -- which is only refreshed further down the
+        poll body, past the point the done branch returns from."""
+        path = active_jsonl(self.sdir, self.start_time)
+        if not path:
+            return DONE_CLOSE_CEILING
+        try:
+            return max(0.0, time.time() - os.path.getmtime(path))
+        except OSError:
+            return DONE_CLOSE_CEILING
+
     def run(self):
         cfg = self.cfg
         self._log("watcher start: soft=%.0f%% hard=%.0f%% poll=%.0fs%s"
@@ -2076,17 +2310,126 @@ class Watcher:
             # down stops the nudge/clear state machine but leaves the claude
             # session itself running for the user.
             if session_done_mtime(self.cwd) > self.start_time:
-                self._log("session marked done (%s) — standing down; "
-                          "no more nudges/clears" % SESSION_DONE_MARKER)
+                # INVARIANT: never leave a session CLEARED BUT UNINSTRUCTED.
+                # Once /clear has been typed, either the resume prompt follows
+                # (rotation seen) or the session is closed -- never neither.
+                #
+                # The marker can land while a clear is still in flight from any
+                # direction: the model running `/checkpoint --final` mid-cycle,
+                # or the supervisor's own _maybe_mark_done. This block sits
+                # ABOVE the CLEARING branch and ends the loop, so before 0.19.0
+                # it silently swallowed the unfinished cycle -- the resume was
+                # simply never typed. Resolve it explicitly instead.
+                if self.state == self.CLEARING:
+                    outcome, waited = self._clear_outcome()
+                    if cfg.exit_on_done:
+                        # The session is being closed, so there is nothing to
+                        # resume INTO: _close_session leads with an ESC that
+                        # would interrupt the very turn the resume prompt
+                        # started. Abandon the cycle -- but say so, so a /clear
+                        # with no resume after it is never a silent gap.
+                        self._log("session marked done while a /clear was in "
+                                  "flight (%.0fs) — abandoning the clear cycle; "
+                                  "the session is closing, nothing to resume into"
+                                  % waited)
+                        self.state = self.NORMAL
+                        self.sup_driving = False
+                    elif outcome == self.CLEAR_CONFIRMED:
+                        # --no-exit-on-done: the claude session KEEPS RUNNING
+                        # after we stand down. An abandoned clear here leaves the
+                        # user in a wiped session that was told nothing -- the
+                        # stranding this whole redesign exists to prevent. Finish
+                        # the cycle, THEN stand down on the fallthrough below.
+                        self._log("clear confirmed after %.0fs — resuming before "
+                                  "standing down" % waited)
+                        self._finish_clear()
+                        self.state = self.NORMAL
+                        self.sup_driving = False
+                    elif outcome == self.CLEAR_PENDING:
+                        continue          # rotation not in yet; keep waiting
+                    else:
+                        self._log("WARNING: /clear has not taken after %.0fs and "
+                                  "the session is marked done — standing down "
+                                  "without resuming (a resume typed now would "
+                                  "land in the un-cleared session)" % waited)
+                        self.state = self.NORMAL
+                        self.sup_driving = False
+                if not cfg.exit_on_done:
+                    self._log("session marked done (%s) — standing down; "
+                              "no more nudges/clears" % SESSION_DONE_MARKER)
+                    self.stop = True
+                    break
+                if self.done_seen_at == 0.0:
+                    self.done_seen_at = time.time()
+                    self._log("session marked done (%s) — closing the claude "
+                              "session once the turn goes quiet" % SESSION_DONE_MARKER)
+                # Do NOT close on the very next poll. _close_session leads with an
+                # ESC, which INTERRUPTS a running turn, and the marker is written
+                # part-way through one: the checkpoint skill writes it at step 8
+                # and `--final --tidy` then runs the whole tidy pass afterwards
+                # ("both run, in that order"). Closing 12s after the marker would
+                # cut that off. The transcript's own mtime is the fact that says
+                # the turn ended -- no model claim involved -- with a ceiling so a
+                # session that never goes quiet still closes.
+                quiet_for = self._transcript_quiet_for()
+                waited = time.time() - self.done_seen_at
+                if quiet_for < cfg.done_grace and waited < DONE_CLOSE_CEILING:
+                    continue
+                self._log("closing claude session (transcript quiet %.0fs, "
+                          "waited %.0fs since the marker)" % (quiet_for, waited))
+                self._close_session()
                 self.stop = True
                 break
             # Live thresholds / pause (mid-session /checkpoint-threshold). Read
             # every poll but re-parsed only when the file's mtime changes.
             self._refresh_control()
-            if self.paused:
-                # Suspended: no nudges/clears. We keep polling so a `resume`
-                # (and the done-marker) are still seen promptly.
+
+            # A /clear has been typed and we are waiting for it to actually run.
+            # This sits ABOVE every occupancy guard on purpose: a just-cleared
+            # transcript has no assistant turn yet, so latest_usage returns None,
+            # self.last_pct stays None, and the `pct is None -> continue` guard
+            # below would skip this branch on exactly the polls that matter --
+            # the watcher would wait out the whole timeout with the rotation
+            # sitting on disk, then give up and never resume.
+            #
+            # It also sits above the PAUSE check, and that ordering is
+            # load-bearing: pause means "start no new nudges or clears", not
+            # "abandon one already in flight". With the check the other way
+            # round, a `/checkpoint-threshold pause` landing between /clear and
+            # the rotation withheld the resume prompt for as long as the pause
+            # lasted -- a wiped session holding no instruction, which is the
+            # exact stranding this release exists to prevent, reached through a
+            # third door. The cycle is bounded by clear_timeout either way, so
+            # letting it finish costs the pause nothing.
+            if self.state == self.CLEARING:
+                outcome, waited = self._clear_outcome()
+                if outcome == self.CLEAR_CONFIRMED:
+                    self._log("clear confirmed after %.0fs — reloading, then resuming" % waited)
+                    self._finish_clear()
+                    self.cooldown_until = time.time() + cfg.cooldown
+                    self.state = self.COOLDOWN
+                    self.sup_driving = False   # cycle finished; nothing dangling
+                elif outcome == self.CLEAR_TIMEOUT:
+                    # Give up WITHOUT resuming. A resume typed now would land in
+                    # the un-cleared session, and a /clear still sitting in the
+                    # queue would then wipe it -- the observed incident this
+                    # whole path exists to prevent. Back to NORMAL: occupancy is
+                    # still high, so the ladder re-nudges and tries again from a
+                    # fresh confirmation, and if the queued clear lands in the
+                    # meantime the idle-session supervisor picks the session up.
+                    self._log("WARNING: /clear has not taken after %.0fs — NOT typing the "
+                              "resume prompt (it would land in the un-cleared session and be "
+                              "wiped when the queued clear fires); back to NORMAL" % waited)
+                    self.state = self.NORMAL
+                    self.sup_driving = False
                 continue
+
+            if self.paused:
+                # Suspended: no NEW nudges/clears. We keep polling so a `resume`
+                # (and the done-marker) are still seen promptly. An in-flight
+                # clear was already resolved above -- see that comment.
+                continue
+
             path = active_jsonl(self.sdir, self.start_time)
             if not path:
                 continue
@@ -2129,8 +2472,15 @@ class Watcher:
             pct = self.last_pct
 
             if self.state == self.COOLDOWN:
-                if time.time() >= self.cooldown_until and pct < cfg.soft:
-                    self._log("reset complete (%.1f%%); back to NORMAL" % pct)
+                # Release on the CLOCK alone. Holding until `pct < soft` wedged
+                # the watcher permanently whenever a /clear did not take:
+                # occupancy stayed above soft, so every later poll hit the
+                # `continue` below and no branch could ever run again. NORMAL
+                # re-evaluates; if the occupancy is real it simply re-nudges,
+                # and if the reading is a stale pre-clear one the rotation check
+                # (`path != self.last_path`) drops it before NORMAL sees it.
+                if time.time() >= self.cooldown_until:
+                    self._log("cooldown elapsed at %.1f%%; back to NORMAL" % pct)
                     self.state = self.NORMAL
                 continue
 
@@ -2168,16 +2518,42 @@ class Watcher:
                     # own escalation cycle, never an ordinary occupancy
                     # nudge) — see _maybe_mark_done's docstring for why the
                     # brief's original call site was dead code. rec is the
-                    # freshest parked snapshot for THIS (pre-clear) session;
-                    # a /clear always follows regardless of the outcome here.
+                    # freshest parked snapshot for THIS (pre-clear) session.
                     if self.sup_driving:
                         rec = self._parked(path)
                         if rec is not None and self._maybe_mark_done(rec):
                             self.sup_open = True
-                    self._do_clear()
-                    self.cooldown_until = time.time() + cfg.cooldown
-                    self.state = self.COOLDOWN
-                    self.sup_driving = False   # cycle finished; nothing dangling
+                            # The same invariant as the done-marker block,
+                            # applied at the other end: do not START a clear we
+                            # have just decided to abandon. Until 0.19.0 the
+                            # clear was typed here regardless, which was
+                            # harmless only because the OLD _do_clear typed the
+                            # resume prompt synchronously in this same poll. Now
+                            # the resume waits for rotation on a LATER poll, and
+                            # the marker written one line above ends the loop
+                            # first -- so the clear would be typed and then
+                            # silently abandoned, every time.
+                            #
+                            # Skipping it loses nothing: the session is closing
+                            # and the next launch starts fresh anyway, while
+                            # typing /clear into a session about to receive
+                            # /exit risks exactly the queued-clear interleaving
+                            # _begin_clear exists to avoid. With
+                            # --no-exit-on-done the session lives on, so there
+                            # the clear+resume is still the right ending and
+                            # still runs.
+                            if cfg.exit_on_done:
+                                self._log("standing down without clearing — the "
+                                          "session is closing, so a /clear would "
+                                          "only race /exit")
+                                self.state = self.NORMAL
+                                self.sup_driving = False
+                                continue
+                    # Type /clear and WAIT for it in CLEARING. The resume prompt
+                    # is typed only once rotation proves the clear ran -- never on
+                    # a timer, which is what let a queued /clear swallow it.
+                    self._begin_clear(path)
+                    self.state = self.CLEARING
                 elif (self.sup_driving
                       and time.time() - self.sup_acted_at >= cfg.sup_escalate
                       and not self._worked_since(path, self.sup_acted_at)):
@@ -2462,7 +2838,7 @@ def run_proxy(cfg, cwd, sdir, logpath):
 
     write_lock = threading.Lock()
     logf = open(logpath, "a", buffering=1)
-    watcher = Watcher(cfg, master_fd, write_lock, cwd, sdir, logf)
+    watcher = Watcher(cfg, master_fd, write_lock, cwd, sdir, logf, pid=pid)
     if cfg.enabled:
         t = threading.Thread(target=watcher.run, daemon=True)
         t.start()
@@ -2581,7 +2957,16 @@ def run_proxy(cfg, cwd, sdir, logpath):
         except Exception:
             pass
 
-    _, status = os.waitpid(pid, 0)
+    try:
+        _, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        # The watcher's own _await_exit reaps the child when it has to signal it
+        # (done-marker close), so this is expected on that path and the status it
+        # recorded is the real one. Any OTHER route here means the child vanished
+        # with nobody holding its status: report a failure rather than a silent 0.
+        status = watcher.child_status
+        if status is None:
+            return 1
     return os.waitstatus_to_exitcode(status)
 
 
