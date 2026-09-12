@@ -257,6 +257,24 @@ INJECTION_TOLERANCE_S = 30
 # Mirrors bin/ccage-watch's Kind.HOLD. A hold spec means "this session declared it
 # is waiting on the user" and is NOT a watcher: it has no pid and no condition.
 HOLD_KIND = "hold"
+# The supervisor's own ceiling on ANY declared wait, watcher or hold. Both ttls
+# are supplied by the arming session, so an unbounded `--ttl` would be a
+# model-authored mute button -- and the ratified asymmetry this design rests on
+# is that a model-authored signal may keep the supervisor awake but may never
+# send it to sleep by itself (plans/2026-08-16-idle-session-supervisor.md:442).
+# A declared wait qualifies only because its silence expires WITHOUT the
+# session's cooperation; this constant is what guarantees that, whatever ttl the
+# spec asked for. The watcher daemon keeps its own ttl and still files its own
+# EXPIRED report -- this bounds only what the supervisor honours.
+SUP_WAIT_MAX_S = 86400.0
+# A freshly armed watcher spec carries `pid: None` until its daemon's first act
+# overwrites it (bin/ccage-watch's daemon()). cmd_arm allows SETTLE_S = 0.2 s for
+# that, but SETTLE_S is the PARENT's grace and a loaded machine can delay the
+# daemon's first write past it, so this is deliberately more generous than
+# 2 * SETTLE_S. It stays negligible against sup_idle (minutes), which is the
+# property that matters: a spec whose daemon never started can never buy a
+# meaningful silence. Past this age a pid-less spec is not a declaration.
+SUP_PIDLESS_GRACE_S = 5.0
 # The TUI lays words out with cursor-move escapes rather than spaces, so once the
 # escapes are stripped the screen text has NO spaces in it at all. Screen matching
 # therefore compares whitespace-free forms on both sides.
@@ -1223,6 +1241,10 @@ class Watcher:
         self.sup_open = False     # circuit open: stay quiet until real work
         self.sup_acted_at = 0.0   # when the supervisor last typed
         self.sup_seen = {}        # path -> size at the previous poll (Task 7)
+        self.sup_wait_prev = False # a declared wait (hold or watcher) was active
+                                   # at the previous idle tick -- see _supervise:
+                                   # the END of a wait must re-enter the ladder at
+                                   # the POKE rung, never at escalation.
         self.sup_hold_lapsed = False   # the "hold lapsed" line has been logged
                                    # for the CURRENT hold; the spec lives until
                                    # the next session start reaps it, so without
@@ -1897,6 +1919,51 @@ class Watcher:
                 return True
         return False
 
+    def _spec_is_ours(self, spec):
+        """True if `spec` was written by a session that reads the SAME RESUME
+        file this supervisor is driving.
+
+        The watch directory is per-CAGE, not per-session (`_config_dir()` is
+        ~/.claude-<cage>/, shared by every session in it), so without this a
+        parallel session's declaration silences this one -- and, worse,
+        _hold_active's "the user answered" branch DELETES a hold this session
+        never armed. No session id reaches bin/ccage-watch (it reads only
+        CCAGE_SLOT and CLAUDE_CONFIG_DIR), but every spec already records
+        `resume_file`, which encodes the slot -- and slots are precisely the
+        mechanism parallel same-directory sessions are supposed to use.
+
+        A spec with no `resume_file` is NOT ours: for this supervisor "ask" is
+        the fail-safe direction, not "stay silent". That only affects specs
+        armed before the field existed, all of which are within one ttl of
+        retirement.
+
+        RESIDUAL, stated rather than hidden: two SLOTLESS sessions in one cage
+        share RESUME.md and are therefore still indistinguishable here. That is
+        pre-existing, and the design's answer to parallel sessions is slots."""
+        return spec.get("resume_file") == "RESUME" + slot_suffix() + ".md"
+
+    def _wait_deadline(self, spec):
+        """Seconds of silence this spec may buy, capped by SUP_WAIT_MAX_S.
+
+        A missing or non-numeric ttl yields 0 -- immediately lapsed, i.e. the
+        supervisor asks. Same fail-safe direction as everything else here."""
+        ttl = spec.get("ttl")
+        if not isinstance(ttl, (int, float)) or isinstance(ttl, bool) or ttl <= 0:
+            return 0.0
+        return min(float(ttl), SUP_WAIT_MAX_S)
+
+    def _spec_age(self, spec, now):
+        """Age of `spec` in seconds, or None if it cannot be trusted.
+
+        None covers a missing, non-numeric or FUTURE `armed_epoch` (clock skew,
+        or a fabricated stamp): an age that cannot be computed is not a
+        declaration, so the caller asks."""
+        armed = spec.get("armed_epoch")
+        if not isinstance(armed, (int, float)) or isinstance(armed, bool):
+            return None
+        age = now - float(armed)
+        return None if age < 0 else age
+
     def _hold_active(self, path):
         """True if this session has DECLARED it is blocked on the user and the
         user has not answered yet — the fourth exit from the idle poke.
@@ -1921,8 +1988,11 @@ class Watcher:
                 continue
             if spec.get("kind") != HOLD_KIND:
                 continue
+            if not self._spec_is_ours(spec):
+                continue        # another slot's hold: not ours to honour OR to delete
             armed = spec.get("armed_epoch") or 0
-            if time.time() - armed > (spec.get("ttl") or 0):
+            age = self._spec_age(spec, time.time())
+            if age is None or age > self._wait_deadline(spec):
                 # Logged ONCE. The spec survives until `ccage-watch reap` records
                 # it at the next session start, so an unguarded log here would
                 # repeat on every poll for the rest of the run.
@@ -1968,6 +2038,7 @@ class Watcher:
         usual fail-open direction — for THIS supervisor, "ask" is the safe
         default, not "stay silent" (the 11-hour idle incident this whole
         design responds to was ALL silence)."""
+        now = time.time()
         for spath in glob.glob(os.path.join(self._config_dir(), "watch",
                                             "*.json")):
             try:
@@ -1977,9 +2048,25 @@ class Watcher:
                 continue                # unreadable/mid-write: not a declaration
             if spec.get("kind") == HOLD_KIND:
                 continue                # a hold is a wait on the USER, not a job
+            if not self._spec_is_ours(spec):
+                continue                # another slot's watcher (see _spec_is_ours)
+            age = self._spec_age(spec, now)
+            if age is None or age > self._wait_deadline(spec):
+                continue                # lapsed by its own ttl, or by our cap
             pid = spec.get("pid")
-            if pid is None or _pid_alive(pid):
-                return True             # freshly armed, or provably still running
+            if pid is None:
+                # NOT "freshly armed" by default. cmd_arm writes the spec with
+                # pid: None and only the daemon fills it in, so a spawn that died
+                # in between leaves a pid-less spec that `reap` does not clean up
+                # until the NEXT SessionStart. Before this check that spec
+                # silenced the supervisor for the rest of the session with no
+                # process behind it -- a mute the session authored, which the
+                # asymmetry above forbids.
+                if age <= SUP_PIDLESS_GRACE_S:
+                    return True         # genuinely mid-spawn
+                continue
+            if _pid_alive(pid):
+                return True             # provably still running
         return False
 
     def _task_output_exited(self, rec):
@@ -2085,6 +2172,37 @@ class Watcher:
         # CLEARS the hold when the user has answered, so it must run on every idle
         # tick rather than only when a job happens to be running.
         held = self._hold_active(path)
+        # A watcher is a declared wait exactly as a hold is, and it is evaluated
+        # in the SAME place for the same reason. It used to be consulted only
+        # under `state == "growing"`, i.e. only while THIS session had a tracked
+        # background job still producing output -- which inverted its purpose:
+        # a watcher bridging work that happens OUTSIDE the session (a separate
+        # executor process, CI, a cluster job) left _job_state() at "none", so
+        # the growing branch was skipped and the poke fired anyway, every
+        # sup_idle, for the whole wait. MEASURED 2026-09-12 (guard cage): a
+        # watcher armed on a gate file written by a separate agent was poked
+        # through the entire batch, and one of those pokes produced an unwanted
+        # /checkpoint. The case `arm` exists for was the one case it did not
+        # cover; a watcher bridging this session's OWN job was already covered by
+        # that job being visible.
+        watching = self._watch_armed()
+        waiting = held or watching
+        # The END of a declared wait must re-enter the ladder at the POKE rung.
+        # While a wait suppresses, sup_pokes/sup_acted_at keep whatever they held
+        # before it started, so without this a watcher that FIRES (the work is
+        # ready) could meet `sup_pokes == 1` and an hours-stale sup_acted_at and
+        # escalate straight to checkpoint/clear -- restarting the session at the
+        # exact moment its input arrived. A hold never showed this because it
+        # ends with a human turn, which resets the episode above; a watcher ends
+        # with a process exit, which resets nothing. This generalises the same
+        # guarantee sup_landed_poked gives a fresh landing (see the long note
+        # below) to a wait that ends with no landed job at all.
+        if self.sup_wait_prev and not waiting:
+            self._log("SUPERVISOR: declared wait ended — ladder reset")
+            self.sup_pokes = 0
+            self.sup_acted_at = time.time()
+            self.sup_landed_poked = False
+        self.sup_wait_prev = waiting
         rec = self._parked(path)
         if rec is None:
             return                      # no snapshot: claim nothing
@@ -2118,8 +2236,6 @@ class Watcher:
         state = self._job_state(rec)
         if state == "growing":
             self.sup_landed_poked = False
-            if held or self._watch_armed():
-                return               # declared wait: silent until it ends
         elif state == "landed" and not self.sup_landed_poked:
             self._log("SUPERVISOR: a job landed — poking with the path")
             self._supervisor_poke(idle / 60.0, self._sup_detail(rec))
@@ -2129,10 +2245,12 @@ class Watcher:
             # the ladder below measures its escalate timer against.
             self.sup_pokes = 1
             return
-        if held:
+        if waiting:
             # A LANDED job still poked, above: that is news the session can act
-            # on without the user, so a hold must not bury it. Everything else is
-            # silence until they type or the hold lapses.
+            # on without the user, so a declared wait must not bury it -- that
+            # exception is why this check sits AFTER the landed branch rather
+            # than before it. Everything else is silence until the user types,
+            # the hold lapses, or the watcher's daemon exits (fired or expired).
             return
         if self.sup_pokes == 0:
             self._log("SUPERVISOR: idle %.0f min at %.1f%% — poking once"
