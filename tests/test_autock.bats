@@ -2568,10 +2568,23 @@ PLAN
 # log file concurrently so _job_state's two-sample growing/landed transition
 # can be exercised for real instead of faked with a single append.
 
+# A watch spec the supervisor accepts as THIS session's live declaration: it
+# names this session's RESUME file, carries a ttl and a past armed_epoch, and
+# $1 is its pid. `$$` (the bats process) stays alive for the whole test.
+write_watch_spec() {
+    mkdir -p "$CAGE/watch"
+    python3 - "$CAGE/watch/w1.json" "$1" <<'PY'
+import json, sys, time
+json.dump({"id": "w1", "cwd": "/p", "resume_file": "RESUME.md", "cond": "false",
+           "ttl": 86400, "armed_epoch": time.time(), "pid": int(sys.argv[2])},
+          open(sys.argv[1], "w"))
+PY
+}
+
 @test "supervisor: jobs still growing with a watcher armed stay silent" {
     local log="$BATS_TEST_TMPDIR/sweep.log"; printf '0123456789' > "$log"
     write_parked_record sess "{\"logs\":[{\"path\":\"$log\",\"size\":10}]}"
-    mkdir -p "$CAGE/watch"; printf '{"id":"w1","cond":"false"}' > "$CAGE/watch/w1.json"
+    write_watch_spec $$
     # Keeps growing for the WHOLE run -- a single pre-append would stall after
     # one poll and (correctly) read as landed, which is a different test below.
     # Writes faster than the 1s poll and outlives FAKE_DEADLINE with a wide
@@ -2603,7 +2616,7 @@ PLAN
 @test "supervisor: jobs that landed are reported by name, even with a watcher armed" {
     local log="$BATS_TEST_TMPDIR/sweep3.log"; printf '0123456789' > "$log"
     write_parked_record sess "{\"logs\":[{\"path\":\"$log\",\"size\":10}]}"
-    mkdir -p "$CAGE/watch"; printf '{"id":"w1","cond":"false"}' > "$CAGE/watch/w1.json"
+    write_watch_spec $$
     printf 'final output' >> "$log"          # grew, then stops
     export FAKE_TOKENS=50000 FAKE_DEADLINE=8 CCAGE_AUTOCK_SUPERVISOR_IDLE=2
     drive idle "--poll 1"
@@ -2649,8 +2662,12 @@ PLAN
 @test "supervisor: a job that lands after a long declared-serial wait gets a fresh poke, not a jump to give-up" {
     local log="$BATS_TEST_TMPDIR/longwait.log"; printf '0123456789' > "$log"
     write_parked_record sess "{\"logs\":[{\"path\":\"$log\",\"size\":10}]}"
-    mkdir -p "$CAGE/watch"; printf '{"id":"w1","cond":"false"}' > "$CAGE/watch/w1.json"
-    ( for _i in $(seq 1 20); do sleep 0.3; printf 'x' >> "$log"; done ) &
+    write_watch_spec $$
+    # A watcher fires when its job lands, so the spec goes with the last append.
+    # Left armed, it keeps the declared wait in force, and the ladder correctly
+    # stays silent after the landed poke.
+    ( for _i in $(seq 1 20); do sleep 0.3; printf 'x' >> "$log"; done
+      rm -f "$CAGE/watch/w1.json" ) &
     local writer=$!
     export FAKE_TOKENS=50000 FAKE_DEADLINE=16 \
         CCAGE_AUTOCK_SUPERVISOR_IDLE=2 CCAGE_AUTOCK_SUPERVISOR_ESCALATE=2
@@ -2702,8 +2719,7 @@ PLAN
     # with nobody left alive to ever report the result either.
     local log="$BATS_TEST_TMPDIR/deadwatch.log"; printf '0123456789' > "$log"
     write_parked_record sess "{\"logs\":[{\"path\":\"$log\",\"size\":10}]}"
-    mkdir -p "$CAGE/watch"
-    printf '{"id":"w1","cond":"false","pid":999999999}' > "$CAGE/watch/w1.json"
+    write_watch_spec 999999999   # valid in every field but the pid, which is dead
     # Keeps growing for the whole run: a single append settles into "landed"
     # within two polls, and landed overrides watch-armed BY DESIGN regardless
     # of this fix -- that would test the wrong branch. Continuous growth
@@ -2798,6 +2814,7 @@ write_hold() {
     python3 - "$CAGE/watch/hold1.json" "$1" "$2" "$3" <<'PY'
 import json, sys, time
 json.dump({"id": "hold1", "kind": "hold", "cwd": "/p", "cond": None,
+           "resume_file": "RESUME.md",
            "question": sys.argv[4], "ttl": float(sys.argv[3]),
            "armed_at": "2026-08-17T00:00:00",
            "armed_epoch": time.time() - float(sys.argv[2]), "pid": None},
