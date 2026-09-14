@@ -1121,6 +1121,96 @@ conf() { ( cd "$REPO" && "$AUTO" "$@" ); }
     [[ "$output" == *"effective    : 50% / 55% (re-nudge 50%)"* ]]
 }
 
+# --- --say: type one message into a running session --------------------------
+
+@test "--say queues a one-line message for this slot and exits without launching" {
+    run bash -c "cd '$REPO' && CCAGE_AUTOCK_EXEC='echo LAUNCHED' '$AUTO' --dangerously-skip-permissions --say 'line one
+line two' </dev/null"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"LAUNCHED"* ]]
+    [ "$(cat "$REPO/.ccage-say")" = "line one line two" ]
+    # A slotted session gets its own file. Two slots can share one project dir,
+    # and a message must reach only the slot it was sent to.
+    run bash -c "cd '$REPO' && CCAGE_SLOT=opencode '$AUTO' --say hello"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$REPO/.ccage-say.opencode")" = "hello" ]
+    [ "$(cat "$REPO/.ccage-say")" = "line one line two" ]
+}
+
+@test "--say refuses empty text and never overwrites a message still pending" {
+    run conf --say "   "
+    [ "$status" -eq 2 ]
+    [ ! -e "$REPO/.ccage-say" ]
+    run conf --say first
+    [ "$status" -eq 0 ]
+    run conf --say second
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"still pending"* ]]
+    [ "$(cat "$REPO/.ccage-say")" = "first" ]
+    [ -z "$(compgen -G "$REPO/.ccage-say*.tmp")" ]
+}
+
+@test "Watcher._deliver_say: types a queued message once, only when ready and not clearing, never a stale one or another slot's (unit)" {
+    run python3 - "$AUTO" "$REPO" "$SDIR" <<'PY'
+import importlib.util, importlib.machinery, os, sys, threading
+loader = importlib.machinery.SourceFileLoader("ccageauto", sys.argv[1])
+spec = importlib.util.spec_from_loader("ccageauto", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+cwd, sdir = sys.argv[2], sys.argv[3]
+r, w = os.pipe()
+os.set_blocking(r, False)
+
+def typed():
+    try:
+        return os.read(r, 65536)
+    except BlockingIOError:
+        return b""
+
+cfg = m.Config(["--soft", "40"]); cfg.validate()
+wat = m.Watcher(cfg, w, threading.Lock(), cwd, sdir, open(os.devnull, "w"))
+path = m.say_path(cwd)
+
+def queue(text, age=0):
+    with open(path, "w") as f:
+        f.write(text + "\n")
+    if age:
+        t = wat.start_time - age
+        os.utime(path, (t, t))
+
+queue("hello there")
+wat._deliver_say()                     # TUI not ready yet: stays queued
+assert typed() == b"" and os.path.exists(path)
+
+wat.tui_ready.set()
+wat.state = wat.CLEARING
+wat._deliver_say()                     # it would land in the session being wiped
+assert typed() == b"" and os.path.exists(path)
+
+wat.state = wat.NORMAL
+wat.paused = True                      # pause governs checkpoints, not messages
+wat._deliver_say()
+assert typed() == b"hello there\r", "not typed"
+assert [n for n in os.listdir(cwd) if n.startswith(".ccage-say")] == [], os.listdir(cwd)
+
+wat._deliver_say()                     # consumed: typed exactly once
+assert typed() == b""
+
+queue("from a previous run", age=60)   # queued before this watcher started
+wat._deliver_say()
+assert typed() == b"" and not os.path.exists(path)
+
+unslotted = os.path.join(cwd, ".ccage-say")
+with open(unslotted, "w") as f:
+    f.write("for the unslotted session\n")
+os.environ["CCAGE_SLOT"] = "opencode"  # this watcher is the opencode slot
+wat._deliver_say()
+assert typed() == b"" and os.path.exists(unslotted)
+print("UNIT_OK")
+PY
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"UNIT_OK"* ]]
+}
+
 @test "Watcher._refresh_control: un-pausing keeps a checkpoint confirmed WHILE paused, instead of discarding it (unit)" {
     # While paused the whole state machine is skipped, so a model that was
     # nudged, then paused, then checkpointed and printed the sentinel has its

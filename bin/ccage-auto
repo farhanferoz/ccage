@@ -38,6 +38,7 @@
 #   ccage-auto --set soft=50 [hard=65]   # change thresholds mid-session
 #   ccage-auto --pause / --resume        # suspend / re-enable auto-checkpointing
 #   ccage-auto --reset                   # drop overrides, revert to launch values
+#   ccage-auto --say "text"              # type one message into this slot's session
 #
 # Auto-flags (consumed from the front; everything else is passed to claude):
 #   --autock / --no-autock         force the watcher on/off (default: on)
@@ -1082,6 +1083,16 @@ def control_path(cwd):
     return os.path.join(cwd, AUTOCK_CONF)
 
 
+SAY_FILE = ".ccage-say"
+
+
+def say_path(cwd):
+    """The one pending `--say` message for this slot. Slot-scoped, unlike the
+    control file: two slots can share a project dir, and a message is meant
+    for one session."""
+    return os.path.join(cwd, SAY_FILE + slot_suffix())
+
+
 def read_control_file(cwd):
     """Parse the control file into {'soft': float, 'hard': float, 'paused': bool}.
 
@@ -1487,6 +1498,39 @@ class Watcher:
                 # branch pick the confirmation up on the next poll and clear.
                 if not (self.state == self.NUDGED and self._confirmed()):
                     self.state = self.NORMAL
+
+    def _deliver_say(self):
+        """Type the message `ccage-auto --say` queued for this slot, once.
+
+        Held while the TUI is not ready, and while a /clear is in flight, where
+        it would land in the session being wiped. Not held by pause, which
+        governs checkpoints only. A message older than this watcher was queued
+        for an earlier run and is dropped, not typed."""
+        if self.state == self.CLEARING or not self.tui_ready.is_set():
+            return
+        path = say_path(self.cwd)
+        taken = path + ".taken"
+        try:
+            os.rename(path, taken)   # atomic claim: typed at most once
+        except OSError:
+            return
+        try:
+            stale = os.path.getmtime(taken) < self.start_time
+            with open(taken) as f:
+                text = " ".join(f.read().split())
+        except OSError:
+            return
+        finally:
+            try:
+                os.remove(taken)
+            except OSError:
+                pass
+        if stale:
+            self._log("dropped a --say message queued before this watcher started: %s"
+                      % text[:80])
+        elif text:
+            self._log("typing --say message: %s" % text[:80])
+            self._type(text)
 
     def _weekly_warn_msg(self, remaining):
         return (
@@ -2501,6 +2545,7 @@ class Watcher:
             # Live thresholds / pause (mid-session /checkpoint-threshold). Read
             # every poll but re-parsed only when the file's mtime changes.
             self._refresh_control()
+            self._deliver_say()
 
             # A /clear has been typed and we are waiting for it to actually run.
             # This sits ABOVE every occupancy guard on purpose: a just-cleared
@@ -3094,7 +3139,7 @@ def run_proxy(cfg, cwd, sdir, logpath):
 
 # The four control-plane subcommands /checkpoint-threshold (and a human) use
 # to talk to an already-running watcher.
-CONTROL_ACTIONS = ("--set", "--pause", "--resume", "--reset")
+CONTROL_ACTIONS = ("--set", "--pause", "--resume", "--reset", "--say")
 
 
 def _find_control_action(argv):
@@ -3140,6 +3185,30 @@ def control_command(argv):
     if action == "--resume":
         write_control_file(cwd, {"paused": False})
         print("ccage-auto: auto-checkpoint resumed")
+        return 0
+
+    if action == "--say":
+        text = " ".join(" ".join(argv[1:]).split())
+        if not text:
+            sys.stderr.write('[ccage-auto] --say: nothing to say (usage: --say "text")\n')
+            return 2
+        path = say_path(cwd)
+        tmp = "%s.%d.tmp" % (path, os.getpid())
+        with open(tmp, "w") as f:
+            f.write(text + "\n")
+        try:
+            # link, not rename: just as atomic, and it refuses to replace a
+            # message the watcher has not typed yet.
+            os.link(tmp, path)
+        except FileExistsError:
+            sys.stderr.write("[ccage-auto] --say: a message is still pending in %s; "
+                             "send again after the watcher's next poll\n" % path)
+            return 1
+        finally:
+            os.remove(tmp)
+        _git_exclude(cwd, os.path.basename(path))
+        print("ccage-auto: message queued in %s" % path)
+        print("            typed within one poll if a watcher is running for this slot.")
         return 0
 
     # --set: one or more key=value tokens (space- or comma-separated).
