@@ -65,6 +65,21 @@ memdir() {
     [[ "$output" != *"D1 ratified"* ]]
 }
 
+@test "DECISIONS over budget: the NOTE never claims nothing was dropped; a self-capped file is not nagged" {
+    # MEASURED 2026-10-05: this NOTE said "Nothing was dropped." in the same
+    # session where the chunk hook reported 294,400 chars NOT delivered.
+    printf '# Resume\n' > "$REPO/RESUME.md"
+    awk 'BEGIN { for (i = 1; i <= 800; i++) printf "- D%d ratified %s\n", i, "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy" }' > "$REPO/DECISIONS.md"
+    CCAGE_DECISIONS_BUDGET_BYTES=1000 run run_hook
+    [[ "$output" == *"NOTE: DECISIONS.md is"* ]]
+    [[ "$output" != *"Nothing was dropped"* ]]
+    [[ "$output" == *"max-chars"* ]]                    # names the bounded-delivery remedy
+    { printf '<!-- ccage: max-chars=60000 -->\n'; cat "$REPO/DECISIONS.md"; } > "$REPO/D.tmp"
+    mv "$REPO/D.tmp" "$REPO/DECISIONS.md"
+    CCAGE_DECISIONS_BUDGET_BYTES=1000 run run_hook
+    [[ "$output" != *"NOTE: DECISIONS.md is"* ]]       # bounded by design: no nag
+}
+
 # The hook still resolves the slot — for the BUDGET NOTE now, not the body. A
 # regression here nags about the wrong file, silently, so it is still pinned.
 @test "CCAGE_SLOT=review: budgets RESUME.review.md, not RESUME.md" {

@@ -153,6 +153,36 @@ make_decisions() {
     [ "$(printf '%s' "$output" | wc -m)" -lt 10000 ]
 }
 
+@test "a document can cap its own delivery with a header line, and says where the rest is" {
+    # The register that started this (autocast-private, 2026-10-05) is 615 KB with
+    # a complete index on top; delivering 56 parts of it cost ~134k tokens at every
+    # session start and STILL dropped 48% from the end. With the index on top, the
+    # head is the useful part: the file declares how much of it to deliver.
+    make_decisions 40000
+    { printf '# DECISIONS\n<!-- ccage: max-chars=12000 — why it is capped, in prose -->\n'; cat "$REPO/DECISIONS.md"; } > "$REPO/D.tmp"
+    mv "$REPO/D.tmp" "$REPO/DECISIONS.md"
+    local out k
+    out=$(for k in $(seq 1 12); do "$HOOK" decisions "$k" 12; done)
+    local body; body=$(printf '%s\n' "$out" | grep -v '^=== ' | grep -v '^\*\*\* ')
+    [ "$(printf '%s' "$body" | wc -m)" -le 12000 ]          # capped by the file
+    [ "$(printf '%s' "$body" | wc -m)" -gt 9000 ]           # but not starved
+    [[ "$body" == "# DECISIONS"* ]]                         # the HEAD is what arrives
+    [[ "$out" == *"limits its own delivery to 12000 chars"* ]]
+    [[ "$out" == *"grep"* ]]                                # where the rest is
+    [[ "$out" != *"raise CCAGE_DOC_CHUNKS"* ]]              # not the capacity advice
+    grep -q 'status=emit-truncated' "$LOG"
+}
+
+@test "without the header line delivery is unchanged, and a bad value is ignored" {
+    make_decisions 40000
+    local plain; plain=$(for k in $(seq 1 12); do "$HOOK" decisions "$k" 12; done | grep -v '^=== ')
+    [ "$(printf '%s' "$plain" | wc -m)" -gt 39000 ]          # whole file, as before
+    { printf '<!-- ccage: max-chars=abc -->\n'; cat "$REPO/DECISIONS.md"; } > "$REPO/D.tmp"
+    mv "$REPO/D.tmp" "$REPO/DECISIONS.md"
+    local bad; bad=$(for k in $(seq 1 12); do "$HOOK" decisions "$k" 12; done | grep -v '^=== ')
+    [ "$(printf '%s' "$bad" | wc -m)" -gt 39000 ]
+}
+
 @test "a RESUME over its line budget is cut at the budget, with a NOTE, read at run time" {
     seq 1 600 > "$REPO/RESUME.md"
     # A non-default budget: the cap must come from the environment at run time,

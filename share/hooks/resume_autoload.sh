@@ -382,18 +382,22 @@ if [ -f "$resume" ]; then
     fi
 fi
 
-# DECISIONS budget. The register is delivered WHOLE now, so nothing truncates it
-# and nothing would otherwise ever push back on its growth — while every char is
-# paid on every startup, resume, clear AND compact. The old 120-line cut carried
-# that pressure as a side effect of silently dropping live decisions; this is the
-# same pressure without the data loss. Advisory only: it never drops a line.
+# DECISIONS budget. Every delivered char is paid on every startup, resume, clear
+# AND compact, so something must push back on growth. This hook cannot see how
+# much the chunk hook delivers (capacity is the chunk hook's arithmetic), so the
+# NOTE states the size and the remedies, never what arrived: it used to say
+# "Nothing was dropped." in a session whose chunk hook reported 294,400 chars NOT
+# delivered (measured 2026-10-05). A register that declares its own delivery cap
+# (`<!-- ccage: max-chars=N -->` in its first 20 lines) is bounded by design and
+# is not nagged. Advisory only: it never drops a line.
 decisions="$base/DECISIONS.md"
 dec_budget_bytes="${CCAGE_DECISIONS_BUDGET_BYTES:-48000}"
-if [ -f "$decisions" ]; then
+if [ -f "$decisions" ] && ! head -n 20 "$decisions" | grep -q '<!-- *ccage: *max-chars=[0-9]'; then
     dec_bytes=$(wc -c < "$decisions" 2>/dev/null | tr -d '[:space:]')
     [ -n "$dec_bytes" ] || dec_bytes=0
     if [ "$dec_bytes" -gt "$dec_budget_bytes" ] 2>/dev/null; then
-        printf 'NOTE: DECISIONS.md is %s bytes (budget %s) and every byte is re-injected on every session start and every /clear — retire spent decisions to CHANGELOG.md. Nothing was dropped.\n' \
+        # shellcheck disable=SC2016  # literal backticks around the header line
+        printf 'NOTE: DECISIONS.md is %s bytes (budget %s); what is delivered is paid on every session start and every /clear, and anything past the delivery limit is reported as NOT delivered on its last part. Bound it: keep a one-line-per-decision index at the top and add `<!-- ccage: max-chars=60000 -->` to its header (the rest stays greppable on disk), or retire spent decisions to CHANGELOG.md.\n' \
             "$dec_bytes" "$dec_budget_bytes"
     fi
 fi

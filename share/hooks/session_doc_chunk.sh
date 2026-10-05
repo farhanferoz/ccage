@@ -154,10 +154,20 @@ fi
 # concurrently in ~25 ms total, so it was never worth a second, independent
 # statement of how big a part is. awk decides, alone.
 
+# A document may cap its OWN delivery with a header line in its first 20 lines:
+#     <!-- ccage: max-chars=60000 -->   (any text may follow the number)
+# For a register that keeps a complete index on top, the head is the useful part
+# and the rest is greppable on disk. MEASURED 2026-10-05: autocast-private's
+# 615 KB register cost ~134k tokens at every session start and STILL lost its
+# last 48% to capacity. Declared in the file, not in an env var, so it travels
+# with the file to every machine and cage, and a document without the line is
+# delivered exactly as before. A non-numeric value is ignored.
+maxchars=$(head -n 20 "$file" | sed -n 's/.*<!-- *ccage: *max-chars=\([0-9][0-9]*\).*/\1/p' | head -n 1)
+
 # Deliver the file VERBATIM (no comment stripping): the register's content is
 # what the session must not re-derive, and stripping buys ~nothing (258 chars
 # on the largest real file) while making "reconstruction == source" inexact.
-awk -v k="$k" -v n="$n" -v window="$window" -v maxlines="${maxlines:-0}" \
+awk -v k="$k" -v n="$n" -v window="$window" -v maxlines="${maxlines:-0}" -v maxchars="${maxchars:-0}" \
     -v framing="$framing" -v kind="$kind" -v docname="${file##*/}" -v logf="$logf" -v now="$(date '+%Y-%m-%d %H:%M:%S')" '
     # maxlines caps the STORED line count, so the split must run over the capped
     # count (nlines), never awk NR (which keeps counting skipped records) — else
@@ -196,6 +206,8 @@ awk -v k="$k" -v n="$n" -v window="$window" -v maxlines="${maxlines:-0}" \
         eff = window - capline - 400
         if (eff < 500) eff = 500
         capacity = n * eff
+        selfcap = 0
+        if (maxchars > 0 && maxchars < capacity) { capacity = maxchars; selfcap = 1 }
         dropped = 0
         if (total > capacity) {
             # One pass: when the loop breaks at line i, acc is the cumulative
@@ -258,7 +270,10 @@ awk -v k="$k" -v n="$n" -v window="$window" -v maxlines="${maxlines:-0}" \
             printf "*** NOTE: %s was truncated at %d lines for injection (%d more on disk) — run /checkpoint to trim it. ***\n",
                    docname, maxlines, cut_lines
         }
-        if (dropped > 0 && k == parts) {
+        if (dropped > 0 && k == parts && selfcap) {
+            printf "*** NOTE: %s is %d chars and limits its own delivery to %d chars (its ccage: max-chars header line). The LAST %d chars were not delivered: the full text is on disk, so grep %s before asserting an entry is absent or re-deciding it. ***\n",
+                   docname, total + dropped, capacity, dropped, docname
+        } else if (dropped > 0 && k == parts) {
             printf "*** WARNING: %s is %d chars and this cage delivers at most %d (%d parts x %d). The LAST %d chars of the document were NOT delivered this session. Retire spent entries to CHANGELOG.md, or raise CCAGE_DOC_CHUNKS. ***\n",
                    docname, total + dropped, capacity, n, eff, dropped
         }
