@@ -1448,6 +1448,7 @@ class Watcher:
         self.kw_user_at = 0.0
         self.kw_seen_user_at = 0.0
         self.kw_draft = False
+        self.kw_enter_at = 0.0        # when the user last pressed Enter
 
     def _log(self, msg):
         try:
@@ -1681,6 +1682,8 @@ class Watcher:
             return
         self.kw_user_at = time.time()
         self.kw_draft = data[-1:] not in (b"\r", b"\n")
+        if b"\r" in data or b"\n" in data:
+            self.kw_enter_at = self.kw_user_at
 
     def _kw_skip(self, reason):
         """Log a reason the ping is due but blocked, once per idle stretch."""
@@ -1753,6 +1756,14 @@ class Watcher:
                                  % (tokens, cfg.kw_min_tokens))
         if self.kw_draft:
             return self._kw_skip("unsent keystrokes on stdin since the user's last Enter")
+        # /model, /config and other pickers open on Enter and write their row only
+        # once a choice is made (MEASURED 2026-10-05: the command row and its
+        # output share one timestamp), so an Enter newer than the last transcript
+        # write may be sitting in an open picker, where the ping's Enter would
+        # choose for the user. An Enter on an empty prompt lands here too: safe.
+        if self.kw_enter_at > mtime:
+            return self._kw_skip("the user's last Enter wrote nothing to the transcript "
+                                 "(a picker such as /model may be open)")
         if has_pending_tool_use(path):
             return self._kw_skip("a tool call has no result yet (a permission prompt, "
                                  "menu or running tool)")

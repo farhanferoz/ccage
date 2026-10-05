@@ -412,6 +412,19 @@ while time.time() < deadline:
         # would go flaky if the stub vanished between the two.
         exit_on_log_matched = True
         time.sleep(0.6)
+        # ...and READ that burst. Without this, keystrokes typed just after
+        # their own log line (a keep-warm ping is logged, then typed) arrived
+        # during the sleep and were never captured: the assertion passed or
+        # failed on scheduling luck.
+        while select.select([0], [], [], 0)[0]:
+            try:
+                d = os.read(0, 65536)
+            except OSError:
+                break
+            if not d:
+                break
+            cap.write(d)
+            buf += d
         break
     # A session that refuses to close on /exit, so the signal fallback is what
     # ends the run. FAKE_IGNORE_EXIT is how the SIGHUP path gets exercised.

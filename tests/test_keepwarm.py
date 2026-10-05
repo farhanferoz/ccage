@@ -327,12 +327,30 @@ def test_draft_gate_keystrokes_without_enter_block_the_ping(h):
 def test_draft_gate_cleared_by_an_enter_that_ends_the_input(h):
     h.w.note_user_input(b"half")
     h.w.note_user_input(b"done\r")
+    h.w.kw_enter_at = time.time() - QUIET - 60      # its prompt row landed after it
     assert h.tick() == 1
 
 
 def test_draft_gate_keystrokes_after_the_last_enter_block(h):
     h.w.note_user_input(b"sent\rand then more")
     assert h.tick() == 0
+
+
+def test_picker_gate_an_enter_that_wrote_nothing_blocks_the_ping(h):
+    """`/model`, `/config` and friends open a picker on Enter and log their row
+    only once a choice is made (MEASURED 2026-10-05: the command row and its
+    "Set model to ..." output share one timestamp). An Enter newer than the
+    transcript's last write may therefore be sitting in an open picker, where the
+    ping's own Enter would select an option."""
+    h.w.note_user_input(b"/model\r")
+    assert h.tick() == 0
+    assert h.logged("wrote nothing to the transcript")
+
+
+def test_picker_gate_clears_once_the_transcript_records_the_enter(h):
+    h.w.note_user_input(b"/model\r")
+    h.w.kw_enter_at = time.time() - QUIET - 60      # the row landed after the Enter
+    assert h.tick() == 1
 
 
 def test_draft_gate_terminal_reports_are_not_keystrokes(h):
@@ -353,6 +371,7 @@ def _ping_and_reply(h):
 def test_reset_on_a_user_keystroke(h):
     h.w.kw_pings, h.w.kw_ping_at = 3, time.time() - 10
     h.w.note_user_input(b"x\r")
+    h.w.kw_enter_at = time.time() - QUIET - 60      # its prompt row landed after it
     h.tick()
     assert h.w.kw_pings == 1            # reset to 0, then this poll's ping
 
