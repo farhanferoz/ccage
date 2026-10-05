@@ -276,6 +276,27 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    finished one-shot waiter → where its output landed + the condition to re-check).
    Point to a plan doc instead of dumping a long backlog. Drop done/moot items
    (their detail goes to CHANGELOG).
+   - **Owner instructions are WORK, not questions.** Every instruction the owner
+     gave that is not fully done becomes a `### Next` item in the owner's words,
+     WITH its scope ("on all three cases") and the day it was given — never a
+     "not decided yet" entry. Only something the owner was ASKED and has not
+     answered may be filed as undecided, naming what was asked and when.
+     Measured 2026-09-28 (autocast-private): "retrain 4D like 4C, on all three
+     cases" was filed as "owner not yet confirmed", and the next session built a
+     third of it. *"This is pathetic."*
+   - **`### Done (do not redo)`** — at most ~10 one-line items finished
+     recently, each with the evidence that proves it (commit, result path,
+     ledger row, plan-doc line); older lines roll to CHANGELOG. CHANGELOG is NOT
+     loaded at session start, so work recorded only there is invisible to the
+     next session. Add one line naming where findings and literature notes live
+     (e.g. `notes/research/INDEX.md`), so "have we looked at this before" starts
+     there. Measured: autocast-private's owner had to say "we already did
+     research on this, check that first" on 2026-09-07 and again on 09-11.
+   - **Look before filing anything as open.** Before writing that a question is
+     open or undecided, `grep -n` its topic in `DECISIONS.md`, the plan docs and
+     the notes index. Measured 2026-09-21 (ReviewSense): a repair settled in a
+     plan doc was put back to the owner as open — *"Again, you are reopening
+     something we have already done."*
    - **Never promise a notification from a background task.** Backgrounded
      watchers/waiters do NOT survive the session — measured (2026-07-23
      forensics): every `Bash(run_in_background)` watcher was killed 50–131 s
@@ -341,6 +362,15 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    argued against. A decision leaves `DECISIONS.md` only as SUPERSEDED or
    EMBODIED, via one line in `$changelog`; `resume_budget_check.sh` blocks any
    other removal, matching on the decision id rather than on a count.
+
+   **When `DECISIONS.md` is over its budget** (the session-start NOTE says so),
+   keep a one-line-per-decision index at its top, newest first, and put
+   `<!-- ccage: max-chars=60000 -->` in its header: sessions then receive the
+   index and the head, and the full text stays on disk to `grep`. Every new
+   ruling gets its index line AND its body. The price, measured 2026-10-05:
+   ~0.42 tokens per char, on every session start and every `/clear` —
+   autocast-private's 615 KB register cost ~134k tokens a session and still lost
+   its last 48% to capacity.
 7. **Apply everything surgically — `Edit`, never a full rewrite.** The in-place line
    updates plus the single same-day block edit are a handful of targeted `Edit`s; a
    CHANGELOG roll is one more. Only fall back to a full `Write` when bootstrapping
