@@ -1173,8 +1173,23 @@ line two' </dev/null"
     run conf --say second
     [ "$status" -eq 1 ]
     [[ "$output" == *"still pending"* ]]
+    # No watcher runs here, so "send again after the next poll" would be false:
+    # a watcher started later drops the older message as stale.
+    [[ "$output" == *"no watcher is running for this slot"* ]]
+    [[ "$output" == *"delete $REPO/.ccage-say to replace it"* ]]
+    [[ "$output" != *"next poll"* ]]
     [ "$(cat "$REPO/.ccage-say")" = "first" ]
     [ -z "$(compgen -G "$REPO/.ccage-say*.tmp")" ]
+}
+
+@test "--say refusal with a live watcher here still says to wait for its next poll" {
+    run conf --say first
+    [ "$status" -eq 0 ]
+    printf 'pid=%d\n' "$$" > "$REPO/.ccage-autock.pid.$$"   # this shell: alive
+    run conf --say second
+    rm -f "$REPO/.ccage-autock.pid.$$"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"next poll"* ]]
 }
 
 @test "Watcher._deliver_say: types a queued message once, only when ready and not clearing, never a stale one or another slot's (unit)" {

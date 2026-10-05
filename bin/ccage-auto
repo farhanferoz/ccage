@@ -1151,6 +1151,22 @@ def _read_watcher_pid(path):
     return None
 
 
+def _live_watcher_here(cwd):
+    """True if any watcher liveness record in cwd names a live process. Records
+    carry no slot, so this answers for the project dir, not one slot."""
+    try:
+        names = os.listdir(cwd)
+    except OSError:
+        return False
+    prefix = WATCHER_PIDFILE_BASE + "."
+    for name in names:
+        if name.startswith(prefix):
+            pid = _read_watcher_pid(os.path.join(cwd, name))
+            if pid is not None and _pid_alive(pid):
+                return True
+    return False
+
+
 def _sweep_dead_watcher_pidfiles(cwd, keep_pid):
     """Delete liveness records whose watcher is gone. Per-pid records are only
     ever removed by their own watcher's teardown, so one killed with SIGKILL
@@ -3507,8 +3523,16 @@ def control_command(argv):
             # message the watcher has not typed yet.
             os.link(tmp, path)
         except FileExistsError:
-            sys.stderr.write("[ccage-auto] --say: a message is still pending in %s; "
-                             "send again after the watcher's next poll\n" % path)
+            if _live_watcher_here(cwd):
+                sys.stderr.write("[ccage-auto] --say: a message is still pending in %s; "
+                                 "send again after the watcher's next poll\n" % path)
+            else:
+                # A watcher started later drops a message older than itself, so
+                # "wait for the next poll" would never come true.
+                sys.stderr.write("[ccage-auto] --say: a message is still pending in %s, "
+                                 "and no watcher is running for this slot; the pending "
+                                 "message will be dropped when one starts — delete %s "
+                                 "to replace it\n" % (path, path))
             return 1
         finally:
             os.remove(tmp)
