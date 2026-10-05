@@ -101,6 +101,17 @@ INJECTION_TOLERANCE_S = 30
 # Missing the second made every deliberately-stopped job read as live forever.
 TERMINAL_JOB_MARKERS = ("[exited with code", "[killed]")
 
+# Stop-payload `background_tasks` entries (Claude Code >= 2.1.145). Shapes MEASURED
+# 2026-10-05 from a live headless capture, not taken from the docs -- the docs
+# example shows `name`, the real entries carry `description`/`command` and a `type`:
+#   {"id": "bhhtdbdb1", "type": "shell", "status": "running", "description":
+#    "sleep 30", "command": "sleep 30"}
+#   {"id": "a2b22890161899878", "type": "subagent", "status": "running",
+#    "description": "...", "agent_type": "general-purpose"}
+# A task that finished is simply absent afterwards ("background_tasks": []).
+TASK_RUNNING = "running"
+TASK_KIND_SUBAGENT = "subagent"
+
 
 def allow():
     """Let the turn end. The only safe default."""
@@ -697,7 +708,52 @@ def open_task_count():
 tail = last_msg[-1200:] if last_msg else ""
 asked = bool(ASKED_USER.search(tail))
 committed = bool(COMMIT.search(tail)) and not asked
-agents = live_agents()
+
+# WHAT IS STILL RUNNING: the payload's own list is ground truth; disk inference is
+# the fallback. Claude Code (>= 2.1.145) tells every Stop hook exactly which
+# background tasks are running, so guessing from transcript mtimes and job-output
+# files is only for a client that does not send the field. The guess was wrong
+# twice on 2026-10-05: a subagent that had finished still had a transcript touched
+# inside LIVE_WINDOW_S, and the guard announced it as running. `[]` is an answer
+# ("nothing is running"), not an absence -- only a missing/non-list field falls
+# back. Subagents feed the shape-B trigger, every other task kind feeds the
+# unarmed-watcher trigger, mirroring the two disk sources they replace.
+_bg = p.get("background_tasks")
+if isinstance(_bg, list):
+    SRC = "payload"
+    _running = [t for t in _bg
+                if isinstance(t, dict) and t.get("status") == TASK_RUNNING]
+    agents = [str(t.get("id")) for t in _running
+              if t.get("type") == TASK_KIND_SUBAGENT]
+    jobs = [str(t.get("id")) for t in _running
+            if t.get("type") != TASK_KIND_SUBAGENT]
+else:
+    SRC = "inference"
+    agents = live_agents()
+    jobs = live_background_jobs()
+
+LOG_PATH = os.path.join(config, "stop_continuation_guard.log")
+
+
+def append_log(line):
+    """Keep the last 500 lines of the guard's decision log. Fail-open."""
+    try:
+        prev = (open(LOG_PATH).read().splitlines()[-499:]
+                if os.path.exists(LOG_PATH) else [])
+        open(LOG_PATH, "w").write("\n".join(prev + [line]) + "\n")
+    except OSError:
+        pass
+
+
+def log_decision(verdict, path):
+    """One line per stop, allow included. A log that only recorded refusals made
+    the false "still running" of 2026-10-05 undiagnosable: the allows around it
+    left no trace of what the guard had believed. `src` says whether the running
+    set came from the payload or from disk inference."""
+    append_log("%s %s DECISION=%s path=%s src=%s agents=%d jobs=%d" % (
+        time.strftime("%Y-%m-%dT%H:%M:%S"), MODE.upper(), verdict, path, SRC,
+        len(agents), len(jobs)))
+
 
 # Every stop, allow or block. A record that only appeared on refusals would be
 # missing in exactly the cases the supervisor exists to catch.
@@ -706,6 +762,7 @@ write_parked()
 # The refusal kill switch, applied AFTER the record is written (see the note
 # where this check used to live).
 if MODE == "off":
+    log_decision("allow", "mode-off")
     allow()
 
 # The platform's own anti-loop flag: this hook already blocked the previous stop.
@@ -713,6 +770,7 @@ if MODE == "off":
 # beside the kill switch and after write_parked() for the same reason: the record
 # is observation and must survive every path that silences the verdict.
 if p.get("stop_hook_active"):
+    log_decision("allow", "stop-hook-active")
     allow()
 
 reason = None
@@ -761,7 +819,7 @@ elif agents and not asked and not serial_gate_active() and not ATTENDED:
         "return before you can proceed — then stopping is correct and this will "
         "allow it." % (len(agents), ", ".join(agents[:4]))
     )
-elif ((PROMISED_LATER.search(tail) or live_background_jobs())
+elif ((PROMISED_LATER.search(tail) or jobs)
         and not watcher_armed() and ccage_watch_available()):
     # Issue 5 is inert without this: a watcher that survives the session is
     # useless if the session never arms one, and arming is exactly the kind of
@@ -772,7 +830,7 @@ elif ((PROMISED_LATER.search(tail) or live_background_jobs())
     # the FACT, so a turn that ends silently over a running job no longer slips
     # through. Keying only on wording is the D7 failure both foreground guards
     # were walked past on — recorded as a known limit 2026-08-13, fixed here.
-    _jobs = live_background_jobs()
+    _jobs = jobs
     reason = (
         "You are ending this turn with %s, and NO watcher is armed.\n"
         "Measured: an in-harness background watcher is killed 50-131s after the "
@@ -897,6 +955,7 @@ if reason is None and not asked:
 
 if reason is None:
     write_count(0)          # clean stop: reset the streak
+    log_decision("allow", "no-trigger")
     allow()
 
 count = read_count()
@@ -905,9 +964,9 @@ if count >= MAX_BLOCKS:
     # block/block/allow CYCLE that can still pin a session in a loop indefinitely
     # (measured 2026-08-10 — attempt 4 blocked again). The streak is cleared only
     # by a clean stop above, which is the genuine signal that progress resumed.
+    log_decision("allow", "yield-after-max-blocks")
     allow()
 
-log = os.path.join(config, "stop_continuation_guard.log")
 try:
     stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
     if open_tasks:
@@ -923,15 +982,16 @@ try:
     line = "%s %s %s n=%d agents=%d: %s" % (
         stamp, MODE.upper(), kind, count + 1, len(agents),
         tail[-160:].replace("\n", " "))
-    prev = open(log).read().splitlines()[-499:] if os.path.exists(log) else []
-    open(log, "w").write("\n".join(prev + [line]) + "\n")
+    append_log(line)
 except OSError:
     pass
 
 if MODE != "enforce":
+    log_decision("allow", "mode-%s-would-block-%s" % (MODE, kind))
     allow()
 
 write_count(count + 1)
+log_decision("block", kind)
 print(json.dumps({"decision": "block", "reason": reason}))
 sys.exit(0)
 PY
