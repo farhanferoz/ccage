@@ -2,6 +2,24 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.21.0] — 2026-10-05
+
+Minor: the resume prompt now says something different, and session docs gain a way to bound their own size.
+
+### Changed
+
+- **The resume prompt tells a warm resume from a cold one.** Measured on Claude Code 2.1.289: an interactive session resumed with `-r` or `-c` two minutes after it ran READ the whole prior conversation from cache (Opus 5.5: 94,770 read, 341 written; Sonnet 5.5: 68,391 read, 454 written; Haiku 4.5 the same). The prompt used to say every resume misses the cache. It now compares the last activity with the cache lifetime the session wrote at (1 hour or 5 minutes; unknown counts as 5): inside it, the estimate is a cache read at the model's read rate, which usually falls under the prompt threshold, so you are not asked at all; past it, the estimate is the full rewrite, as before. README, FEATURES, the handoff header and the keepwarm skill no longer claim a warm cache cannot help a resume.
+- **The checkpoint skill records directives, finished work and where results live.** Three rules from three repeat-work incidents found in transcripts: an instruction the owner gave is a `### Next` item in the owner's words with its scope, never an "undecided" entry; a short `### Done (do not redo)` list with evidence, because CHANGELOG is not loaded at session start; and grep `DECISIONS.md`, plan docs and notes before filing anything as open. Plus a rule for an oversized register: index on top and a `max-chars` header line.
+
+### Added
+
+- **A session doc can bound its own delivery** with `<!-- ccage: max-chars=N -->` in its first 20 lines. Delivery stops after the first `N` chars, and the last part says how much stayed on disk and to grep it. On a 615 KB register with a complete index on top this cut session-start delivery from ~327,000 chars (~136k tokens, 22% of a 1M window together with the rest) to ~62,000 (~26k tokens), index included. Without the line, nothing changes.
+
+### Fixed
+
+- **The DECISIONS size NOTE no longer says "Nothing was dropped."** It did so in sessions whose chunk hook reported most of the register NOT delivered. It now states the size and the remedies, and stays quiet for a register that bounds itself.
+- **Session age on macOS** is computed in UTC; the BSD `date` fallback read the transcript's UTC timestamp as local time.
+
 ## [0.20.0] — 2026-10-05
 
 Minor: keep-warm is on by default, which changes what an existing `ccage-auto` user gets, and there are three new knobs.
