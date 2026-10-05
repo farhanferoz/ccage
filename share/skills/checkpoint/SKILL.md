@@ -5,6 +5,7 @@ description: >-
   CHANGELOG.md in a repo that has none. Use before /clear or a compaction, or
   when the user says "checkpoint", "save progress", "snapshot state", or "update
   RESUME". Flags: --final, --tidy, --merge-slots, --from-session.
+effort: medium
 ---
 
 # /checkpoint
@@ -24,11 +25,12 @@ output is capped at 10,000 characters. So the workflow is just:
 You (the agent) do the writing. This skill tells you exactly what to write and
 where. **Two commands, zero lossy copy/paste.**
 
-A checkpoint is distillation, not hard reasoning — it runs at whatever effort the
-session already uses, deliberately unpinned. (Switching effort mid-session
-invalidates the conversation cache — only the small tools+system prefix survives —
-so a per-skill effort pin would cost far more than it could save. If you want a
-cheaper tier, change `/effort` at low occupancy, ideally right after a clear.)
+A checkpoint is distillation, not hard reasoning, so it is pinned to `effort:
+medium` (owner's call, 2026-10-05; measured the same day that a skill's `effort:`
+binds — the request records the pinned level, not the session's). On Opus 5.5
+an effort change keeps the conversation cache (measured; Anthropic's docs say the
+same for Sonnet 5.5 and Fable 5.1), so the pin is cheap there; on older models the switch re-writes all but the
+tools+system prefix, one rebuild per checkpoint.
 **Efficiency here comes from doing _less work_ (fewer round-trips, no proactive
 archival), not from thinking less.** Two use cases:
 
@@ -610,11 +612,10 @@ true end-of-day.
   `CCAGE_SLOT` is unset.
 - **Lean is the point.** RESUME is injected into context on every session start;
   every line costs tokens on every start. When in doubt, move detail to CHANGELOG.
-- **No effort pin — and don't toggle `/effort` for a checkpoint.** An effort
-  switch invalidates the conversation cache (only the tools+system prefix
-  survives), so it costs more than it saves. Get speed and cost from fewer
-  round-trips and deferred archival, not from thinking less — a vague checkpoint
-  just moves the cost to a more expensive re-discovery on resume.
+- **The skill pins `effort: medium`; don't also toggle `/effort` for a
+  checkpoint.** Get speed and cost from fewer round-trips and deferred archival
+  as well — a vague checkpoint just moves the cost to a more expensive
+  re-discovery on resume.
 - **Rebuild-on-resume state** lives only in `### Live jobs & tasks`: the task list
   and any background jobs/Monitors (all wiped by `/clear`). Record active tasks +
   per-job rearm commands; omit when empty; never dump a long backlog.
