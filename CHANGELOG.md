@@ -2,6 +2,30 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.20.0] — 2026-10-05
+
+Minor: keep-warm is on by default, which changes what an existing `ccage-auto` user gets, and there are three new knobs.
+
+### Added
+
+- **Keep-warm, on by default.** A watched `ccage-auto` session that sits idle for 55 minutes gets one tiny typed turn, which re-reads the cached conversation at the cache-read price and resets the one-hour cache clock; a lapsed cache costs a full rewrite. At most 6 pings per idle stretch, only from 100k tokens of context, only on the 1-hour cache tier. It types only when the facts say it is safe: no tool call is waiting for a result (a permission prompt, a menu, a plan approval), nothing is half-typed since the user's last Enter, and that Enter wrote something to the transcript (a `/model` or `/config` picker writes nothing until a choice is made). Off at launch with `--no-keepwarm` / `CCAGE_AUTOCK_KEEPWARM=0`, live with `ccage-auto --keepwarm off|on`. `/keepwarm` gains `off`, `on` and `status`.
+- **`ccage-auto --say "text"`** types one message into this slot's running session, once, within one poll. It refuses to overwrite a message still pending, and says when no watcher is running to deliver it.
+- **Session start flags plan problems.** `plan_docs.sh` now ships with ccage (it was only in the installed copy): a ticked plan step that names a file which does not exist is reported, and `/checkpoint` warns when it lists a plan with no checkboxes to measure. A Syncthing conflict copy of `RESUME.md` is reported at session start.
+
+### Changed
+
+- **The checkpoint skill is pinned to `effort: medium`.** A skill's effort setting binds (measured), and on Opus 5.5 an effort change keeps the conversation cache. It also carries two newer rules: record the check that settles a fact about the outside world, not last time's answer; and dispatch only long tasks, doing short fully-specified ones inline.
+
+### Fixed
+
+- **An armed watcher now silences the idle supervisor in every job state**, not only while one of this session's own background jobs is producing output. A watcher counts only while its process is alive and within its time limit, so a dead or unbounded watcher can no longer mute the supervisor.
+- **The shipped Stop guard trusts Claude Code's own list of running background tasks** (`background_tasks` in the Stop payload) over guesses from transcript files, which had reported a finished agent as still running.
+- **Prices:** Opus 5.5 ($4 / $20 per Mtok) and Sonnet 5.5 ($2 / $10) are priced as themselves in the resume estimate and the handoff cost. Cache reads are priced per model: 0.05x input on Opus 5.5, 0.025x on Fable and Mythos 5.1, 0.1x elsewhere.
+
+### Tests
+
+- The end-to-end test session now reads the keystrokes that arrive while it settles before exiting on a log line; whether a test saw a ping typed just after its log line had depended on scheduling.
+
 ## [0.19.0] — 2026-09-03
 
 Minor, not a patch: this adds four knobs and changes what an existing user gets by default — a session that marks itself done now closes instead of staying open.
