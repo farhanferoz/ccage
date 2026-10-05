@@ -6,6 +6,9 @@ description: >-
   "keep the cache alive/warm", "I'm stepping away / going to a meeting / lunch — keep
   the session warm", or asks to prevent the prompt cache from expiring. Not a resume
   fix.
+  Also "/keepwarm off", "/keepwarm on", "/keepwarm status". Under `ccage-auto` the
+  watcher already keeps the session warm by default; this skill then only switches
+  it off or on and reports on it.
 
 ---
 
@@ -23,7 +26,50 @@ Invocations:
 /keepwarm <interval>           # custom interval, max defaults to 6
 /keepwarm <interval> <max>     # both custom
 /keepwarm --ping <n> <max> <interval>   # INTERNAL — a scheduled wake re-entering
+/keepwarm off                  # stop keeping the cache warm
+/keepwarm on                   # resume it
+/keepwarm status               # is it on, and has it pinged
 ```
+
+---
+
+## 0. Under `ccage-auto`: the watcher already does this
+
+`ccage-auto` pings by default: while the session sits idle it types one tiny
+turn every 55 minutes, up to 6 per idle stretch, and only when it is safe (no
+dialog waiting on the user, nothing half-typed, the cache on the 1-hour tier,
+at least 100k tokens of context). So **do not arm a second loop** — two chains
+would double the cost. Check once, in one Bash call from the project dir:
+
+```bash
+[ "${CCAGE_AUTONOMOUS:-}" = 1 ] && kill -0 "${CCAGE_AUTOCK_WATCHER_PID:-0}" 2>/dev/null \
+    && echo watched || echo unwatched
+```
+
+(`ccage-auto` exports both into the session it launches. This is the same
+`ccage-auto` command path `/checkpoint-threshold` shells out to; if the command
+is not found, say so plainly and fall through to the manual loop below.)
+
+If `watched`:
+
+| The user says… | Do |
+|---|---|
+| `/keepwarm` (no args) | Run nothing and arm nothing. Reply that the watcher already keeps this session warm (every 55 min while idle, up to 6 per stretch) and that `/keepwarm off` stops it. |
+| `/keepwarm <interval> [<max>]` | Same reply, plus: the watcher's values are fixed at launch (`CCAGE_AUTOCK_KEEPWARM_INTERVAL`, `CCAGE_AUTOCK_KEEPWARM_MAX`); to run the manual loop instead, `/keepwarm off` first. |
+| `/keepwarm off` | `ccage-auto --keepwarm off` — takes effect within one poll (~12 s); relay its one-line echo. |
+| `/keepwarm on` | `ccage-auto --keepwarm on` — also overrides a launch with `--no-keepwarm`. |
+| `/keepwarm status` | `ccage-auto --status` and report its `keep-warm` line; for what it has actually done, `grep keep-warm "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/ccage-autock.log"` shows every ping and every skip reason (`keep-warm ping 2/6 at 412k tokens (1h tier)`, `keep-warm skipped: …`). |
+
+The switch is per project dir and per run, exactly like `/checkpoint-threshold`'s
+pause: it survives the watcher's own `/clear` cycles and is dropped at the next
+real session start. For a permanent change, launch with `--no-keepwarm` or
+`CCAGE_AUTOCK_KEEPWARM=0`.
+
+If `unwatched` (a plain `claude` session): `/keepwarm off` means "stop" (§5.2 —
+reply `keep-warm stopped.` and let any pending wake lapse without
+rescheduling), `/keepwarm on` is the same as `/keepwarm`, and `/keepwarm status`
+reports from the conversation whether a loop is armed and its last announced
+ping. Everything below is the manual loop and is unchanged.
 
 ---
 

@@ -39,6 +39,7 @@
 #   ccage-auto --pause / --resume        # suspend / re-enable auto-checkpointing
 #   ccage-auto --reset                   # drop overrides, revert to launch values
 #   ccage-auto --say "text"              # type one message into this slot's session
+#   ccage-auto --keepwarm off|on         # switch the idle cache keep-warm pings
 #
 # Auto-flags (consumed from the front; everything else is passed to claude):
 #   --autock / --no-autock         force the watcher on/off (default: on)
@@ -54,6 +55,7 @@
 #                                  close claude session on done  (default: on)
 #   --clear-timeout N              how long to wait for a typed /clear to
 #                                  actually run before giving up  (default: 300)
+#   --no-keepwarm                  no idle cache keep-warm pings  (default: on)
 #   --status                       diagnostics only, do not launch
 #
 # Env equivalents (flags win): CCAGE_AUTOCK, CCAGE_AUTOCK_SOFT, CCAGE_AUTOCK_HARD,
@@ -86,7 +88,20 @@
 #   CCAGE_AUTOCK_CLEAR_TIMEOUT (s to wait for a typed /clear to take effect
 #     before giving up without resuming; a /clear typed while a turn is running
 #     is QUEUED until that turn ends, so this is minutes, not seconds. Default 300).
+#   CCAGE_AUTOCK_KEEPWARM (0/false/off/no = no idle keep-warm pings; default on),
+#   CCAGE_AUTOCK_KEEPWARM_INTERVAL (minutes of quiet before a ping, clamped to
+#     [1,59]; default 55), CCAGE_AUTOCK_KEEPWARM_MAX (pings per idle stretch,
+#     clamped to [1,24]; default 6), CCAGE_AUTOCK_KEEPWARM_MIN_TOKENS (no ping
+#     below this context size; default 100000).
 #   CCAGE_SLOT is honoured for RESUME naming.
+#
+# Keep-warm (on by default). While the session sits idle, one tiny typed turn
+# every ~55 minutes re-reads the cached conversation (cache-read price) and
+# resets the 1-hour prompt-cache clock; letting it lapse costs a full rewrite.
+# It types only when the transcript FACTS say it is safe: the last assistant
+# message has no tool_use without a tool_result (a pending permission prompt,
+# menu or plan approval looks exactly like that), and no keystroke has reached
+# stdin since the user's last Enter (a half-typed message). See _keepwarm_tick.
 #
 # Weekly-limit floor (opt-in, off by default). The context watcher manages the
 # WINDOW; this manages the WEEK: an unattended run must not burn the account's
@@ -121,6 +136,7 @@
 # family — is yours to pin via --window-map / CCAGE_AUTOCK_WINDOWS (or --window).
 
 import datetime
+import enum
 import errno
 import fcntl
 import glob
@@ -239,6 +255,25 @@ RATE_LIMITS_STATE = "rate-limits-state.json"
 WEEKLY_WARN_MARGIN = 5.0        # warn stage fires at floor + this (remaining %)
 WEEKLY_STALE_S = 30 * 60.0      # sensor readings older than this are unknown
 
+# ---------------------------------------------------------------- keep-warm
+# One ping is a minimal turn that re-reads the cached conversation at the
+# cache-read price and resets the prompt-cache clock; a lapsed cache costs a full
+# rewrite. The clamps mirror share/skills/keepwarm/SKILL.md, which owns the
+# manual loop for sessions that are not under ccage-auto.
+KEEPWARM_INTERVAL_MIN = 55.0     # minutes of transcript quiet before a ping
+KEEPWARM_INTERVAL_RANGE = (1.0, 59.0)   # >= the 1-hour TTL could never refresh it
+KEEPWARM_MAX = 6                 # pings per idle stretch
+KEEPWARM_MAX_RANGE = (1, 24)     # past ~25 pings a rewrite would have been cheaper
+KEEPWARM_MIN_TOKENS = 100_000    # below this a rewrite costs cents: don't bother
+KEEPWARM_OWN_TURN_S = 120.0      # transcript growth this soon after a ping is the
+                                 # ping's own turn, not the user coming back
+KEEPWARM_PING = ("[keep-warm] Automated cache refresh while you are away — no "
+                 "action needed. Reply with only: ok")
+# Terminal focus reports and SGR mouse reports arrive on stdin without anyone
+# typing, so they are neither a keystroke nor part of a draft.
+_NON_KEYSTROKE = re.compile(rb"\x1b\[[IO]|\x1b\[<\d+;\d+;\d+[Mm]")
+_ENTER_BYTES = b"\r\n"
+
 # ---------------------------------------------------------------- supervisor
 # An idle session with work left is unrecoverable today: the Stop hook is the
 # only intervention point, it fires once at the instant of stopping, and after
@@ -315,6 +350,10 @@ def _num(v, default):
         return float(v)
     except (TypeError, ValueError):
         return default
+
+
+def _clamp(v, lo, hi):
+    return max(lo, min(hi, v))
 
 
 def launch_command(cfg):
@@ -455,6 +494,27 @@ class Config:
         # that turn ends, and the resume prompt must not be typed until the
         # clear has demonstrably run.
         self.clear_timeout = _num(os.environ.get("CCAGE_AUTOCK_CLEAR_TIMEOUT"), 300.0)
+        # Keep-warm. The launch value is kept apart from the live one the control
+        # file may set (Watcher.keepwarm), so dropping the override reverts to it.
+        self.keepwarm = _truthy(os.environ.get("CCAGE_AUTOCK_KEEPWARM"), True)
+        self.kw_warns = []
+        lo, hi = KEEPWARM_INTERVAL_RANGE
+        minutes = _num(os.environ.get("CCAGE_AUTOCK_KEEPWARM_INTERVAL"), KEEPWARM_INTERVAL_MIN)
+        if not lo <= minutes <= hi:
+            self.kw_warns.append("CCAGE_AUTOCK_KEEPWARM_INTERVAL=%g outside [%g,%g] minutes; clamping"
+                                 % (minutes, lo, hi))
+        # CCAGE_AUTOCK_KEEPWARM_INTERVAL_S is TEST-ONLY: the same clock in seconds,
+        # unclamped, so a suite can see a ping in seconds rather than minutes.
+        self.kw_interval = _num(os.environ.get("CCAGE_AUTOCK_KEEPWARM_INTERVAL_S"),
+                                _clamp(minutes, lo, hi) * 60.0)
+        lo, hi = KEEPWARM_MAX_RANGE
+        cap = int(_num(os.environ.get("CCAGE_AUTOCK_KEEPWARM_MAX"), KEEPWARM_MAX))
+        if not lo <= cap <= hi:
+            self.kw_warns.append("CCAGE_AUTOCK_KEEPWARM_MAX=%d outside [%d,%d]; clamping"
+                                 % (cap, lo, hi))
+        self.kw_max = _clamp(cap, lo, hi)
+        self.kw_min_tokens = int(_num(os.environ.get("CCAGE_AUTOCK_KEEPWARM_MIN_TOKENS"),
+                                      KEEPWARM_MIN_TOKENS))
         self.status_only = False
         self.claude_args = self._parse(args)
 
@@ -516,6 +576,8 @@ class Config:
             elif a == "--clear-timeout":
                 self.clear_timeout = _num(take(), self.clear_timeout)
                 i += 1
+            elif a == "--no-keepwarm":
+                self.keepwarm = False
             else:
                 # Not ours: hand it to claude, in order, and keep scanning for
                 # our own flags further along the line. A ccage-auto-shaped
@@ -563,7 +625,7 @@ class Config:
             warns.append("weekly floor %.0f out of range (0,100); disabling"
                          % self.weekly_floor)
             self.weekly_floor = 0.0
-        return warns
+        return warns + self.kw_warns
 
 
 def clamp_thresholds(soft, hard):
@@ -824,6 +886,92 @@ def latest_usage(path):
         )
         return tokens, msg.get("model")
     return None, None
+
+
+class CacheTier(str, enum.Enum):
+    """Which prompt-cache lifetime the session's own writes landed in."""
+    HOUR = "1h"
+    FIVE_MIN = "5m"
+    UNKNOWN = "unknown"
+
+
+def cache_tier(path):
+    """The dominant prompt-cache tier of a session transcript.
+
+    Ported from share/skills/keepwarm/keepwarm-calc.sh `probe` (keep the two in
+    step): sum the 1-hour and 5-minute cache-write tokens over every row; 1h
+    wins when it is present and at least as large, 5m when only it is present,
+    otherwise unknown. Streams the file line by line, because a long session's
+    transcript runs to tens of megabytes. An unreadable file is UNKNOWN."""
+    hour = five = 0
+    try:
+        with open(path, "rb") as fh:
+            for line in fh:
+                if b'"ephemeral_' not in line:       # cheap prefilter only
+                    continue
+                try:
+                    usage = (json.loads(line).get("message") or {}).get("usage") or {}
+                except (ValueError, AttributeError):
+                    continue
+                created = usage.get("cache_creation")
+                if not isinstance(created, dict):
+                    continue
+                for key, is_hour in (("ephemeral_1h_input_tokens", True),
+                                     ("ephemeral_5m_input_tokens", False)):
+                    n = created.get(key)
+                    if isinstance(n, int):
+                        if is_hour:
+                            hour += n
+                        else:
+                            five += n
+    except OSError:
+        return CacheTier.UNKNOWN
+    if hour > 0 and hour >= five:
+        return CacheTier.HOUR
+    if five > 0:
+        return CacheTier.FIVE_MIN
+    return CacheTier.UNKNOWN
+
+
+def has_pending_tool_use(path):
+    """True when the transcript's LAST assistant message has a tool_use with no
+    matching tool_result yet -- or when that cannot be told.
+
+    That shape is what a permission prompt, an AskUserQuestion menu and a plan
+    approval all look like from the transcript (the call is logged when issued,
+    the result only once the user has answered), and a long-running tool looks the
+    same. Typing text and Enter into any of them would answer the dialog on the
+    user's behalf, so the keep-warm ping gates on THIS FACT and never on screen
+    text. Fails closed: unreadable, or no assistant message in the tail, is True.
+
+    Claude Code 2.1.289 writes one row per content block, all carrying the same
+    message.id (a thinking row, then the tool_use row); a tool_result is a
+    type=user row whose content block holds the tool_use_id."""
+    lines = _tail(path)
+    last_mid, issued, answered, seen = None, set(), set(), False
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        msg = row.get("message") if isinstance(row, dict) else None
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        if row.get("type") == "assistant":
+            mid = msg.get("id")
+            if mid is None or mid != last_mid:
+                issued = set()              # a new message: only the last counts
+            last_mid, seen = mid, True
+            issued.update(b.get("id") for b in content
+                          if isinstance(b, dict) and b.get("type") == "tool_use")
+        elif row.get("type") == "user":
+            answered.update(b.get("tool_use_id") for b in content
+                            if isinstance(b, dict) and b.get("type") == "tool_result")
+    return (not seen) or bool(issued - answered)
 
 
 def parse_window_map(spec):
@@ -1094,7 +1242,8 @@ def say_path(cwd):
 
 
 def read_control_file(cwd):
-    """Parse the control file into {'soft': float, 'hard': float, 'paused': bool}.
+    """Parse the control file into {'soft': float, 'hard': float, 'paused': bool,
+    'keepwarm': bool}.
 
     Only keys actually present are returned; blank/`#`/malformed lines and
     unparseable values are ignored, so a half-written file (the watcher may read
@@ -1117,8 +1266,8 @@ def read_control_file(cwd):
                 out[key] = float(val)
             except ValueError:
                 pass
-        elif key == "paused":
-            out[key] = val.lower() not in ("0", "false", "no", "off", "")
+        elif key in ("paused", "keepwarm"):
+            out[key] = _truthy(val, False)
     return out
 
 
@@ -1172,6 +1321,8 @@ def write_control_file(cwd, updates):
         lines.append("hard=%g" % float(cur["hard"]))
     if "paused" in cur:
         lines.append("paused=%d" % (1 if cur["paused"] else 0))
+    if "keepwarm" in cur:
+        lines.append("keepwarm=%s" % ("on" if cur["keepwarm"] else "off"))
     with open(control_path(cwd), "w") as f:
         f.write("\n".join(lines) + "\n")
     _git_exclude(cwd, AUTOCK_CONF)
@@ -1282,6 +1433,21 @@ class Watcher:
         self.config_root = os.path.dirname(os.path.dirname(sdir))
         self.wf_stage = "none"        # "none" | "warned" | "floored"
         self.wf_stale_logged = False  # log the missing/stale sensor once, not per poll
+        # Keep-warm. `keepwarm` is the LIVE switch: the control file's keepwarm=
+        # key over the launch value (cfg.keepwarm), applied by _refresh_control.
+        self.keepwarm = cfg.keepwarm
+        self.kw_pings = 0             # pings sent in the current idle stretch
+        self.kw_ping_at = 0.0         # when the last of them was typed
+        self.kw_skip_logged = set()   # skip reasons already logged this stretch
+        self.kw_path = None           # transcript / mtime seen at the previous tick,
+        self.kw_mtime = None          # to tell growth from a quiet poll
+        self.kw_tier = None           # (path, size, CacheTier): the tier scan reads
+                                      # the whole transcript, so it is memoised
+        # Stdin, as seen by run_proxy's forwarding loop (note_user_input). A keystroke
+        # restarts the idle stretch; a draft is text typed since the user's last Enter.
+        self.kw_user_at = 0.0
+        self.kw_seen_user_at = 0.0
+        self.kw_draft = False
 
     def _log(self, msg):
         try:
@@ -1473,6 +1639,10 @@ class Watcher:
             hard_in = self.base_hard if self.base_hard_explicit else None
         soft, hard, renudge, _ = clamp_thresholds(ov.get("soft", self.base_soft), hard_in)
         paused = bool(ov.get("paused", False))
+        keepwarm = bool(ov.get("keepwarm", self.cfg.keepwarm))
+        if keepwarm != self.keepwarm:
+            self._log("control update: keep-warm %s" % ("on" if keepwarm else "off"))
+            self.keepwarm = keepwarm
         if (soft != self.cfg.soft or hard != self.cfg.hard
                 or renudge != self.cfg.renudge or paused != self.paused):
             self._log("control update: soft=%.0f%% hard=%.0f%% renudge=%.0f%% paused=%s"
@@ -1499,27 +1669,127 @@ class Watcher:
                 if not (self.state == self.NUDGED and self._confirmed()):
                     self.state = self.NORMAL
 
+    def note_user_input(self, data):
+        """Record bytes the USER sent to the session (called by run_proxy's stdin
+        forwarding; the watcher's own _type goes straight to the pty and never
+        passes here). The keep-warm ping must never be appended to a half-typed
+        message, so any keystroke marks a draft until a chunk ENDS in Enter.
+        Doubt resolves toward 'draft': Esc, Ctrl-U and a deleted line cannot be
+        seen from here, so they keep the draft until the next Enter."""
+        data = _NON_KEYSTROKE.sub(b"", data)
+        if not data:
+            return
+        self.kw_user_at = time.time()
+        self.kw_draft = data[-1:] not in (b"\r", b"\n")
+
+    def _kw_skip(self, reason):
+        """Log a reason the ping is due but blocked, once per idle stretch."""
+        if reason not in self.kw_skip_logged:
+            self.kw_skip_logged.add(reason)
+            self._log("keep-warm skipped: %s" % reason)
+
+    def _kw_reset(self, why):
+        """Start a new idle stretch: the count and the logged skips begin again."""
+        if self.kw_pings:
+            self._log("keep-warm: idle stretch reset by %s after %d ping(s)"
+                      % (why, self.kw_pings))
+        self.kw_pings, self.kw_ping_at = 0, 0.0
+        self.kw_skip_logged = set()
+
+    def _kw_track_activity(self, path, mtime):
+        """Restart the idle stretch on anything that is not the ping's own turn:
+        a keystroke, a new transcript, growth outside the ping's window, or a tool
+        call. The ping's own growth must NOT reset it, or MAX would never bind."""
+        why = None
+        if self.kw_user_at > self.kw_seen_user_at:
+            self.kw_seen_user_at, why = self.kw_user_at, "a keystroke"
+        elif self.kw_path is not None and path != self.kw_path:
+            why = "a new transcript"
+        elif self.kw_mtime is not None and mtime != self.kw_mtime:
+            own = self.kw_ping_at and mtime <= self.kw_ping_at + KEEPWARM_OWN_TURN_S
+            if not own:
+                why = "transcript activity"
+            elif self._worked_since(path, self.kw_ping_at):
+                why = "a tool call after the ping"
+        self.kw_path, self.kw_mtime = path, mtime
+        if why:
+            self._kw_reset(why)
+
+    def _keepwarm_tick(self):
+        """One keep-warm evaluation: type one ping if, and only if, every gate holds.
+
+        Cheap gates first, and the quiet clock is the transcript's own mtime, not
+        last_growth, which stops advancing while paused. Not-yet-due is silent; a
+        ping that is DUE but blocked logs its reason once per idle stretch, so
+        "did it fire, and if not why not" is answerable from the log."""
+        cfg = self.cfg
+        if (not self.keepwarm or self.state != self.NORMAL
+                or not self.tui_ready.is_set() or self.wf_stage == "floored"
+                or session_done_mtime(self.cwd) > self.start_time):
+            return
+        path = active_jsonl(self.sdir, self.start_time)
+        if not path:
+            return
+        try:
+            mtime, size = os.path.getmtime(path), os.path.getsize(path)
+        except OSError:
+            return
+        self._kw_track_activity(path, mtime)
+        # Quiet since the LATER of the last transcript write and the last ping: a
+        # ping typed into a session that never logs it (wedged, or the keystroke
+        # was lost) must not be repeated on every poll until the cap.
+        if time.time() - max(mtime, self.kw_ping_at) < cfg.kw_interval:
+            return
+        if self.paused:
+            return self._kw_skip("auto-checkpoint is paused")
+        if self.last_pct is not None and self.last_pct >= cfg.soft:
+            return self._kw_skip("context is at or above the checkpoint threshold")
+        if self.kw_pings >= cfg.kw_max:
+            return self._kw_skip("cap reached (%d/%d pings) — standing down until "
+                                 "the session is active again" % (self.kw_pings, cfg.kw_max))
+        tokens, _ = latest_usage(path)
+        if tokens is None or tokens < cfg.kw_min_tokens:
+            return self._kw_skip("context is %s tokens, under the %d minimum"
+                                 % (tokens, cfg.kw_min_tokens))
+        if self.kw_draft:
+            return self._kw_skip("unsent keystrokes on stdin since the user's last Enter")
+        if has_pending_tool_use(path):
+            return self._kw_skip("a tool call has no result yet (a permission prompt, "
+                                 "menu or running tool)")
+        if self.kw_tier is None or self.kw_tier[:2] != (path, size):
+            self.kw_tier = (path, size, cache_tier(path))
+        tier = self.kw_tier[2]
+        if tier is not CacheTier.HOUR:
+            return self._kw_skip("cache tier is %s, so a ping every %.0f min cannot "
+                                 "keep it warm" % (tier.value, cfg.kw_interval / 60.0))
+        self.kw_pings += 1
+        self.kw_ping_at = time.time()
+        self._log("keep-warm ping %d/%d at %dk tokens (%s tier)"
+                  % (self.kw_pings, cfg.kw_max, tokens // 1000, tier.value))
+        self._type(KEEPWARM_PING)
+
     def _deliver_say(self):
         """Type the message `ccage-auto --say` queued for this slot, once.
 
         Held while the TUI is not ready, and while a /clear is in flight, where
         it would land in the session being wiped. Not held by pause, which
         governs checkpoints only. A message older than this watcher was queued
-        for an earlier run and is dropped, not typed."""
+        for an earlier run and is dropped, not typed. Returns True when it typed
+        one."""
         if self.state == self.CLEARING or not self.tui_ready.is_set():
-            return
+            return False
         path = say_path(self.cwd)
         taken = path + ".taken"
         try:
             os.rename(path, taken)   # atomic claim: typed at most once
         except OSError:
-            return
+            return False
         try:
             stale = os.path.getmtime(taken) < self.start_time
             with open(taken) as f:
                 text = " ".join(f.read().split())
         except OSError:
-            return
+            return False
         finally:
             try:
                 os.remove(taken)
@@ -1531,6 +1801,8 @@ class Watcher:
         elif text:
             self._log("typing --say message: %s" % text[:80])
             self._type(text)
+            return True
+        return False
 
     def _weekly_warn_msg(self, remaining):
         return (
@@ -2444,6 +2716,10 @@ class Watcher:
                   % (cfg.soft, cfg.hard, cfg.poll,
                      " weekly-floor=%.0f%%" % cfg.weekly_floor
                      if cfg.weekly_floor > 0 else ""))
+        self._log("keep-warm %s: ping after %.0f min quiet, up to %d per idle stretch, "
+                  "from %dk tokens" % ("on" if cfg.keepwarm else "off",
+                                       cfg.kw_interval / 60.0, cfg.kw_max,
+                                       cfg.kw_min_tokens // 1000))
         # Autonomous kickoff: submit the initial task once the TUI is ready (after
         # any bypass-permissions accept). Without this an unattended session idles
         # at an empty prompt and never produces work to manage.
@@ -2545,7 +2821,7 @@ class Watcher:
             # Live thresholds / pause (mid-session /checkpoint-threshold). Read
             # every poll but re-parsed only when the file's mtime changes.
             self._refresh_control()
-            self._deliver_say()
+            said = self._deliver_say()
 
             # A /clear has been typed and we are waiting for it to actually run.
             # This sits ABOVE every occupancy guard on purpose: a just-cleared
@@ -2586,6 +2862,14 @@ class Watcher:
                     self.state = self.NORMAL
                     self.sup_driving = False
                 continue
+
+            # After the CLEARING branch (never ping into a clear) and before the
+            # pause check: pause governs checkpoints, and the tick logs its own
+            # "paused" skip rather than going silent.
+            # (Not on a poll that just typed a --say: that message's own turn is
+            # about to grow the transcript, and a ping typed behind it is noise.)
+            if not said:
+                self._keepwarm_tick()
 
             if self.paused:
                 # Suspended: no NEW nudges/clears. We keep polling so a `resume`
@@ -3105,6 +3389,7 @@ def run_proxy(cfg, cwd, sdir, logpath):
                     # busy-spin; the child runs on under watcher control.
                     stdin_ok = False
                 else:
+                    watcher.note_user_input(data)
                     with write_lock:
                         os.write(master_fd, data)
     finally:
@@ -3139,7 +3424,7 @@ def run_proxy(cfg, cwd, sdir, logpath):
 
 # The four control-plane subcommands /checkpoint-threshold (and a human) use
 # to talk to an already-running watcher.
-CONTROL_ACTIONS = ("--set", "--pause", "--resume", "--reset", "--say")
+CONTROL_ACTIONS = ("--set", "--pause", "--resume", "--reset", "--say", "--keepwarm")
 
 
 def _find_control_action(argv):
@@ -3185,6 +3470,16 @@ def control_command(argv):
     if action == "--resume":
         write_control_file(cwd, {"paused": False})
         print("ccage-auto: auto-checkpoint resumed")
+        return 0
+
+    if action == "--keepwarm":
+        want = argv[1].lower() if len(argv) > 1 else ""
+        if want not in ("on", "off"):
+            sys.stderr.write("[ccage-auto] --keepwarm: want on or off (usage: --keepwarm off)\n")
+            return 2
+        write_control_file(cwd, {"keepwarm": want == "on"})
+        print("ccage-auto: keep-warm %s for this run (overrides the launch setting; "
+              "--reset or the next session start drops it)" % want.upper())
         return 0
 
     if action == "--say":
@@ -3291,12 +3586,19 @@ def print_status(cfg, cwd, config_dir, sdir):
             parts.append("hard=%g%%" % ov["hard"])
         if "paused" in ov:
             parts.append("paused=%s" % ov["paused"])
+        if "keepwarm" in ov:
+            parts.append("keepwarm=%s" % ("on" if ov["keepwarm"] else "off"))
         print("  control file :", control_path(cwd))
         print("  overrides    :", ", ".join(parts))
         print("  effective    : %.0f%% / %.0f%% (re-nudge %.0f%%)%s"
               % (eff_soft, eff_hard, eff_renudge, "  (PAUSED)" if ov.get("paused") else ""))
     else:
         print("  control file : none (using launch thresholds)")
+    kw_live = ov.get("keepwarm", cfg.keepwarm)
+    print("  keep-warm    : %s (ping after %.0f min quiet, max %d per idle stretch, "
+          "from %d tokens)%s" % ("on" if kw_live else "off", cfg.kw_interval / 60.0,
+                                 cfg.kw_max, cfg.kw_min_tokens,
+                                 "  [control file overrides launch]" if "keepwarm" in ov else ""))
     if cfg.weekly_floor > 0:
         remaining, resets, age = read_weekly_state(config_dir)
         if remaining is None:

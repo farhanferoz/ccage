@@ -340,6 +340,14 @@ def append_turn(tokens, text="working"):
                   "cache_read_input_tokens": tokens - half,
                   "cache_creation_input_tokens": 0},
         "content": [{"type": "text", "text": text}]}}
+    # FAKE_CACHE_TIER=1h|5m: record the prompt-cache tier the way a real
+    # transcript does, which is what the keep-warm ping reads to decide whether a
+    # ping can help at all. Unset keeps every other test's rows exactly as before.
+    tier = os.environ.get("FAKE_CACHE_TIER")
+    if tier:
+        obj["message"]["usage"]["cache_creation"] = {
+            "ephemeral_1h_input_tokens": 5000 if tier == "1h" else 0,
+            "ephemeral_5m_input_tokens": 5000 if tier == "5m" else 0}
     with open(jsonl, "a") as f:
         f.write(json.dumps(obj) + "\n")
 
@@ -365,6 +373,12 @@ def write_cleared_transcript():
 # Open at the configured occupancy (default: above the soft+hard line so the
 # watcher engages on poll #1; a low value keeps it idle for kickoff-only tests).
 append_turn(tokens0)
+
+# FAKE_PRINT_READY=1: render the TUI ready-marker so the watcher's tui_ready gate
+# opens, as a real TUI does. Without it nothing is typed unprompted.
+if os.environ.get("FAKE_PRINT_READY"):
+    sys.stdout.write("❯ ")
+    sys.stdout.flush()
 
 cap = open(os.environ["FAKE_CAPTURE"], "ab", buffering=0)
 # Record the autonomous marker the proxy exports, so tests can assert the
@@ -641,7 +655,7 @@ drive() {
         CCAGE_AUTOCK_NO_BYPASS_ACCEPT=1 \
         CCAGE_AUTOCK_EXEC='python3 \"$STUB\"' \
         FAKE_SDIR='$SDIR' FAKE_CAPTURE='$CAP' FAKE_MODE='$1' \
-        '$AUTO' $2 </dev/null"
+        '$AUTO' $2 <\"\${DRIVE_STDIN_FILE:-/dev/null}\""
     # One shared place to catch a FAKE_EXIT_ON_LOG needle that no longer matches
     # the watcher's wording. Without this the only symptom is a slower suite,
     # which is invisible until it is egregious -- and a CI wall-clock ceiling
@@ -1647,6 +1661,84 @@ PY
     ! cap_has "b'ccage circuit-breaker'"                 # observe = alert-only, no pty write
     grep -q '"event": "alert"' "$LEDGER"                 # but the alert IS recorded
     ! grep -q '"event": "nudge"' "$LEDGER"
+}
+
+# --- keep-warm: one typed turn per quiet interval keeps the prompt cache alive ---
+# CCAGE_AUTOCK_KEEPWARM_INTERVAL_S is TEST-ONLY: the same clock as the minutes
+# setting, in seconds and unclamped, so a ping is a few seconds away, not 55
+# minutes. The 150k-token opening turn clears the 100k floor and stays under the
+# 40% soft line (15% of the 1M default window), so only keep-warm acts.
+
+@test "keep-warm: types one ping after the quiet period and logs it" {
+    export FAKE_TOKENS=150000 FAKE_DEADLINE=20 FAKE_CACHE_TIER=1h FAKE_PRINT_READY=1 \
+        CCAGE_AUTOCK_KEEPWARM_INTERVAL_S=3
+    export FAKE_EXIT_ON_LOG='keep-warm ping 1/'   # end on the asserted condition, not the timer
+    drive idle "--poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE FAKE_CACHE_TIER FAKE_PRINT_READY \
+        CCAGE_AUTOCK_KEEPWARM_INTERVAL_S FAKE_EXIT_ON_LOG
+    [ "$status" -eq 0 ]
+    cap_has "b'[keep-warm] Automated cache refresh'"
+    grep -q 'keep-warm ping 1/6 at 150k tokens (1h tier)' "$CAGE/ccage-autock.log"
+    # typed once, not once per poll
+    python3 -c "import sys; sys.exit(0 if open('$CAP','rb').read().count(b'[keep-warm]') == 1 else 1)"
+}
+
+@test "keep-warm: a control file saying keepwarm=off types nothing" {
+    printf 'keepwarm=off\n' > "$REPO/.ccage-autock.conf"
+    export FAKE_TOKENS=150000 FAKE_DEADLINE=9 FAKE_CACHE_TIER=1h FAKE_PRINT_READY=1 \
+        CCAGE_AUTOCK_KEEPWARM_INTERVAL_S=3
+    drive idle "--poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE FAKE_CACHE_TIER FAKE_PRINT_READY \
+        CCAGE_AUTOCK_KEEPWARM_INTERVAL_S
+    [ "$status" -eq 0 ]
+    grep -q 'control update: keep-warm off' "$CAGE/ccage-autock.log"
+    ! cap_has "b'[keep-warm]'"
+}
+
+@test "keep-warm: keystrokes the user has not submitted hold the ping back (stdin is tracked end to end)" {
+    # No trailing newline: a half-typed message. The proxy forwards it to the
+    # session and must remember it, or the ping is appended to the draft.
+    printf 'half a mess' > "$BATS_TEST_TMPDIR/stdin.txt"
+    export DRIVE_STDIN_FILE="$BATS_TEST_TMPDIR/stdin.txt"
+    export FAKE_TOKENS=150000 FAKE_DEADLINE=9 FAKE_CACHE_TIER=1h FAKE_PRINT_READY=1 \
+        CCAGE_AUTOCK_KEEPWARM_INTERVAL_S=3
+    drive idle "--poll 1"
+    unset DRIVE_STDIN_FILE FAKE_TOKENS FAKE_DEADLINE FAKE_CACHE_TIER FAKE_PRINT_READY \
+        CCAGE_AUTOCK_KEEPWARM_INTERVAL_S
+    [ "$status" -eq 0 ]
+    grep -q 'keep-warm skipped: unsent keystrokes' "$CAGE/ccage-autock.log"
+    ! cap_has "b'[keep-warm]'"
+}
+
+@test "keep-warm: a five-minute cache tier is skipped with the reason logged, never pinged" {
+    export FAKE_TOKENS=150000 FAKE_DEADLINE=9 FAKE_CACHE_TIER=5m FAKE_PRINT_READY=1 \
+        CCAGE_AUTOCK_KEEPWARM_INTERVAL_S=3
+    export FAKE_EXIT_ON_LOG='keep-warm skipped: cache tier is 5m'
+    drive idle "--poll 1"
+    unset FAKE_TOKENS FAKE_DEADLINE FAKE_CACHE_TIER FAKE_PRINT_READY \
+        CCAGE_AUTOCK_KEEPWARM_INTERVAL_S FAKE_EXIT_ON_LOG
+    [ "$status" -eq 0 ]
+    ! cap_has "b'[keep-warm]'"
+}
+
+@test "--keepwarm off|on writes the switch, --no-keepwarm is a launch flag, and --status shows both" {
+    run conf --keepwarm off
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"keep-warm OFF"* ]]
+    grep -qx 'keepwarm=off' "$REPO/.ccage-autock.conf"
+    write_transcript 100000
+    run status
+    [[ "$output" == *"keep-warm    : off"* ]]
+    [[ "$output" == *"control file overrides launch"* ]]
+    run conf --keepwarm on
+    grep -qx 'keepwarm=on' "$REPO/.ccage-autock.conf"
+    run conf --keepwarm sideways
+    [ "$status" -eq 2 ]
+    rm -f "$REPO/.ccage-autock.conf"
+    run bash -c "cd '$REPO' && '$AUTO' --no-keepwarm --status"
+    [[ "$output" == *"keep-warm    : off"* ]]
+    run status
+    [[ "$output" == *"keep-warm    : on"* ]]
 }
 
 # ---- Weekly-limit floor (--status) ------------------------------------------

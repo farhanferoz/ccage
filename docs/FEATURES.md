@@ -606,6 +606,45 @@ Full design rationale (sensor verification, decisions locked, non-goals): [`docs
 
 ---
 
+## Keep-warm pings for `ccage-auto` (`CCAGE_AUTOCK_KEEPWARM`) [shipped]
+
+An idle session's prompt cache expires after an hour, and the next turn then pays to rewrite the whole conversation. A keep-warm ping is one minimal typed turn that re-reads the cached conversation at the cache-read price ($0.20 per million tokens on Opus 5.5) and resets the one-hour clock, while a lapsed cache costs a full rewrite at $5 per million or more, so one avoided rebuild pays for about 25 pings. A watched `ccage-auto` session does this by default, with nothing for the model to arm; the manual `/keepwarm` loop below is for sessions that are not under `ccage-auto`.
+
+When the transcript has been quiet for the interval, the watcher types `[keep-warm] Automated cache refresh while you are away — no action needed. Reply with only: ok` and submits it. It does so only when every one of these holds, evaluated each poll:
+
+- keep-warm is on (launch setting, then the live control file), the TUI is ready, the watcher is in its normal state (never mid-nudge, mid-`/clear` or cooling down), the weekly floor does not own the session, and no `.ccage-session-done` marker exists for this run;
+- the latest context is at least `CCAGE_AUTOCK_KEEPWARM_MIN_TOKENS` (below that a rewrite costs cents) and below the soft checkpoint threshold;
+- the cache tier is the 1-hour one, using the same rule as `share/skills/keepwarm/keepwarm-calc.sh probe` (a 5-minute cache cannot be kept warm by a 55-minute ping, and an unknown tier is not guessed at);
+- fewer than `CCAGE_AUTOCK_KEEPWARM_MAX` pings have been sent in this idle stretch;
+- **no dialog is pending.** The last assistant message in the transcript must have no `tool_use` without a matching `tool_result`. A permission prompt, an `AskUserQuestion` menu and a plan approval all look exactly like that, and typing text plus Enter into one would choose an option on the user's behalf. The check reads the transcript, never the screen, and fails closed when the transcript cannot be read;
+- **no unsent draft.** The watcher forwards the user's stdin to the session, and any keystroke after the user's last Enter counts as a half-typed message that a ping must never be appended to. Terminal focus and mouse reports are not keystrokes. Where it cannot tell (Esc, Ctrl-U, a deleted line), it assumes a draft.
+
+An idle stretch ends, and the counter and the logged skip reasons start over, on any user keystroke, a new transcript, transcript growth that is not the ping's own turn (anything starting more than two minutes after the last ping), or a tool call. The ping's own turn does not reset it, which is what lets the cap bind.
+
+### Config
+
+| Var / flag | Default | Effect |
+|---|---|---|
+| `CCAGE_AUTOCK_KEEPWARM` / `--no-keepwarm` | on | `0`, `false`, `off` or `no` turns it off for the launch. |
+| `CCAGE_AUTOCK_KEEPWARM_INTERVAL` | `55` | Minutes of transcript quiet before a ping. Clamped to `[1, 59]` with a warning, since an interval at or past the hour could never refresh the cache. |
+| `CCAGE_AUTOCK_KEEPWARM_MAX` | `6` | Pings per idle stretch. Clamped to `[1, 24]`; past about 24 the pings cost more than the rewrite they avoid. |
+| `CCAGE_AUTOCK_KEEPWARM_MIN_TOKENS` | `100000` | No ping below this context size. |
+| `ccage-auto --keepwarm off` / `on` | — | Live switch for a running session, from another terminal in the same project dir (or `/keepwarm off` / `on` inside it). Written as `keepwarm=off\|on` in the control file `.ccage-autock.conf`, so it is per project dir, survives the watcher's own `/clear` cycles, and is dropped at the next real session start or by `--reset`. `on` overrides a launch with `--no-keepwarm`. |
+
+### Observability
+
+Every ping is logged to `<cage>/ccage-autock.log` as `keep-warm ping 2/6 at 412k tokens (1h tier)`. A ping that is due but blocked logs its reason once per idle stretch (`keep-warm skipped: …`: tier, token floor, cap, pending tool call, unsent keystrokes, paused). A poll where the quiet interval simply has not elapsed logs nothing. The watcher's start line and `ccage-auto --status` show the settings in force and any control-file override.
+
+### With the idle supervisor
+
+The two coexist without interfering. The supervisor's quiet window (300 s by default) is far shorter than the ping interval, so its poke, escalation and circuit-open all happen long before the first ping. A ping is a typed row and a text-only reply and makes no tool call, so the supervisor's "real work" test (`_worked_since`) ignores it: it neither resets the supervisor's episode nor re-opens a circuit that has closed. What a ping does do is restart the supervisor's quiet clock for one window after each ping, which changes nothing once the circuit is open.
+
+### Opt-out
+
+`--no-keepwarm` or `CCAGE_AUTOCK_KEEPWARM=0` at launch; `ccage-auto --keepwarm off` or `/keepwarm off` mid-session.
+
+---
+
 ## `/keepwarm` — bounded cache keep-warm loop [shipped — Phase 8]
 
 Skill at `share/skills/keepwarm/` (installed to the master skills dir; reaches every
