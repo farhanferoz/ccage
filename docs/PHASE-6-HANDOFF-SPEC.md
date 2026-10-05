@@ -4,6 +4,11 @@ Workflow: **Sonnet implements each subphase TDD-style; Opus reviews when subphas
 
 ## Why
 
+> **Superseded 2026-10-05.** Measured on Claude Code 2.1.289: an interactive `-r` or `-c`
+> two minutes after the session read the whole prior prefix from cache (Opus 5.5, Sonnet 5.5,
+> Haiku 4.5). The "never preserved" claim below held for the builds it cites, not for current
+> ones; the resume prompt now prices a warm resume as a cache read. See docs/FEATURES.md.
+
 `claude --resume` (`-r`) and `claude --continue` (`-c`) trigger a **structural** prompt-cache miss in Claude Code, not a TTL-based one: `processSessionStartHooks('resume')` and `reorderAttachmentsForAPI` shuffle bytes at the start of `messages`, breaking cache at offset 0 every time. Cache continuity is **never preserved** across resume — verified by GitHub issues #42309, #43657, #44045, #51764 across versions 2.1.69–2.1.138, and by empirical inspection of session JSONLs on this machine (2-minute gap still produced a 36K-token cache-write spike).
 
 Users pay the cache-write tax on every resume. On a 100K-token Opus session: ~$1.88 per resume. There is no Claude-Code-side knob to fix this; cache TTL is also not user-configurable (no settings.json key, env var, or CLI flag exposes the 1h-extended ttl).

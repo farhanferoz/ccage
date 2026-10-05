@@ -165,7 +165,7 @@ PY
 
 ## Avoiding `-r`/`-c`'s cache rewrite cost
 
-Claude Code's `--resume` / `--continue` reliably cache-misses the message prefix on the first turn after resume — a structural request difference, not TTL expiry (isolated by the 1-hour-TTL controlled experiment in GitHub issue #51764; see also #43657 and #44045; one narrow cause was fixed in Claude Code v2.1.90, the rest remain as of 2.1.13x). On a long Opus session that's $0.50–$2 of cache-write tokens per resume, even seconds after exit — treat ccage's number as a worst-case bound.
+Whether a `--resume` / `--continue` is cheap turns on whether the session's prompt cache is still alive. Inside the cache lifetime the resume READS the prior conversation from cache — measured 2026-10-05 on Claude Code 2.1.289 for Opus 5.5, Sonnet 5.5 and Haiku 4.5, two minutes after the session, with both `-r` and `-c`. Once the cache has expired, the whole prefix is rewritten at the cache-write rate: on a long Opus session that is real money. ccage's prompt says which case you are in and prices it. (Older Claude Code builds cache-missed on every resume regardless — GitHub #51764, #43657, #44045 — which is what this section used to warn about.)
 
 > **Separate from the resume bug:** idle gaps longer than the cache TTL also trigger a full rewrite. Claude Code picks the TTL by auth method — Claude subscriptions get the 1-hour tier automatically; API key / Bedrock / Vertex / Foundry default to 5 minutes (opt in to 1 hour with `ENABLE_PROMPT_CACHING_1H=1`, force 5 minutes with `FORCE_PROMPT_CACHING_5M=1`; both upstream Claude Code variables, not ccage's). Subagents always use the 5-minute tier.
 >

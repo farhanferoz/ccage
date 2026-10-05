@@ -728,19 +728,17 @@ SIGNORE
 # ============================================================================
 # Resume cost interception (Phase 6b)
 #
-# claude -r / claude -c trigger a structural cache miss on the message prefix
-# even inside the TTL window (Claude Code's processSessionStartHooks +
-# reorderAttachmentsForAPI shuffle bytes at messages[0]; isolated by the
-# 1-hour-TTL controlled experiment in anthropics/claude-code #51764; see also
-# #43657, #44045 — one narrow cause was fixed in CC v2.1.90, the rest remain).
-# A cold resume rewrites the accumulated prefix at the cache-write rate
-# (1.25× input on the 5m tier, 2× on the 1h tier). On a long Opus session
-# that's real money — $0.50 to $2+ per resume. Treat the estimate as a
-# worst-case bound.
+# claude -r / claude -c cost turns on whether the session's prompt cache is
+# still alive. Older Claude Code builds cache-missed on EVERY resume (#51764,
+# #43657, #44045). Measured 2026-10-05 on 2.1.289: an interactive -r or -c two
+# minutes after the session READ the whole prior prefix from cache (Opus 5.5,
+# Sonnet 5.5, Haiku 4.5). So a warm resume costs a cache read; only an expired
+# cache costs the rewrite (2x input on the 1-hour tier ccage sessions use).
 #
 # The interceptor:
 #   1. Detects -c / --continue / -r <uuid> / --resume <uuid> in args
-#   2. Estimates rewrite cost from the session JSONL's peak cache_read
+#   2. Decides warm/cold from the last timestamp and the session's cache tier,
+#      and prices the prefix as a cache read (warm) or a rewrite (cold)
 #   3. Prompts the user [r]esume / [h]andoff / [c]ancel
 #
 # Gates: CCAGE_DISABLE=1, CCAGE_NO_RESUME_PROMPT=1, non-tty stdin, or
@@ -779,6 +777,21 @@ _ccage_resume_price_input() {
 
 _ccage_resume_price_cache_write() {
     awk -v i="$(_ccage_resume_price_input "$1")" 'BEGIN { printf "%g\n", i * 2.00 }'
+}
+
+# Cache READS are not a flat 0.1x: 0.05x on Opus 5.5, 0.025x on Fable / Mythos
+# 5.1 (pricing page, 2026-10-05). Mirrors _ccage_handoff_cache_read_mult in
+# share/ccage-handoff.sh; a test compares the two tables model by model.
+_ccage_resume_cache_read_mult() {
+    case "$1" in
+        claude-fable-5-1*|claude-mythos-5-1*) echo 0.025 ;;
+        claude-opus-5-5*)                     echo 0.05 ;;
+        *)                                    echo 0.10 ;;
+    esac
+}
+_ccage_resume_price_cache_read() {
+    awk -v i="$(_ccage_resume_price_input "$1")" -v m="$(_ccage_resume_cache_read_mult "$1")" \
+        'BEGIN { printf "%g\n", i * m }'
 }
 
 # Pure decision function — tested directly. r/R/<enter> → resume,
@@ -821,14 +834,15 @@ _ccage_is_resume_invocation() {
 # Single-pass session summary — folds peak cache_read, last model, session id,
 # and last timestamp out of one streaming jq invocation. Replaces 4-6 jq
 # slurps on the interceptor hot path.
-# Echoes tab-separated: peak<TAB>model<TAB>session_id<TAB>last_ts.
-# Empty / missing file → "0\tunknown\t\t".
+# Echoes tab-separated: peak<TAB>model<TAB>session_id<TAB>last_ts<TAB>tier, where
+# tier is the cache lifetime the session last WROTE at (1h | 5m | unknown).
+# Empty / missing file → "0\tunknown\t\t\tunknown".
 _ccage_resume_session_summary() {
     local jsonl="$1"
-    [ -f "$jsonl" ] || { printf '0\tunknown\t\t\n'; return 0; }
+    [ -f "$jsonl" ] || { printf '0\tunknown\t\t\tunknown\n'; return 0; }
     jq -Rrn '
         reduce (inputs | fromjson? // empty) as $r (
-            {peak: 0, model: "unknown", session_id: "", last_ts: ""};
+            {peak: 0, model: "unknown", session_id: "", last_ts: "", tier: "unknown"};
             ( if .session_id == "" and ($r.sessionId // null) != null
               then .session_id = $r.sessionId else . end )
             | ( if ($r.timestamp // null) != null
@@ -840,16 +854,32 @@ _ccage_resume_session_summary() {
                   | ( ($r.message.usage.cache_read_input_tokens // 0) as $cur
                       | if $cur > 1000 and $cur > .peak
                         then .peak = $cur else . end )
+                  | ( ($r.message.usage.cache_creation // {}) as $cc
+                      | if ($cc.ephemeral_1h_input_tokens // 0) > 0 then .tier = "1h"
+                        elif ($cc.ephemeral_5m_input_tokens // 0) > 0 then .tier = "5m"
+                        else . end )
                 else . end )
         )
-        | "\(.peak)\t\(.model)\t\(.session_id)\t\(.last_ts)"
-    ' "$jsonl" 2>/dev/null || printf '0\tunknown\t\t\n'
+        | "\(.peak)\t\(.model)\t\(.session_id)\t\(.last_ts)\t\(.tier)"
+    ' "$jsonl" 2>/dev/null || printf '0\tunknown\t\t\tunknown\n'
 }
 
-# Pure shell + awk: given (peak_cache_read, model), compute the cost range.
-# Echoes "<lo>\t<hi>\t<rewrite_tokens>" with the ±25% band.
+# Pure shell + awk: given (peak_cache_read, model[, warm|cold]), compute the
+# cost range. Echoes "<lo>\t<hi>\t<tokens>" with the ±25% band.
+#   cold (default): the cache has expired, so the prefix is REWRITTEN at the
+#                   1-hour write rate (minus the ~19K tools+system prefix).
+#   warm:           the cache is still alive, so the prefix is READ from it —
+#                   measured 2026-10-05 (see _ccage_resume_cache_state).
 _ccage_resume_compute_cost() {
-    local peak="$1" model="$2"
+    local peak="$1" model="$2" state="${3:-cold}"
+    if [ "$state" = warm ]; then
+        [ "$peak" -gt 0 ] 2>/dev/null || { printf '0.00\t0.00\t0\n'; return 0; }
+        awk -v r="$peak" -v p="$(_ccage_resume_price_cache_read "$model")" 'BEGIN {
+            mid = r / 1000000 * p
+            printf "%.2f\t%.2f\t%d\n", mid * 0.75, mid * 1.25, r
+        }'
+        return 0
+    fi
     local rewrite=$((peak - 19000))     # subtract ~19K tools+system prefix
     [ "$rewrite" -lt 0 ] && rewrite=0
     if [ "$rewrite" -eq 0 ]; then
@@ -870,11 +900,12 @@ _ccage_resume_compute_cost() {
 _ccage_resume_estimate_cost_usd() {
     local jsonl="$1"
     [ -f "$jsonl" ] || { printf '0.00\t0.00\tunknown\t0\n'; return 0; }
-    local peak model
-    IFS=$'\t' read -r peak model _ _ < <(_ccage_resume_session_summary "$jsonl")
+    local peak model last_ts tier
+    IFS=$'\t' read -r peak model _ last_ts tier < <(_ccage_resume_session_summary "$jsonl")
     : "${peak:=0}"; : "${model:=unknown}"
     local lo hi rewrite
-    IFS=$'\t' read -r lo hi rewrite < <(_ccage_resume_compute_cost "$peak" "$model")
+    IFS=$'\t' read -r lo hi rewrite < <(_ccage_resume_compute_cost "$peak" "$model" \
+        "$(_ccage_resume_cache_state "$last_ts" "${tier:-unknown}")")
     printf '%s\t%s\t%s\t%s\n' "$lo" "$hi" "$model" "$rewrite"
 }
 
@@ -890,15 +921,41 @@ _ccage_resume_should_prompt() {
     awk -v hi="$hi" -v t="$threshold" 'BEGIN { exit (hi >= t) ? 0 : 1 }'
 }
 
+# Seconds since an ISO 8601 UTC timestamp; empty when it cannot be parsed.
+# Optional $2 = "now" epoch (tests pin it).
+_ccage_resume_age_sec() {
+    local ts="$1" now="${2:-}" last_epoch
+    [ -n "$ts" ] || return 0
+    last_epoch=$(date -u -d "$ts" +%s 2>/dev/null \
+        || date -u -j -f '%Y-%m-%dT%H:%M:%S' "${ts%.*}" +%s 2>/dev/null || echo "")
+    [ -n "$last_epoch" ] || return 0
+    echo $(( ${now:-$(date +%s)} - last_epoch ))
+}
+
+# warm | cold: is the session's prompt cache still alive? Measured 2026-10-05 on
+# Claude Code 2.1.289: an interactive `claude -r` two minutes after the session
+# READ the whole prior prefix from cache on Opus 5.5, Sonnet 5.5 and Haiku 4.5 —
+# the old "resume always misses" claim (#51764) no longer held. So the cost
+# turns on the cache lifetime alone: 1 hour or 5 minutes, as the session last
+# wrote it. An unknown tier is held to 5 minutes — a wrong "warm" would hide a
+# real bill, a wrong "cold" only over-warns.
+# Args: last_ts tier [now_epoch]
+_ccage_resume_cache_state() {
+    local sec ttl=300
+    sec=$(_ccage_resume_age_sec "$1" "${3:-}")
+    [ "$2" = 1h ] && ttl=3600
+    if [ -n "$sec" ] && [ "$sec" -ge 0 ] && [ "$sec" -lt "$ttl" ]; then
+        echo warm
+    else
+        echo cold
+    fi
+}
+
 # Format a session-age string from an ISO 8601 timestamp.
 _ccage_resume_age_human() {
-    local ts="$1"
-    [ -n "$ts" ] || { echo "unknown"; return; }
-    local last_epoch now_epoch sec
-    last_epoch=$(date -d "$ts" +%s 2>/dev/null || date -j -f '%Y-%m-%dT%H:%M:%S' "${ts%.*}" +%s 2>/dev/null || echo "")
-    [ -n "$last_epoch" ] || { echo "unknown"; return; }
-    now_epoch=$(date +%s)
-    sec=$((now_epoch - last_epoch))
+    local sec
+    sec=$(_ccage_resume_age_sec "$1")
+    [ -n "$sec" ] || { echo "unknown"; return; }
     if [ "$sec" -lt 60 ]; then echo "${sec}s ago"
     elif [ "$sec" -lt 3600 ]; then echo "$((sec / 60))m ago"
     elif [ "$sec" -lt 86400 ]; then echo "$((sec / 3600))h $((sec % 3600 / 60))m ago"
@@ -992,16 +1049,20 @@ _ccage_intercept_resume() {
         return 0
     fi
 
-    # ONE jq pass over the JSONL — peak, model, session id, last timestamp.
-    local peak model session_id last_ts
-    IFS=$'\t' read -r peak model session_id last_ts \
+    # ONE jq pass over the JSONL — peak, model, session id, last timestamp, tier.
+    local peak model session_id last_ts tier
+    IFS=$'\t' read -r peak model session_id last_ts tier \
         < <(_ccage_resume_session_summary "$jsonl")
-    : "${peak:=0}"; : "${model:=unknown}"; : "${session_id:=unknown}"
+    : "${peak:=0}"; : "${model:=unknown}"; : "${session_id:=unknown}"; : "${tier:=unknown}"
+
+    # Warm cache → the resume READS the prefix; expired → it rewrites it.
+    local state
+    state=$(_ccage_resume_cache_state "$last_ts" "$tier")
 
     # Pure-shell cost computation from the cached peak.
     local lo hi rewrite
     IFS=$'\t' read -r lo hi rewrite \
-        < <(_ccage_resume_compute_cost "$peak" "$model")
+        < <(_ccage_resume_compute_cost "$peak" "$model" "$state")
 
     # Threshold gate (inline — same logic as _ccage_resume_should_prompt).
     local threshold="${CCAGE_RESUME_PROMPT_MIN_USD:-0.25}"
@@ -1016,9 +1077,14 @@ _ccage_intercept_resume() {
 
     {
         printf 'ccage: %s session %s · %s · %s\n' "$verb" "${session_id:0:8}" "$age" "$model"
-        printf '       Resume will rewrite ~%dK tokens (message prefix). Estimated cost: $%s–$%s.\n' \
-            $((rewrite / 1000)) "$lo" "$hi"
-        printf '       (Resume cache misses are structural, not TTL — see GitHub #51764, #43657. Worst-case estimate.)\n'
+        if [ "$state" = warm ]; then
+            printf '       Cache still warm (%s tier): resume reads ~%dK tokens from cache. Estimated cost: $%s–$%s.\n' \
+                "$tier" $((rewrite / 1000)) "$lo" "$hi"
+        else
+            printf '       Cache expired (%s tier): resume will rewrite ~%dK tokens. Estimated cost: $%s–$%s.\n' \
+                "$tier" $((rewrite / 1000)) "$lo" "$hi"
+            printf '       (A resume inside the cache lifetime reads from cache instead — measured 2026-10-05.)\n'
+        fi
         printf '       [r]esume / [h]andoff / [c]ancel? '
     } >&2
 

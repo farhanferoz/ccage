@@ -170,3 +170,59 @@ locate_in_proj() {
     [ "$(_ccage_resume_price_input claude-opus-5)" = 5 ]
     [ "$(_ccage_resume_price_input 'claude-opus-5[1m]')" = 5 ]
 }
+
+# ===== warm vs cold resume (measured 2026-10-05, Claude Code 2.1.289) =====
+# An interactive session resumed with `-r` 2 min after it ran READ the whole
+# prior prefix from cache on Opus 5.5 (94,770 read / 341 written), Sonnet 5.5
+# (68,391 / 454) and Haiku 4.5. So within the cache lifetime a resume costs a cache
+# READ, and only an expired cache costs the full rewrite.
+
+@test "cache state: warm inside the session's cache lifetime, cold past it" {
+    local now=1791200000 ts
+    ts() { date -u -d "@$((now - $1))" +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null \
+        || date -u -r "$((now - $1))" +%Y-%m-%dT%H:%M:%S.000Z; }
+    [ "$(_ccage_resume_cache_state "$(ts 600)"  1h "$now")" = warm ]   # 10 min, 1h tier
+    [ "$(_ccage_resume_cache_state "$(ts 3660)" 1h "$now")" = cold ]   # 61 min
+    [ "$(_ccage_resume_cache_state "$(ts 240)"  5m "$now")" = warm ]   # 4 min, 5m tier
+    [ "$(_ccage_resume_cache_state "$(ts 360)"  5m "$now")" = cold ]   # 6 min
+    # Unknown tier is held to the SHORT lifetime: a wrong "warm" hides a real bill.
+    [ "$(_ccage_resume_cache_state "$(ts 240)"  unknown "$now")" = warm ]
+    [ "$(_ccage_resume_cache_state "$(ts 600)"  unknown "$now")" = cold ]
+    [ "$(_ccage_resume_cache_state "" 1h "$now")" = cold ]             # no timestamp
+}
+
+@test "cache read price follows the per-model multiplier (mirrors ccage-handoff.sh)" {
+    [ "$(_ccage_resume_price_cache_read claude-opus-5-5)" = 0.2 ]     # 4 x 0.05
+    [ "$(_ccage_resume_price_cache_read claude-sonnet-5-5)" = 0.2 ]   # 2 x 0.10
+    [ "$(_ccage_resume_price_cache_read claude-opus-4-8)" = 0.5 ]     # 5 x 0.10
+    [ "$(_ccage_resume_price_cache_read claude-fable-5-1)" = 0.25 ]   # 10 x 0.025
+    [ "$(_ccage_resume_price_cache_read claude-haiku-4-5)" = 0.1 ]
+    # The same answers as the handoff table, so the two cannot drift silently.
+    source "$BATS_TEST_DIRNAME/../share/ccage-handoff.sh"
+    local m
+    for m in claude-opus-5-5 claude-sonnet-5-5 claude-opus-4-8 claude-fable-5-1 claude-haiku-4-5; do
+        [ "$(_ccage_resume_price_cache_read "$m")" = "$(_ccage_handoff_price_cache_read "$m")" ]
+    done
+}
+
+@test "cost: a warm resume is priced as a read of the prefix, a cold one as a rewrite" {
+    run _ccage_resume_compute_cost 1000000 claude-opus-5-5 warm
+    [ "$output" = "$(printf '0.15\t0.25\t1000000')" ]                 # 1M x $0.20/M
+    run _ccage_resume_compute_cost 1019000 claude-opus-5-5 cold
+    [ "$output" = "$(printf '6.00\t10.00\t1000000')" ]                # (1.019M-19k) x $8/M
+    run _ccage_resume_compute_cost 1019000 claude-opus-5-5            # default = cold
+    [ "$output" = "$(printf '6.00\t10.00\t1000000')" ]
+}
+
+@test "summary reports the cache tier the session actually used" {
+    local f="$BATS_TEST_TMPDIR/tier.jsonl"
+    printf '%s\n' \
+      '{"type":"assistant","sessionId":"s1","timestamp":"2026-10-05T13:00:00.000Z","message":{"model":"claude-opus-5-5","usage":{"cache_read_input_tokens":50000,"cache_creation":{"ephemeral_1h_input_tokens":900,"ephemeral_5m_input_tokens":0}}}}' > "$f"
+    IFS=$'\t' read -r _ _ _ _ tier < <(_ccage_resume_session_summary "$f")
+    [ "$tier" = 1h ]
+    sed 's/"ephemeral_1h_input_tokens":900,"ephemeral_5m_input_tokens":0/"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":900/' "$f" > "$f.5m"
+    IFS=$'\t' read -r _ _ _ _ tier < <(_ccage_resume_session_summary "$f.5m")
+    [ "$tier" = 5m ]
+    IFS=$'\t' read -r _ _ _ _ tier < <(_ccage_resume_session_summary "$FIXTURES/minimal.jsonl")
+    [ "$tier" = unknown ]
+}

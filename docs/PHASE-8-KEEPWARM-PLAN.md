@@ -36,6 +36,8 @@ TTL, until a ping cap is hit, the user returns, or the user says stop.
 - **No external request replay** (byte-identical-prefix problem; resume-bug lesson).
 - **Not a resume fix** — a warm cache does not survive `claude -r` (structural miss,
   GitHub #51764). Keep-warm only helps when returning to the *same live session*.
+  *(Superseded 2026-10-05: measured on Claude Code 2.1.289, a resume inside the cache
+  lifetime reads the whole prefix from cache. See docs/FEATURES.md, resume section.)*
 - **No subagent coverage** (always 5m tier; small caches).
 - **No auto-arming.** Keep-warm fires real turns and consumes plan quota; it must be a
   deliberate per-session act, consistent with ccage's "auto-clear is a non-goal"

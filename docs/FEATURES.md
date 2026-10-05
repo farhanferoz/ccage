@@ -99,7 +99,12 @@ Idempotency is the contract: hooks must only add missing keys, never overwrite e
 
 ## Resume cost interception (`-r` / `-c`) [shipped]
 
-The `claude()` shell function intercepts resume invocations to surface the cache-rewrite cost before launch. Motivation: Claude Code's `--resume` / `--continue` reliably cache-miss the message prefix even inside the TTL window (structural diff at `messages[0]` — isolated by the 1-hour-TTL controlled experiment in GitHub #51764; see also #43657, #44045; one narrow cause fixed in Claude Code v2.1.90). On long sessions this is real money ($0.50–$2/resume on Opus).
+The `claude()` shell function intercepts resume invocations to surface what the resume will cost before launch. Whether it is cheap or expensive turns on one thing: **is the session's prompt cache still alive?**
+
+- **Warm** (last activity inside the cache lifetime — 1 hour on the 1-hour tier ccage sessions use, 5 minutes otherwise): the resume READS the prior conversation from cache. Measured 2026-10-05 on Claude Code 2.1.289: an interactive session, exited, then resumed interactively with `-r` or `-c` two minutes later — Opus 5.5 read 94,770 tokens from cache and wrote 341, Sonnet 5.5 read 68,391 and wrote 454, Haiku 4.5 the same: the whole prior conversation was a cache hit. (A session started headless with `-p` and resumed interactively also hit, writing ~17k fresh for the interactive session's extra start-up context.)
+- **Cold** (cache expired): the prefix is rewritten at the cache-write rate. On a long session this is real money.
+
+History: older Claude Code builds cache-missed on every resume, even inside the lifetime (GitHub #51764, #43657, #44045; one cause fixed in v2.1.90). The prompt used to say so unconditionally; that is no longer what the builds here do, so the prompt now distinguishes the two cases.
 
 ### Detection
 
@@ -114,8 +119,16 @@ The `claude()` shell function intercepts resume invocations to surface the cache
 
 ```
 ccage: Continuing most-recent session 4f616b4b · 8h ago · claude-opus-4-7
-       Resume will rewrite ~70K tokens (message prefix). Estimated cost: $1.10–$1.65.
-       (Resume cache misses are structural, not TTL — see GitHub #51764, #43657. Worst-case estimate.)
+       Cache expired (1h tier): resume will rewrite ~70K tokens. Estimated cost: $0.53–$0.88.
+       (A resume inside the cache lifetime reads from cache instead — measured 2026-10-05.)
+       [r]esume / [h]andoff / [c]ancel?
+```
+
+A warm resume of a large session can still clear the threshold, and then reads:
+
+```
+ccage: Resuming session 4f616b4b · 12m ago · claude-opus-5-5
+       Cache still warm (1h tier): resume reads ~900K tokens from cache. Estimated cost: $0.14–$0.23.
        [r]esume / [h]andoff / [c]ancel?
 ```
 
@@ -348,12 +361,20 @@ When you invoke `claude -c` (continue) or `claude -r <session-id>` (resume), the
 
 ```
 ccage: Continuing most-recent session 4f616b4b · 4h 12m ago · claude-opus-4-7
-       Resume will rewrite ~70K tokens (message prefix). Estimated cost: $1.10–$1.65.
-       (Resume cache misses are structural, not TTL — see GitHub #51764, #43657. Worst-case estimate.)
+       Cache expired (1h tier): resume will rewrite ~70K tokens. Estimated cost: $0.53–$0.88.
+       (A resume inside the cache lifetime reads from cache instead — measured 2026-10-05.)
        [r]esume / [h]andoff / [c]ancel?
 ```
 
-Cost is a range (±25% empirical uncertainty band), computed as `peak_cache_read − ~19K tools+system prefix`, times the model's cache-write rate from the inline pricing table. The table uses the 5-minute-tier write rate (1.25× input); on the 1-hour tier (the default for Claude-subscription auth) writes cost 2×, so true worst-case is ~1.6× the shown range. For subscription auth the dollar figure is notional — usage is plan-included — but still tracks quota weight.
+A warm resume of a large session can still clear the threshold, and then reads:
+
+```
+ccage: Resuming session 4f616b4b · 12m ago · claude-opus-5-5
+       Cache still warm (1h tier): resume reads ~900K tokens from cache. Estimated cost: $0.14–$0.23.
+       [r]esume / [h]andoff / [c]ancel?
+```
+
+Cost is a range (±25% empirical uncertainty band). **Cold:** `peak_cache_read − ~19K tools+system prefix`, times the 1-hour-tier cache-write rate (2× input — ccage sessions write at the 1-hour tier, measured). **Warm:** `peak_cache_read` times the model's cache-READ rate (0.1× input; 0.05× on Opus 5.5, 0.025× on Fable / Mythos 5.1). Warm vs cold comes from the last transcript timestamp against the cache lifetime the session last wrote at (`1h` or `5m`; unknown is held to 5 minutes, so a doubtful case warns). For subscription auth the dollar figure is notional — usage is plan-included — but still tracks quota weight.
 
 ### Cache lifetime (upstream Claude Code variables — ccage does not set these)
 
@@ -377,7 +398,8 @@ Claude Code picks the prompt-cache TTL by auth method: **Claude subscriptions ge
 - Cost is an estimate. The ±25% band reflects empirical precision from sampled JSONLs; rare sessions may fall outside.
 - 1M-context-tier sessions use a different rate that this table doesn't track — estimates can be ~2× low on those.
 - Pricing data is hardcoded inline in `share/claude-isolation.sh` (mirrored in `share/ccage-handoff.sh`). The `# updated:` header notes the last refresh date.
-- If Anthropic ever fixes the structural resume cache miss, the prompt becomes noise — silence it with `CCAGE_NO_RESUME_PROMPT=1`. A future `ccage doctor` check is planned to auto-detect and hint at this.
+- A warm resume usually prices below the threshold, so in practice the prompt appears when the cache has expired — which is when the handoff alternative is worth considering. Silence it entirely with `CCAGE_NO_RESUME_PROMPT=1`.
+- Warm/cold is decided from the clock, not observed: a cache can also be evicted early. Treat a warm estimate as the expected case, not a guarantee.
 
 ---
 
@@ -457,6 +479,7 @@ Claude Code caps **every** hook injection path — plain stdout, JSON `additiona
 Three properties are worth knowing:
 
 - **Parts arrive OUT OF ORDER.** SessionStart hooks run concurrently and their outputs are injected in *completion* order, not registration order — measured 2026-08-20 against a real session: six hooks registered 1..6 but made to finish 6..1 were delivered 6,5,4,3,2,1, whether registered as six entries or as one entry with six commands. So every part carries its own framing and an explicit `part k/n` label, and the model reassembles by number. No hook can promise to precede another.
+- **A document can bound its own delivery.** A line `<!-- ccage: max-chars=N -->` in a session doc's first 20 lines (any text may follow the number) caps delivery at its first `N` chars, and the last delivered part says how much was left on disk and to `grep` it. For a register with a complete one-line-per-decision index on top, the head is the useful part. Measured 2026-10-05 on a 615 KB register: 56 parts delivered ~327,000 chars (~136k tokens) at every session start and still dropped 48% from the end; `max-chars=60000` delivers ~62,000 chars (~26k tokens) including the whole index. Declared in the file, so it applies on every machine and cage; without the line, delivery is unchanged.
 - **`n` is capacity, not a fit.** It is seeded once (`CCAGE_DOC_CHUNKS`, default 12 → ~102,000 chars per doc) and never reconciled. Long lines shrink that ceiling: a part is built from whole lines and so is sized `CCAGE_DOC_CHUNK_CHARS - longest_line - overhead`, which takes a register of 1,900-char lines from ~102,000 down to ~74,000. A single line longer than one part cannot be made to fit at all — it lands whole, takes that part past the hook cap, and says so in a warning emitted *before* the content so it survives the truncation. Wrapping the line is the fix. The *script* decides at run time how many parts the current file actually needs; parts past the end of a short document cost one `stat` and emit nothing. Files may grow and shrink freely with no re-seeding.
 - **Nothing is dropped silently.** A document that outgrows capacity is truncated at the end with a loud warning on the last delivered part, naming exactly how many characters were lost. The RESUME line cap (2× `CCAGE_RESUME_BUDGET_LINES`) behaves the same way. Every invocation — including each no-op — appends one line to `$CLAUDE_CONFIG_DIR/session-doc-chunk.log`, so "did all 9 parts arrive?" is a one-line grep.
 
@@ -510,7 +533,7 @@ The `SessionStart` block is **rebuilt**, not appended to: every ccage-owned comm
 | `CCAGE_NO_INTERACTIVE_RESOLVE` | unset | Skip `ccage-auto`'s interactive-shell probe for the cage dir. The probe sources the user's whole `.bashrc` — measured at 1.36 s of a 1.75 s `--status`, i.e. 93% of the runtime. The fallback still sources `claude-isolation.sh` **and** your `claude-overrides.sh`, so a `_ccage_config_dir_override` is honoured either way; what it gives up is a `_ccage_config_dir_for` redefined inline in raw `.bashrc`, bypassing the companion-file convention. Set it for scripted or high-volume callers. |
 | `CCAGE_DOC_CHUNKS` | `12` | Parts registered per session doc (capacity = parts x `CCAGE_DOC_CHUNK_CHARS`). Changing it rebuilds the block. |
 | `CCAGE_DOC_CHUNK_CHARS` | `8500` | Characters per delivered part. The hard cap is 10,000; the headroom covers awk's byte-vs-character counting across platforms. |
-| `CCAGE_DECISIONS_BUDGET_BYTES` | `48000` | `DECISIONS.md` size past which the session start nags to retire spent entries. Advisory — nothing is dropped. |
+| `CCAGE_DECISIONS_BUDGET_BYTES` | `48000` | `DECISIONS.md` size past which the session start prints a NOTE with the remedies (an index on top plus a `max-chars` header line, or retiring spent entries). Advisory. A register that carries a `max-chars` line is bounded by design and is not nagged. |
 | `CCAGE_NO_BUDGET_HOOK` | unset | Skip seeding the PostToolUse budget hook. |
 | `CCAGE_RESUME_BUDGET_LINES` | `250` | Line budget before the auto-read hook / doctor flag a bloated RESUME. |
 | `CCAGE_RESUME_BUDGET_BYTES` | `14000` | Byte budget (alongside the line/block budgets) — a dense file can bloat well under the line cap. |
@@ -680,9 +703,9 @@ rewrite while covering ~5.5 h. On subscription plans a ping can also **open a fr
 5-hour usage window** while you're away — armed long absences trade cache warmth for
 window time.
 
-**Limits.** Only helps when returning to the *same live session* — a warm cache never
-survives `claude -r` (structural miss, GitHub #51764; use `/checkpoint` or
-`ccage handoff` before exiting instead). The schedule dies with the session. Requires
+**Limits.** A warm cache also serves `claude -r` / `-c` inside its lifetime (measured
+2026-10-05: the whole prior prefix was read from cache), so keep-warm helps a resume
+too — but only while pings land, i.e. while the session is still running. The schedule dies with the session. Requires
 a Claude Code build with self-scheduling wake-ups (the mechanism behind the bundled
 `/loop`). Skip installing with `./install.sh --no-keepwarm`.
 

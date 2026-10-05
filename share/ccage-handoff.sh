@@ -2,7 +2,9 @@
 # ccage handoff — produce a Markdown brief from a Claude Code session JSONL.
 #
 # Zero API calls. Pure jq + shell. Designed for the use case "I want to start
-# a fresh `claude` session and not pay -r's structural cache rewrite tax."
+# a fresh `claude` session and not pay -r's cache rewrite" — which, measured
+# 2026-10-05, only happens once the session's cache has expired; inside its
+# lifetime a resume reads the prefix from cache.
 #
 # Public entry: _ccage_handoff_main "$@"
 

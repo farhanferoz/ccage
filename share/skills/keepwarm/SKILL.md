@@ -202,6 +202,7 @@ output line.
   `--ping` args are self-contained so the loop continues correctly; if pings
   stop arriving after a `/clear`, the loop is dead and must be re-armed —
   never claim the cache is being kept warm without a wake actually landing.
-- A warm cache does **not** help `claude -r` / `--resume` (structural cache
-  miss regardless of warmth). If the user plans to exit, point at `/checkpoint`
-  or `ccage handoff` instead of arming this.
+- A warm cache also serves `claude -r` / `-c` inside its lifetime (measured
+  2026-10-05 on Claude Code 2.1.289: the whole prior prefix was read from
+  cache). But pings stop when the session exits, so for a long absence after
+  exiting, point at `/checkpoint` or `ccage handoff` rather than arming this.
