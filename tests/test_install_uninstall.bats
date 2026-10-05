@@ -161,6 +161,8 @@ setup() {
     HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
     [ -x "$FAKE_HOME/.claude/hooks/resume_autoload.sh" ]
     [ -x "$FAKE_HOME/.claude/hooks/resume_budget_check.sh" ]
+    # resume_autoload.sh sources this at runtime; without it the hook breaks.
+    [ -f "$FAKE_HOME/.claude/hooks/lib/plan_docs.sh" ]
 }
 
 # ---- weekly-limit floor statusline tee -------------------------------------
@@ -219,6 +221,8 @@ setup() {
     HOME="$FAKE_HOME" "$REPO_ROOT/uninstall.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
     [ ! -e "$FAKE_HOME/.claude/hooks/resume_autoload.sh" ]
     [ ! -e "$FAKE_HOME/.claude/hooks/resume_budget_check.sh" ]
+    [ ! -e "$FAKE_HOME/.claude/hooks/lib/plan_docs.sh" ]
+    [ ! -d "$FAKE_HOME/.claude/hooks/lib" ]
     [ ! -e "$FAKE_HOME/.claude/skills/checkpoint/SKILL.md" ]
     ! grep -q 'ccage:session-docs:start' "$FAKE_HOME/.claude/CLAUDE.md"
     grep -qx '# keep me' "$FAKE_HOME/.claude/CLAUDE.md"

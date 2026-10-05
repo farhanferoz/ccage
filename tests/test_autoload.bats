@@ -245,7 +245,7 @@ memdir() {
 # the directive: the old whole-file scan mis-fired on stale/foreign `PLAN.md`
 # mentions and on sessions that were never plan-governed. NOTE lines carry the
 # resolved ABSOLUTE path, so "not listed" assertions key on the "$REPO/…" form
-# (or the "DISPATCHER mode" signature) — the hook also echoes the raw RESUME
+# (or the "CHECK EACH" signature) — the hook also echoes the raw RESUME
 # body, which contains the relative mention.
 
 @test "plan pointer: governing doc under ### Plan earns the READ+dispatch NOTE" {
@@ -259,7 +259,7 @@ memdir() {
     run run_hook
     [ "$status" -eq 0 ]
     [[ "$output" == *"READ each doc before executing"* ]]
-    [[ "$output" == *"DISPATCHER mode"* ]]
+    [[ "$output" == *"CHECK EACH"* ]]
     [[ "$output" == *"$REPO/plans/2026-07-16-feature-plan.md"* ]]
 }
 
@@ -270,7 +270,7 @@ memdir() {
     } > "$REPO/RESUME.md"
     run run_hook
     [ "$status" -eq 0 ]
-    [[ "$output" != *"DISPATCHER mode"* ]]
+    [[ "$output" != *"CHECK EACH"* ]]
 }
 
 @test "plan pointer: absolute path under ### Plan resolves; more than 5 refs capped" {
@@ -306,7 +306,7 @@ memdir() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"$REPO/plan/MASTER.md"* ]]
     [[ "$output" == *"$REPO/plan/strand-a.md"* ]]
-    [[ "$output" == *"DISPATCHER mode"* ]]
+    [[ "$output" == *"CHECK EACH"* ]]
 }
 
 # --- over-fire guards: the whole point of scoping to ### Plan ---
@@ -321,7 +321,7 @@ memdir() {
     } > "$REPO/RESUME.md"
     run run_hook
     [ "$status" -eq 0 ]
-    [[ "$output" != *"DISPATCHER mode"* ]]
+    [[ "$output" != *"CHECK EACH"* ]]
     [[ "$output" != *"$REPO/docs/OLD-PLAN.md"* ]]     # abs form = the NOTE listing it
 }
 
@@ -346,7 +346,7 @@ memdir() {
     } > "$REPO/RESUME.md"
     run run_hook
     [ "$status" -eq 0 ]
-    [[ "$output" != *"DISPATCHER mode"* ]]
+    [[ "$output" != *"CHECK EACH"* ]]
 }
 
 # --- the cap must not silently drop the doc that matters -------------------
@@ -840,4 +840,53 @@ EOF
     run run_hook_env "$BATS_TEST_TMPDIR/empty:/usr/bin:/bin" "$BATS_TEST_TMPDIR/nohome"
     [ "$status" -eq 0 ]
     [[ "$output" != *"WATCHERS"* ]]
+}
+
+# --- ticked steps that name files that do not exist (false ticks) ----------
+
+@test "plan state: a ticked step naming a missing file is reported; an existing one is not" {
+    git -C "$REPO" init -q
+    mkdir -p "$REPO/plans" "$REPO/src"
+    printf 'x\n' > "$REPO/src/real.sh"
+    {
+        printf -- '- [x] write `src/real.sh`\n'
+        printf -- '- [x] write `src/ghost.sh` and `/nonexistent-dir/abs.py`\n'
+        printf -- '- [ ] open step naming `src/not-yet.sh`\n'
+        printf -- '- [x] prose-only token `foo` and `a/b` (no extension)\n'
+    } > "$REPO/plans/p-plan.md"
+    printf '### Plan\n- `plans/p-plan.md`\n' > "$REPO/RESUME.md"
+    run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"2 ticked steps name missing files: src/ghost.sh, /nonexistent-dir/abs.py"* ]]
+    [[ "$output" != *"real.sh,"* ]]
+    [[ "$output" != *"not-yet.sh"*"missing"* ]]
+}
+
+@test "plan state: no false ticks, no ticked-missing suffix" {
+    git -C "$REPO" init -q
+    mkdir -p "$REPO/plans" "$REPO/src"
+    printf 'x\n' > "$REPO/src/real.sh"
+    printf -- '- [x] write `src/real.sh`\n' > "$REPO/plans/p-plan.md"
+    printf '### Plan\n- `plans/p-plan.md`\n' > "$REPO/RESUME.md"
+    run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"ticked steps name missing"* ]]
+}
+
+# --- Syncthing conflict copy of RESUME -------------------------------------
+
+@test "RESUME conflict copy: a Syncthing conflict file is warned about by name" {
+    printf '## State\n' > "$REPO/RESUME.md"
+    printf 'other machine\n' > "$REPO/RESUME.sync-conflict-20261005-120000-ABCDEFG.md"
+    run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"RESUME has a Syncthing conflict copy: RESUME.sync-conflict-20261005-120000-ABCDEFG.md"* ]]
+    [[ "$output" == *"merge it into RESUME.md and delete it."* ]]
+}
+
+@test "RESUME conflict copy: no conflict file, no warning" {
+    printf '## State\n' > "$REPO/RESUME.md"
+    run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"Syncthing conflict"* ]]
 }

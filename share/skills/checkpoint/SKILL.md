@@ -258,7 +258,7 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    **`### Plan`** with its exact path and remaining scope — measured failure
    (2026-07-16): resumed sessions acted from RESUME's summary bullets without
    opening the plan, silently dropping tasks; the autoloader turns this line
-   into a read-and-dispatch directive. Add new decisions. **An UNRESOLVED question goes to `DECISIONS.md` too, as an entry whose
+   into a read-and-dispatch directive. For each doc you list, count its `- [ ]`/`- [x]` lines (`grep -c -E '^\s*- \[( |x|X)\]' <doc>`). Zero → do not list it as the plan silently: tell the user `<doc> has no checkboxes, so its progress cannot be measured — add checkbox steps, or list it under ### Plan as 'reference (not a plan)'`. Add new decisions. **An UNRESOLVED question goes to `DECISIONS.md` too, as an entry whose
    answer is "not decided yet" plus its `Revisit if:` trigger — never into a separate section
    here.** RESUME and a decisions register both holding rulings is two registers with no
    back-pressure: an item settled in one stays open in the other, and RESUME is read first, so the

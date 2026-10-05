@@ -108,9 +108,17 @@ fi
 
 # Session-docs assets (Phase 7): hooks, /checkpoint skill, CLAUDE.md anchor.
 hooks_dir="${CCAGE_HOOKS_DIR:-$HOME/.claude/hooks}"
-for f in "$hooks_dir/resume_autoload.sh" "$hooks_dir/session_doc_chunk.sh" "$hooks_dir/resume_budget_check.sh" "$hooks_dir/ccage-statusline-tee.sh"; do
+for f in "$hooks_dir/resume_autoload.sh" "$hooks_dir/session_doc_chunk.sh" "$hooks_dir/resume_budget_check.sh" "$hooks_dir/ccage-statusline-tee.sh" "$hooks_dir/lib/plan_docs.sh"; do
     if [ -f "$f" ]; then run rm -f "$f"; printf 'removed %s\n' "$f"; fi
 done
+# lib/ may hold other files (the status line keeps its own); remove it only when empty.
+if [ -d "$hooks_dir/lib" ]; then
+    if [ "$dry_run" = 1 ]; then
+        printf '+ rmdir %s/lib (if empty)\n' "$hooks_dir"
+    elif rmdir "$hooks_dir/lib" 2>/dev/null; then
+        printf 'removed empty %s/lib\n' "$hooks_dir"
+    fi
+fi
 
 share_from="${CCAGE_SHARE_FROM:-$HOME/.claude}"
 for f in "$share_from/skills/checkpoint/SKILL.md" "$share_from/skills/checkpoint/checkpoint-init.sh"; do

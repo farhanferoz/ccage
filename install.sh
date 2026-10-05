@@ -208,6 +208,8 @@ if [ "$install_session_docs" = 1 ]; then
     install_file "$REPO_ROOT/share/hooks/resume_autoload.sh"     "$hooks_dir/resume_autoload.sh"     0755
     install_file "$REPO_ROOT/share/hooks/session_doc_chunk.sh"   "$hooks_dir/session_doc_chunk.sh"   0755
     install_file "$REPO_ROOT/share/hooks/resume_budget_check.sh" "$hooks_dir/resume_budget_check.sh" 0755
+    # resume_autoload.sh sources this at runtime (shared with the status line).
+    install_file "$REPO_ROOT/share/hooks/lib/plan_docs.sh"       "$hooks_dir/lib/plan_docs.sh"       0644
 
     share_from="${CCAGE_SHARE_FROM:-$HOME/.claude}"
     install_file "$REPO_ROOT/share/skills/checkpoint/SKILL.md"           "$share_from/skills/checkpoint/SKILL.md"

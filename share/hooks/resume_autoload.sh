@@ -223,6 +223,19 @@ fi
 # part frames itself instead. This hook keeps only the housekeeping and the
 # small advisory NOTES.
 
+# ---- 1a. Syncthing conflict copy of RESUME ----
+# RESUME.md syncs between machines (owner decision 2026-10-05); when both sides
+# edit it before a sync, Syncthing keeps the loser as RESUME*.sync-conflict-*.
+# Left alone it is never read, so the other machine's state is silently lost.
+conflicts=""
+for f in "$base"/RESUME*.sync-conflict-*; do
+    [ -e "$f" ] || continue
+    conflicts="${conflicts:+$conflicts, }${f##*/}"
+done
+if [ -n "$conflicts" ]; then
+    printf '\n⚠ RESUME has a Syncthing conflict copy: %s — merge it into RESUME.md and delete it.\n' "$conflicts"
+fi
+
 # ---- 1b. plan-doc pointers: the plan must be READ, not summarized from ----
 # Measured failure (2026-07-16, user-reported, recurring): a resumed session
 # acts on RESUME's summary bullets, never opens the plan doc they point to —
@@ -253,23 +266,12 @@ if [ -f "$resume" ]; then
     # silently dropped BOTH governing docs of the live programme behind two
     # reference docs and a prose `CLAUDE.md` token. A silent cap reads as
     # "this is everything", which is the exact failure §1c exists to prevent.
-    plan_refs="$(awk '
-            /^###[[:space:]]+Plan[[:space:]]*$/ { inplan=1; next }
-            inplan && /^##/                     { inplan=0 }
-            inplan
-        ' "$resume" 2>/dev/null \
-        | grep -oE '[~/A-Za-z0-9._-][A-Za-z0-9._/~-]*\.md' 2>/dev/null \
-        | awk '!seen[$0]++')"
+    # Discovery and counting live in hooks/lib/plan_docs.sh, shared with the status line.
+    # shellcheck source=lib/plan_docs.sh disable=SC1091
+    . "$(dirname "${BASH_SOURCE[0]}")/lib/plan_docs.sh"
     plan_kept=0
     plan_dropped=""
-    for ref in $plan_refs; do
-        # shellcheck disable=SC2088  # the "~/" pattern matches literal text from RESUME; no expansion intended
-        case "$ref" in
-            "~/"*) cand="$HOME/${ref#\~/}" ;;
-            /*)    cand="$ref" ;;
-            *)     cand="$base/$ref" ;;
-        esac
-        [ -f "$cand" ] || continue
+    for cand in $(plan_doc_paths "$resume" "$base"); do
         if [ "$plan_kept" -lt 5 ]; then
             plan_kept=$((plan_kept + 1))
             plan_note="${plan_note}  - ${cand}
@@ -287,9 +289,10 @@ if [ -f "$resume" ]; then
     if [ -n "$plan_note" ]; then
         printf '\nNOTE: RESUME references the plan doc(s) below (verified present on disk).\n'
         printf 'RESUME is a summary, never the plan: READ each doc before executing any task\n'
-        printf 'it governs. An execution-level plan with independent remaining tasks means\n'
-        printf 'DISPATCHER mode — partition into dependency waves and dispatch concurrently;\n'
-        printf 'never execute the list sequentially inline.\n%s' "$plan_note"
+        printf 'it governs. Independent LONG tasks (minutes-plus of runtime, or needing\n'
+        printf 'independent judgement) go out in concurrent dependency waves. CHECK EACH\n'
+        printf 'TASK'"'"'S RUNTIME FIRST: short, fully-specified work you hold the context for\n'
+        printf 'is done inline — dispatching it only adds latency.\n%s' "$plan_note"
     fi
 
     # ---- 1c. plan readiness: OPEN ITEMS as FACTS, never as another directive --
@@ -306,23 +309,24 @@ if [ -f "$resume" ]; then
         readiness=""
         while IFS= read -r doc; do
             [ -n "$doc" ] || continue
-            open_n="$(grep -cE '^[[:space:]]*[-*][[:space:]]+\[[[:space:]]\]' "$doc" 2>/dev/null || true)"
-            done_n="$(grep -cE '^[[:space:]]*[-*][[:space:]]+\[[xX]\]' "$doc" 2>/dev/null || true)"
-            [ -n "$open_n" ] || open_n=0
-            [ -n "$done_n" ] || done_n=0
+            read -r open_n done_n vague <<<"$(plan_box_counts "$doc")"
             if [ "$((open_n + done_n))" -eq 0 ]; then
                 readiness="${readiness}  - ${doc##*/}: no checkboxes — completeness UNVERIFIABLE (never read as done)
 "
                 continue
             fi
             # An open item is delegable only if it names something concrete: a
-            # path, or a backticked token. Anything else has no stated write set.
-            vague="$(grep -E '^[[:space:]]*[-*][[:space:]]+\[[[:space:]]\]' "$doc" 2>/dev/null \
-                | grep -cvE '`|/' 2>/dev/null || true)"
-            [ -n "$vague" ] || vague=0
+            # path, or a backticked token. Anything else has no stated write set
+            # (`vague`, counted by plan_box_counts above).
             readiness="${readiness}  - ${doc##*/}: ${open_n} of $((open_n + done_n)) items OPEN"
             if [ "$vague" -gt 0 ] && [ "$open_n" -gt 0 ]; then
                 readiness="${readiness}; ${vague} name no file — write set unstated"
+            fi
+            missing="$(plan_ticked_missing "$doc")"
+            if [ -n "$missing" ]; then
+                miss_n="$(printf '%s\n' "$missing" | wc -l | tr -d ' ')"
+                miss_first="$(printf '%s\n' "$missing" | head -3 | paste -sd, - | sed 's/,/, /g')"
+                readiness="${readiness} · ${miss_n} ticked steps name missing files: ${miss_first}"
             fi
             readiness="${readiness}
 "
