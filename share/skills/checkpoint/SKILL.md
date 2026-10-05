@@ -152,8 +152,8 @@ older lives in `$changelog`.
 <!-- Present ONLY when work follows a plan/design doc. Name the doc(s) with
      remaining scope. RESUME is a summary, never the plan: the next session
      must READ the doc before executing its tasks, and an execution-level plan
-     with independent remaining tasks puts it in DISPATCHER mode (dependency
-     waves), not sequential inline execution. Keep paths exact — the resume
+     with independent remaining LONG tasks puts it in DISPATCHER mode (dependency
+     waves); short, fully-specified tasks are still done inline -- size by runtime. Keep paths exact — the resume
      autoloader detects and re-asserts them. -->
 - <full path to plan doc> — <N/M tasks done; next wave: …>
 
@@ -225,6 +225,33 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    BEFORE it goes into RESUME. Measured 2026-08-10: enumerating from memory
    silently dropped four live items — a checkpoint written from recall is how
    wrong state becomes next session's ground truth.
+2b. **Carry the PROBE, never the VERDICT.** Step 2 keeps carried state verbatim,
+   which defends RESUME against LOSS and does nothing about ROT — and rot is the
+   failure that recurs, because a claim about the outside world decays on its own
+   schedule whether or not this session touched it. So a line about external state
+   records the one-line check that settles it, not the answer that check returned
+   last time: the `ssh` probe, not "cluster access is BLOCKED"; the job ids and the
+   `sacct` query, not "RUNNING"; the path, not "the file is missing". That is
+   strictly FEWER words — it shrinks the always-loaded tier instead of growing it —
+   and it cannot go stale, because it asserts nothing.
+   **Never restate a fact another mechanism already writes into this file.** Agent
+   liveness belongs to `agent_reaper.sh`, which records every boundary and
+   re-measures at SessionStart; cite its block, never summarise over it.
+   **Retire superseded `### Next` items rather than appending a second numbering
+   sequence.** RESUME's shrink guard counts items, it does not compare labels, so
+   renumbering a list is safe and only a falling TOTAL is blocked; roll the finished
+   ones to CHANGELOG and renumber what is left.
+   MEASURED 2026-09-12 (autocast-private). One checkpoint carried four false claims
+   at once: a certificate reported expired that had been renewed hours earlier;
+   overnight cluster jobs described as queued after they had finished and been
+   auto-cancelled; a `### Next` list with two items numbered 0 and two numbered 0b,
+   three of whose items the same file recorded as closed; and "TWO WORKERS WERE
+   KILLED BY THIS CHECKPOINT and must be re-dispatched" while all four were alive
+   and one went on writing a 421-line source file for another fifty minutes. The
+   reaper's own block, two hundred lines below, said "was NOT stopped". The file
+   contained its own refutation and the prose won, because prose loads first. The
+   next session was one instruction away from putting a second agent onto files a
+   live agent was writing.
 3. **Update the structured lines in place** — `### Now / ### Next / ### Threads /
    ### Decisions / ### Plan / ### Live jobs & tasks` — for
    whatever moved this session. When a plan doc governs the work, fill

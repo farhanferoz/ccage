@@ -357,7 +357,7 @@ Cost is a range (±25% empirical uncertainty band), computed as `peak_cache_read
 
 ### Cache lifetime (upstream Claude Code variables — ccage does not set these)
 
-Claude Code picks the prompt-cache TTL by auth method: **Claude subscriptions get the 1-hour tier automatically**; API key / Bedrock / Vertex / Foundry default to 5 minutes. `ENABLE_PROMPT_CACHING_1H=1` opts into 1 hour (Claude Code ≥ 2.1.108; the older `ENABLE_PROMPT_CACHING_1H_BEDROCK` is deprecated but honored); `FORCE_PROMPT_CACHING_5M=1` forces 5 minutes. Subagents always use the 5-minute tier. Which tier a request actually got is recorded in the session JSONL under `message.usage.cache_creation` (`ephemeral_1h_input_tokens` / `ephemeral_5m_input_tokens`).
+Claude Code picks the prompt-cache TTL by auth method: **Claude subscriptions get the 1-hour tier automatically**; API key / Bedrock / Vertex / Foundry default to 5 minutes. `ENABLE_PROMPT_CACHING_1H=1` opts into 1 hour (Claude Code ≥ 2.1.108; the older `ENABLE_PROMPT_CACHING_1H_BEDROCK` is deprecated but honored); `FORCE_PROMPT_CACHING_5M=1` forces 5 minutes. Subagents default to 5 minutes, but `ENABLE_PROMPT_CACHING_1H=1` covers them too (upstream: it "requests one hour for both buckets"), and Claude Code 2.1.243 added `subagentPromptCacheTtl` to set them separately. Measured 2026-10-05 with the variable exported: two subagent transcripts wrote 847,783 and 142,436 cache tokens at the 1-hour tier and none at 5 minutes. Which tier a request actually got is recorded in the session JSONL under `message.usage.cache_creation` (`ephemeral_1h_input_tokens` / `ephemeral_5m_input_tokens`).
 
 ### Decisions
 

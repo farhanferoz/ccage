@@ -64,6 +64,16 @@ setup() {
     run _ccage_resume_price_cache_write claude-sonnet-4-6; [ "$output" = "6" ]
     run _ccage_resume_price_cache_write claude-haiku-4-5;  [ "$output" = "2" ]
     run _ccage_resume_price_cache_write claude-fable-5;    [ "$output" = "20" ]
+    # The 5.5 generation is cheaper than the 5 it shares a prefix with, so its
+    # pattern must sit ABOVE the claude-opus-5* / claude-sonnet-5* globs.
+    # Verified 2026-10-05 against the pricing page and changelog 2.1.289.
+    run _ccage_resume_price_input claude-opus-5-5;          [ "$output" = "4" ]
+    run _ccage_resume_price_input "claude-opus-5-5[1m]";    [ "$output" = "4" ]
+    run _ccage_resume_price_input claude-sonnet-5-5;        [ "$output" = "2" ]
+    run _ccage_resume_price_cache_write claude-opus-5-5;    [ "$output" = "8" ]
+    run _ccage_resume_price_cache_write claude-sonnet-5-5;  [ "$output" = "4" ]
+    run _ccage_resume_price_input claude-opus-5;            [ "$output" = "5" ]
+    run _ccage_resume_price_input claude-sonnet-5;          [ "$output" = "3" ]
     # Suffixed id matches its family instead of falling to the default.
     run _ccage_resume_price_cache_write 'claude-opus-4-8[1m]'; [ "$output" = "10" ]
     # Unknown model falls back to the CURRENT opus tier.

@@ -763,11 +763,13 @@ SIGNORE
 # about.
 #
 # Globs so a suffixed id (e.g. `claude-opus-4-8[1m]`) matches its family.
-# updated: 2026-07-20
+# updated: 2026-10-05
 _ccage_resume_price_input() {
     case "$1" in
         claude-fable-5*|claude-mythos-5*)     echo 10 ;;
+        claude-opus-5-5*)                     echo 4 ;;   # verified 2026-10-05 (changelog 2.1.289 + pricing page)
         claude-opus-5*|claude-opus-4-8*|claude-opus-4-7*|claude-opus-4-6*) echo 5 ;;  # opus-5 added 2026-08-10; was falling to the default
+        claude-sonnet-5-5*)                   echo 2 ;;   # verified 2026-10-05
         claude-sonnet-5*|claude-sonnet-4-6*)  echo 3 ;;
         claude-sonnet-4-5*)                   echo 3 ;;   # unverified; unchanged
         claude-haiku-4-5*)                    echo 1 ;;

@@ -633,6 +633,32 @@ for i in range(40):
     # asserted in test_resume_interception.bats, which sources it.
 }
 
+@test "pricing: the 5.5 / 5.1 generation is priced as itself, reads included" {
+    # Verified 2026-10-05 against platform.claude.com/docs/en/about-claude/pricing.
+    # Each shares a prefix with an older, dearer model, so a glob ordered wrong
+    # silently prices it as that model.
+    [ "$(_ccage_handoff_model_family 'claude-opus-5-5[1m]')" = opus55 ]
+    [ "$(_ccage_handoff_price_input claude-opus-5-5)" = 4 ]
+    [ "$(_ccage_handoff_price_output claude-opus-5-5)" = 20 ]
+    [ "$(_ccage_handoff_price_cache_write_1h claude-opus-5-5)" = 8 ]
+    [ "$(_ccage_handoff_price_input claude-sonnet-5-5)" = 2 ]
+    [ "$(_ccage_handoff_price_output claude-sonnet-5-5)" = 10 ]
+    [ "$(_ccage_handoff_price_cache_write_1h claude-sonnet-5-5)" = 4 ]
+    # Cache reads are NOT a flat 0.1x: 0.05x on Opus 5.5, 0.025x on Fable and
+    # Mythos 5.1 -- while Fable 5 stays at 0.1x.
+    [ "$(_ccage_handoff_price_cache_read claude-opus-5-5)" = 0.2 ]
+    [ "$(_ccage_handoff_price_cache_read claude-sonnet-5-5)" = 0.2 ]
+    [ "$(_ccage_handoff_price_cache_read claude-fable-5-1)" = 0.25 ]
+    [ "$(_ccage_handoff_price_cache_read claude-mythos-5-1)" = 0.25 ]
+    [ "$(_ccage_handoff_price_cache_read claude-fable-5)" = 1 ]
+    [ "$(_ccage_handoff_price_cache_read claude-opus-5)" = 0.5 ]
+    # The session total uses the same per-model read rate.
+    run _ccage_handoff_cost 0 0 0 0 1000000 claude-opus-5-5
+    [ "$output" = '$0.20' ]
+    run _ccage_handoff_cost 0 0 0 0 1000000 claude-fable-5-1
+    [ "$output" = '$0.25' ]
+}
+
 @test "pricing: an unknown model is flagged as a guess, not asserted as known" {
     [ "$(_ccage_handoff_model_family claude-vega-9)" = unknown ]
     [ "$(_ccage_handoff_model_family 'claude-opus-4-8[1m]')" = opus ]

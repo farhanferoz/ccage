@@ -26,15 +26,20 @@
 #
 # Refresh `# updated:` and add a CHANGELOG entry when Anthropic publishes new
 # rates. Verified against the bundled claude-api model table.
-# updated: 2026-07-20
+# updated: 2026-10-05
 # ONE pattern list, resolved to a family. Both price lookups and the
 # is-this-model-known check read it, so a new model cannot be added to pricing
 # while silently staying "unknown" to the caller — the same anti-drift move the
 # rest of this section makes, one level up.
-# Echoes: fable | opus | sonnet | haiku | unknown
+# Echoes: fable51 | fable | opus55 | opus | sonnet55 | sonnet | haiku | unknown
 _ccage_handoff_model_family() {
     case "$1" in
+        # The 5.5 / 5.1 generation shares a prefix with an older model it is
+        # priced differently from, so each sits ABOVE that model's glob.
+        # Verified 2026-10-05 against the pricing page.
+        claude-fable-5-1*|claude-mythos-5-1*)                echo fable51 ;;
         claude-fable-5*|claude-mythos-5*)                    echo fable ;;
+        claude-opus-5-5*)                                    echo opus55 ;;
         # claude-opus-5 added 2026-08-10. It was matching NOTHING and falling to
         # the `unknown` default, which happens to be the Opus rate — correct only
         # by coincidence, and silently wrong the moment Opus 5 is repriced. Same
@@ -45,6 +50,7 @@ _ccage_handoff_model_family() {
         # rate is deliberately used: the intro rate expires, and an expired
         # discount silently UNDER-reports cost, which is the worse error here.
         # sonnet-4-5 is unverified and carried unchanged from the old table.
+        claude-sonnet-5-5*)                                  echo sonnet55 ;;
         claude-sonnet-5*|claude-sonnet-4-6*|claude-sonnet-4-5*) echo sonnet ;;
         claude-haiku-4-5*)                                   echo haiku ;;
         *)                                                   echo unknown ;;
@@ -52,7 +58,9 @@ _ccage_handoff_model_family() {
 }
 _ccage_handoff_price_input() {
     case "$(_ccage_handoff_model_family "$1")" in
-        fable)         echo 10 ;;
+        fable|fable51) echo 10 ;;
+        opus55)        echo 4 ;;
+        sonnet55)      echo 2 ;;
         sonnet)        echo 3 ;;
         haiku)         echo 1 ;;
         opus|unknown)  echo 5 ;;   # unknown falls back to the current Opus tier
@@ -60,7 +68,9 @@ _ccage_handoff_price_input() {
 }
 _ccage_handoff_price_output() {
     case "$(_ccage_handoff_model_family "$1")" in
-        fable)         echo 50 ;;
+        fable|fable51) echo 50 ;;
+        opus55)        echo 20 ;;
+        sonnet55)      echo 10 ;;
         sonnet)        echo 15 ;;
         haiku)         echo 5 ;;
         opus|unknown)  echo 25 ;;
@@ -72,6 +82,15 @@ _ccage_handoff_price_output() {
 _CCAGE_CW_5M_MULT=1.25
 _CCAGE_CW_1H_MULT=2.00
 _CCAGE_CR_MULT=0.10
+# Cache reads are NOT a flat 0.1x on every model (pricing page, 2026-10-05):
+# 0.05x on Opus 5.5 and 0.025x on Fable / Mythos 5.1.
+_ccage_handoff_cache_read_mult() {
+    case "$(_ccage_handoff_model_family "$1")" in
+        fable51) echo 0.025 ;;
+        opus55)  echo 0.05 ;;
+        *)       echo "$_CCAGE_CR_MULT" ;;
+    esac
+}
 
 # Retained as thin derived wrappers: they were part of this file's surface, and
 # expressing them in terms of the input rate is what stops them drifting.
@@ -84,7 +103,7 @@ _ccage_handoff_price_cache_write_1h() {
         'BEGIN { printf "%g\n", i * m }'
 }
 _ccage_handoff_price_cache_read() {
-    awk -v i="$(_ccage_handoff_price_input "$1")" -v m="$_CCAGE_CR_MULT" \
+    awk -v i="$(_ccage_handoff_price_input "$1")" -v m="$(_ccage_handoff_cache_read_mult "$1")" \
         'BEGIN { printf "%g\n", i * m }'
 }
 
@@ -779,7 +798,8 @@ _ccage_handoff_cost() {
     # Note: gawk reserves `or` as a builtin — use `outr` instead.
     awk -v i="$in_tok" -v o="$out_tok" -v cw5="$cw5_tok" -v cw1="$cw1_tok" \
         -v cr="$cr_tok" -v ir="$in_rate" -v outr="$out_rate" \
-        -v m5="$_CCAGE_CW_5M_MULT" -v m1="$_CCAGE_CW_1H_MULT" -v mr="$_CCAGE_CR_MULT" \
+        -v m5="$_CCAGE_CW_5M_MULT" -v m1="$_CCAGE_CW_1H_MULT" \
+        -v mr="$(_ccage_handoff_cache_read_mult "$model")" \
         'BEGIN {
             total = i*ir + o*outr + cw5*(ir*m5) + cw1*(ir*m1) + cr*(ir*mr)
             printf "$%.2f\n", total / 1000000
