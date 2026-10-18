@@ -59,6 +59,8 @@ specs() { ls "$CLAUDE_CONFIG_DIR"/watch/*.json 2>/dev/null | wc -l | tr -d ' '; 
     pid=$(python3 -c "import json,glob;print(json.load(open(glob.glob('$CLAUDE_CONFIG_DIR/watch/*.json')[0]))['pid'])")
     [ -n "$pid" ]
     kill -0 "$pid" 2>/dev/null
+    # Named so earlyoom's --avoid can spare it (Linux only).
+    if [ -r "/proc/$pid/comm" ]; then [ "$(cat "/proc/$pid/comm")" = "ccage-watch" ]; fi
 }
 
 @test "re-arming the same condition is refused, and --replace overrides" {

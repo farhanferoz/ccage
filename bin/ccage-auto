@@ -3660,7 +3660,26 @@ def print_status(cfg, cwd, config_dir, sdir):
         print("  occupancy    : %d tok = %.1f%% of window" % (tokens, 100.0 * tokens / window))
 
 
+
+def _name_process(name):
+    """Show as ``name`` in /proc/<pid>/comm instead of ``python3``.
+
+    earlyoom picks its victim by that name: its --prefer favours python
+    processes and its --avoid can only spare a name it can tell apart. As
+    plain ``python3`` this wrapper was killed first (2026-10-18 13:57,
+    spark-ad27: three sessions ended while the job holding the memory was
+    untouched). Linux only; elsewhere a no-op.
+    """
+    try:
+        import ctypes
+
+        ctypes.CDLL(None).prctl(15, name.encode()[:15], 0, 0, 0)  # PR_SET_NAME
+    except (OSError, AttributeError):
+        pass
+
+
 def main():
+    _name_process("ccage-auto")
     argv = sys.argv[1:]
     # Control-plane subcommands (used by /checkpoint-threshold, and by a human
     # directly): mutate the live control file for cwd and exit without
