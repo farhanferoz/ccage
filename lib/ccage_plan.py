@@ -28,6 +28,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,6 +39,15 @@ HEADING_PROGRESS = re.compile(r"^##\s+Progress\s*$", re.MULTILINE)
 ITEM = re.compile(r"^\s*[-*]\s+\[([ xX])\]\s+(.*?)\s*$")
 DONE_WHEN = re.compile(r"\s+—\s+done when:\s+`(.+)`\s*$")
 APPROVED = re.compile(r'owner approved:\s*"(.+)"')
+# A PreToolUse command hook that outlives its timeout (600 s default) does not block the
+# call, so a guard call stops running checks after this many seconds and denies the rest.
+GUARD_BUDGET_S = 480
+# Entries the harness records as user turns although the owner did not type them: other
+# sessions and teammates, task notifications, command output, hook feedback, ccage-auto's
+# own nudges. A quote found only in one of these is not the owner's approval.
+NOT_OWNER_PREFIXES = ("<system-reminder>", "<teammate-message", "Another Claude session sent a message",
+                      "<local-command", "<command-name>", "[SYSTEM NOTIFICATION", "Stop hook feedback",
+                      "[auto-checkpoint]")
 REVIEW_TIMEOUT_S = 900
 DIFF_CAP_CHARS = 200_000
 SECTION_CAP_CHARS = 6000
@@ -55,8 +65,33 @@ def has_progress(text: str) -> bool:
     return bool(HEADING_PROGRESS.search(text))
 
 
-def parse_progress(text: str) -> dict[str, Item]:
-    """Items of the `## Progress` section, keyed by ID, in file order."""
+def _rests(text: str) -> list[str]:
+    inside, out = False, []
+    for line in text.splitlines():
+        if HEADING_PROGRESS.match(line):
+            inside = True
+            continue
+        if inside and re.match(r"^#{1,2}\s", line):
+            inside = False
+        m = ITEM.match(line) if inside else None
+        if m and m.group(2).strip():
+            out.append(" ".join(m.group(2).split()))
+    return out
+
+
+def by_title(*texts: str) -> bool:
+    """True when first words collide ("Step 2", "Step 5"), so items must be keyed by title."""
+    for t in texts:
+        firsts = [r.split()[0] for r in _rests(t)]
+        if len(firsts) != len(set(firsts)):
+            return True
+    return False
+
+
+def parse_progress(text: str, titled: bool | None = None) -> dict[str, Item]:
+    """Items of the `## Progress` section in file order, keyed by first word (ID) or, when
+    first words are not unique, by the text before the first " — " (the title)."""
+    titled = by_title(text) if titled is None else titled
     items: dict[str, Item] = {}
     inside = False
     for line in text.splitlines():
@@ -72,7 +107,7 @@ def parse_progress(text: str) -> dict[str, Item]:
         if not rest:
             continue
         dw = DONE_WHEN.search(rest)
-        item_id = rest.split()[0]
+        item_id = rest.split(" — ")[0] if titled else rest.split()[0]
         items[item_id] = Item(item_id, m.group(1) in "xX", rest, dw.group(1) if dw else None)
     return items
 
@@ -86,13 +121,13 @@ def git_root(path: Path) -> Path:
         return path.parent
 
 
-def run_check(cmd: str, cwd: Path) -> tuple[bool, str]:
+def run_check(cmd: str, cwd: Path, timeout: float = CHECK_TIMEOUT_S) -> tuple[bool, str]:
     """Run a done-when command; (passed, last 20 lines of its output)."""
     try:
         r = subprocess.run(["bash", "-c", cmd], cwd=cwd, capture_output=True, text=True,
-                           timeout=CHECK_TIMEOUT_S, stdin=subprocess.DEVNULL, check=False)
+                           timeout=timeout, stdin=subprocess.DEVNULL, check=False)
     except subprocess.TimeoutExpired:
-        return False, f"timed out after {CHECK_TIMEOUT_S} s"
+        return False, f"timed out after {timeout:g} s"
     out = (r.stdout + r.stderr).splitlines()[-TAIL_LINES:]
     return r.returncode == 0, "\n".join(out)
 
@@ -107,7 +142,7 @@ def user_texts(transcript: Path) -> list[str]:
             d = json.loads(line)
         except ValueError:
             continue
-        if d.get("type") != "user" or d.get("isMeta"):
+        if d.get("type") != "user" or d.get("isMeta") or (d.get("origin") or {}).get("kind") not in (None, "human"):
             continue
         content = (d.get("message") or {}).get("content")
         if isinstance(content, str):
@@ -115,7 +150,7 @@ def user_texts(transcript: Path) -> list[str]:
         elif isinstance(content, list):
             texts += [b.get("text", "") for b in content
                       if isinstance(b, dict) and b.get("type") == "text"]
-    return [t for t in texts if not t.lstrip().startswith("<system-reminder>")]
+    return [t for t in texts if not t.lstrip().startswith(NOT_OWNER_PREFIXES)]
 
 
 def new_text(tool: str, tool_input: dict, old: str) -> str | None:
@@ -139,9 +174,11 @@ def approved_quotes(text: str, item_id: str) -> list[str]:
 
 
 def violations(old: str, new: str, plan: Path, transcript: Path | None) -> list[str]:
-    before, after = parse_progress(old), parse_progress(new)
+    titled = by_title(old, new)
+    before, after = parse_progress(old, titled), parse_progress(new, titled)
     out: list[str] = []
     root = git_root(plan)
+    deadline = time.monotonic() + float(os.environ.get("CCAGE_PLAN_GUARD_BUDGET_S", GUARD_BUDGET_S))
     for item_id, item in after.items():
         was = before.get(item_id)
         if not item.checked or (was and was.checked):
@@ -152,7 +189,12 @@ def violations(old: str, new: str, plan: Path, transcript: Path | None) -> list[
                        "check passes; add `— done when: `<command>`` through an approved plan "
                        "change first.")
             continue
-        passed, tail = run_check(cmd, root)
+        left = deadline - time.monotonic()
+        if left <= 0:
+            out.append(f"TICK {item_id}: not checked: time budget of one guard call is spent. "
+                       "Tick fewer items per edit.")
+            continue
+        passed, tail = run_check(cmd, root, min(CHECK_TIMEOUT_S, left))
         if not passed:
             out.append(f"TICK {item_id}: its check failed, so it stays open. Check: {cmd}\n"
                        f"last {TAIL_LINES} lines:\n{tail}")

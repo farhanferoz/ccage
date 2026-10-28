@@ -797,6 +797,10 @@ Create `~/.claude-master/commands/`, `~/.claude-master/agents/`, `~/.claude-mast
 
 ---
 
+## Plan contract (`plan_contract_guard.sh`, `ccage plan-report`, `ccage review`) [shipped]
+
+A `## Progress` checkbox line may end with ` — done when: `<command>``. The PreToolUse guard refuses to tick an item unless that command exits 0, and refuses to drop or change an item without an `owner approved: "<quote>"` line whose quote is in a user turn the owner typed (teammate messages, task notifications, command output, hook feedback and ccage-auto nudges do not count). Items are keyed by first word, or by title when first words collide ("Step 2", "Step 5"). Checks stop after 480 s per guard call. **Known limit:** a plan written through Bash (sed, python) bypasses the guard; `ccage plan-report` shows a ticked item whose check fails as REGRESSED, which catches a bypassed tick afterwards.
+
 ## Claude-side env vars we touch
 
 | Var | Direction | When |

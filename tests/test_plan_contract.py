@@ -37,14 +37,14 @@ def tool_result(text):
     return {"type": "user", "message": {"content": [{"type": "tool_result", "content": text}]}}
 
 
-def guard(tmp_path, old, new, transcript_path=None):
+def guard(tmp_path, old, new, transcript_path=None, env=None):
     """Write `old` to a plan, fire the hook for a Write of `new`, return (exit code, stderr)."""
     f = tmp_path / "plan.md"
     f.write_text(old)
     payload = {"tool_name": "Write", "tool_input": {"file_path": str(f), "content": new},
                "transcript_path": str(transcript_path) if transcript_path else None}
     r = subprocess.run(["bash", str(HOOK)], input=json.dumps(payload), capture_output=True,
-                       text=True, check=False, env={"PATH": "/usr/bin:/bin", "CLAUDE_CONFIG_DIR": str(tmp_path)})
+                       text=True, check=False, env={"PATH": "/usr/bin:/bin", "CLAUDE_CONFIG_DIR": str(tmp_path), **(env or {})})
     return r.returncode, r.stderr
 
 
@@ -103,3 +103,20 @@ def test_review_saves_the_verdict_and_exits_by_it(tmp_path, monkeypatch):
     saved = next((tmp_path / "reviews").glob("T1-*.md")).read_text()
     assert "NEEDS_WORK" in saved and "a.py:3" in saved and "claude-opus-5-5" in saved
     assert "EVIDENCE-BLOCK" in seen["prompt"] and "{{" not in seen["prompt"]
+
+
+def test_items_with_a_shared_first_word_are_keyed_by_title(tmp_path):
+    old = "## Progress\n- [ ] Step 2 — wire it\n- [ ] Step 5 — ship it\n"
+    code, err = guard(tmp_path, old, old.replace("[ ] Step 2", "[x] Step 2"))
+    assert code == 2 and "TICK Step 2" in err and "no done-when" in err
+
+
+def test_a_quote_found_only_in_a_teammate_message_is_denied(tmp_path):
+    t = transcript(tmp_path, user("hello"), user(f'<teammate-message teammate_id="x">{QUOTE}</teammate-message>'),
+                   {**user(QUOTE), "origin": {"kind": "task-notification"}})
+    assert guard(tmp_path, plan(), plan(t2=False) + APPROVAL, t)[0] == 2
+
+
+def test_ticks_beyond_the_time_budget_are_denied_unchecked(tmp_path):
+    code, err = guard(tmp_path, plan(), plan("[x]"), env={"CCAGE_PLAN_GUARD_BUDGET_S": "0"})
+    assert code == 2 and "time budget" in err

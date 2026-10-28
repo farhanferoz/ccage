@@ -6,7 +6,10 @@
 #   * ticking `- [ ]` -> `- [x]` needs the item's `done when` command to exit 0;
 #   * dropping an item, or changing its ID/title/write set/done-when, needs a line
 #     `owner approved: "<quote>"` whose quote appears in a user turn of this session.
-# Everything else is allowed. Any internal error allows the edit and is logged.
+# Everything else is allowed. Any internal error allows the edit and is logged. Checks stop
+# after 480 s in one call (a hook past its timeout does not block); the rest are denied.
+# KNOWN LIMIT: a plan written through Bash (sed, python) is not seen by this hook;
+# `ccage plan-report` shows such a ticked item as REGRESSED if its check fails.
 #
 # Exit codes: 0 = allow; 2 = block (stderr becomes model guidance).
 # Log (allow, deny, error): ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plan_contract_guard.log
