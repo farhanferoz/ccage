@@ -17,6 +17,7 @@
 #   ~/.claude/hooks/resume_autoload.sh      — SessionStart auto-read hook
 #   ~/.claude/hooks/session_doc_chunk.sh    — SessionStart doc-part hook
 #   ~/.claude/hooks/resume_budget_check.sh  — PostToolUse RESUME budget guard
+#   ~/.claude/hooks/plan_contract_guard.sh  — PreToolUse plan-contract guard (+ ccage_plan.py)
 #   <share-from>/skills/checkpoint/         — /checkpoint skill (reaches cages
 #                                             via the existing skills symlink)
 #   ~/.claude/CLAUDE.md                     — short session-continuity anchor
@@ -162,6 +163,11 @@ if [ "$install_cli" = 1 ]; then
     install_file "$REPO_ROOT/lib/subagent_watch.py" "$prefix/share/ccage/lib/subagent_watch.py"
     install_file "$REPO_ROOT/bin/ccb-report"         "$prefix/bin/ccb-report" 0755
 
+    # `ccage plan-report` / `ccage review`: the plan-contract helper and the review prompt.
+    # bin/ccage finds them at $CCAGE_LIB/lib and $CCAGE_LIB/prompts in an installed layout.
+    install_file "$REPO_ROOT/lib/ccage_plan.py"          "$prefix/share/ccage/lib/ccage_plan.py"
+    install_file "$REPO_ROOT/share/prompts/review.md"    "$prefix/share/ccage/prompts/review.md"
+
     # ccage-auto's AskUserQuestion guard goes to the fixed hooks path (like the
     # session-docs hooks) — the installed ccage-auto resolves it there, since
     # $prefix/bin/../share/hooks does not exist in an installed layout. Inert
@@ -208,6 +214,10 @@ if [ "$install_session_docs" = 1 ]; then
     install_file "$REPO_ROOT/share/hooks/resume_autoload.sh"     "$hooks_dir/resume_autoload.sh"     0755
     install_file "$REPO_ROOT/share/hooks/session_doc_chunk.sh"   "$hooks_dir/session_doc_chunk.sh"   0755
     install_file "$REPO_ROOT/share/hooks/resume_budget_check.sh" "$hooks_dir/resume_budget_check.sh" 0755
+    # Plan-contract guard (PreToolUse on Edit|Write|MultiEdit), seeded like the budget hook;
+    # its logic is lib/ccage_plan.py, installed beside it.
+    install_file "$REPO_ROOT/share/hooks/plan_contract_guard.sh" "$hooks_dir/plan_contract_guard.sh" 0755
+    install_file "$REPO_ROOT/lib/ccage_plan.py"                  "$hooks_dir/ccage_plan.py"          0644
     # resume_autoload.sh sources this at runtime (shared with the status line).
     install_file "$REPO_ROOT/share/hooks/lib/plan_docs.sh"       "$hooks_dir/lib/plan_docs.sh"       0644
 

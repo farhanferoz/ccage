@@ -163,6 +163,10 @@ setup() {
     [ -x "$FAKE_HOME/.claude/hooks/resume_budget_check.sh" ]
     # resume_autoload.sh sources this at runtime; without it the hook breaks.
     [ -f "$FAKE_HOME/.claude/hooks/lib/plan_docs.sh" ]
+    # the plan-contract guard and the helper it execs sit together
+    [ -x "$FAKE_HOME/.claude/hooks/plan_contract_guard.sh" ]
+    [ -f "$FAKE_HOME/.claude/hooks/ccage_plan.py" ]
+    [ -f "$FAKE_HOME/.local/share/ccage/prompts/review.md" ]
 }
 
 # ---- weekly-limit floor statusline tee -------------------------------------

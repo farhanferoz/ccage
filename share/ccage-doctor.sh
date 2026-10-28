@@ -41,6 +41,8 @@ SS_MATCHER = "startup|resume|clear|compact"
 autoload_cmd = "bash " + os.path.join(hooks_dir, "resume_autoload.sh")
 chunk_cmd    = "bash " + os.path.join(hooks_dir, "session_doc_chunk.sh")
 budget_cmd   = "bash " + os.path.join(hooks_dir, "resume_budget_check.sh")
+plan_cmd     = "bash " + os.path.join(hooks_dir, "plan_contract_guard.sh")
+want_plan = not os.environ.get("CCAGE_NO_PLAN_GUARD")
 OWNED_SS = {"resume_autoload.sh", "session_doc_chunk.sh"}
 wanted_ss = []
 if want_autoload:
@@ -127,6 +129,12 @@ if want_budget and not any(sig(c)[0] == "resume_budget_check.sh"
     ptu.append({"matcher": "Write|Edit",
                 "hooks": [{"type": "command", "command": budget_cmd}]})
     hooks["PostToolUse"] = ptu; changed = True
+if want_plan and not any(sig(c)[0] == "plan_contract_guard.sh"
+                         for c in commands("PreToolUse")):
+    ptu = entries("PreToolUse")
+    ptu.append({"matcher": "Write|Edit|MultiEdit",
+                "hooks": [{"type": "command", "command": plan_cmd}]})
+    hooks["PreToolUse"] = ptu; changed = True
 if changed and apply:
     data["hooks"] = hooks
     d = os.path.dirname(settings_path) or "."
@@ -158,7 +166,7 @@ _ccage_doctor_local_hooks_status() {
     python3 - "$settings" "$src" "$hooks_dir" <<'PY' 2>/dev/null
 import json, os, sys
 settings_path, src_path, hooks_dir = sys.argv[1:4]
-OWNED = {"resume_autoload.sh", "session_doc_chunk.sh", "resume_budget_check.sh", "autonomous_ask_guard.sh"}
+OWNED = {"resume_autoload.sh", "session_doc_chunk.sh", "resume_budget_check.sh", "autonomous_ask_guard.sh", "plan_contract_guard.sh"}
 def expand(c): return " ".join(os.path.expanduser(t) for t in c.split()) if c else ""
 def base(c):
     # First token naming a .sh — the chunk hook carries arguments, so the last
@@ -206,7 +214,7 @@ _ccage_doctor_unseed() {
     python3 - "$settings" "$apply" <<'PY' 2>/dev/null
 import json, os, shlex, sys, tempfile
 settings_path, apply = sys.argv[1], sys.argv[2] == "1"
-targets = {"resume_autoload.sh", "session_doc_chunk.sh", "resume_budget_check.sh"}
+targets = {"resume_autoload.sh", "session_doc_chunk.sh", "resume_budget_check.sh", "plan_contract_guard.sh"}
 TEE = "ccage-statusline-tee.sh"
 if not os.path.exists(settings_path):
     print("unchanged"); sys.exit(0)
@@ -234,7 +242,7 @@ if isinstance(hooks, dict):
             if t.endswith(".sh"):
                 return os.path.basename(t)
         return os.path.basename(toks[-1]) if toks else ""
-    for event in ("SessionStart", "PostToolUse"):
+    for event in ("SessionStart", "PostToolUse", "PreToolUse"):
         entries = hooks.get(event)
         if not isinstance(entries, list):
             continue

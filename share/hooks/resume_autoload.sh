@@ -322,6 +322,12 @@ if [ -f "$resume" ]; then
             if [ "$vague" -gt 0 ] && [ "$open_n" -gt 0 ]; then
                 readiness="${readiness}; ${vague} name no file — write set unstated"
             fi
+            unchecked="$(plan_open_unchecked "$doc")"
+            if [ -n "$unchecked" ]; then
+                unchecked_n="$(printf '%s\n' "$unchecked" | wc -l | tr -d ' ')"
+                unchecked_first="$(printf '%s\n' "$unchecked" | head -3 | paste -sd, - | sed 's/,/, /g')"
+                readiness="${readiness}; ${unchecked_n} not checkable (no done-when): ${unchecked_first}"
+            fi
             missing="$(plan_ticked_missing "$doc")"
             if [ -n "$missing" ]; then
                 miss_n="$(printf '%s\n' "$missing" | wc -l | tr -d ' ')"

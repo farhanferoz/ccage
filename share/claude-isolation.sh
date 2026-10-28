@@ -179,6 +179,7 @@ _ccage_bootstrap_dir() {
 #   SessionStart (startup|resume|clear|compact) → resume_autoload.sh
 #                                               → session_doc_chunk.sh, 2N times
 #   PostToolUse  (Write|Edit)                   → resume_budget_check.sh
+#   PreToolUse   (Write|Edit|MultiEdit)         → plan_contract_guard.sh (opt out: CCAGE_NO_PLAN_GUARD=1)
 # Because the scripts live at a FIXED path (they don't rotate per request) this
 # does NOT bash the prompt cache — a documented exception to ccage's "UI-only
 # seeding" rule. Runs every launch, so it self-heals and backfills existing
@@ -256,6 +257,7 @@ _ccage_seed_session_docs_hooks() {
             done
         fi
         { [ "$want_budget" = 1 ] && ! grep -q 'resume_budget_check.sh' "$settings" 2>/dev/null; } && need=1
+        { [ -z "${CCAGE_NO_PLAN_GUARD:-}" ] && ! grep -q 'plan_contract_guard.sh' "$settings" 2>/dev/null; } && need=1
         [ "$need" = 0 ] && return 0
     fi
 
@@ -272,6 +274,8 @@ SS_MATCHER = "startup|resume|clear|compact"
 autoload_cmd = "bash " + os.path.join(hooks_dir, "resume_autoload.sh")
 chunk_cmd    = "bash " + os.path.join(hooks_dir, "session_doc_chunk.sh")
 budget_cmd   = "bash " + os.path.join(hooks_dir, "resume_budget_check.sh")
+plan_cmd     = "bash " + os.path.join(hooks_dir, "plan_contract_guard.sh")
+want_plan = not os.environ.get("CCAGE_NO_PLAN_GUARD")
 # SessionStart scripts ccage owns. Anything else under SessionStart belongs to
 # the user (or _ccage_seed_local_hooks) and is never touched.
 OWNED_SS = {"resume_autoload.sh", "session_doc_chunk.sh"}
@@ -381,6 +385,14 @@ if want_budget and not any(sig(c)[0] == "resume_budget_check.sh"
     hooks["PostToolUse"] = ptu
     changed = True
 
+if want_plan and not any(sig(c)[0] == "plan_contract_guard.sh"
+                         for c in commands("PreToolUse")):
+    ptu = entries("PreToolUse")
+    ptu.append({"matcher": "Write|Edit|MultiEdit",
+                "hooks": [{"type": "command", "command": plan_cmd}]})
+    hooks["PreToolUse"] = ptu
+    changed = True
+
 if changed:
     data["hooks"] = hooks
     d = os.path.dirname(settings_path) or "."
@@ -454,7 +466,8 @@ settings_path, src_path, hooks_dir = sys.argv[1], sys.argv[2], sys.argv[3]
 # ccage seeds these itself, with their own opt-out flags. Copying them here
 # would override a deliberate --no-session-docs.
 CCAGE_OWNED = {"resume_autoload.sh", "session_doc_chunk.sh",
-               "resume_budget_check.sh", "autonomous_ask_guard.sh"}
+               "resume_budget_check.sh", "autonomous_ask_guard.sh",
+               "plan_contract_guard.sh"}
 
 
 def expand(cmd):
@@ -572,6 +585,37 @@ for event, entries in (src.get("hooks") or {}).items():
             arr.append(new)
             hooks[event] = arr
             changed = True
+
+# RETIRED hooks. A registration whose script lives in the hooks dir but is no longer
+# registered ANYWHERE in the user's own settings.json was removed (or renamed) by the
+# user; left in the cage it keeps firing a policy they withdrew -- or fails on a deleted
+# script -- on every launch. ccage-owned hooks and anything outside the hooks dir are
+# never touched. Skipped when the source registers no hook from the hooks dir at all,
+# so an emptied or half-written source cannot strip every cage.
+src_names = {script_base(h.get("command") or "")
+             for entries in (src.get("hooks") or {}).values() if isinstance(entries, list)
+             for e in entries if isinstance(e, dict)
+             for h in (e.get("hooks") or []) if isinstance(h, dict)
+             if hooks_dir in expand(h.get("command") or "")}
+src_names.discard("")
+if src_names:
+    for event in list(hooks):
+        entries = hooks[event]
+        if not isinstance(entries, list):
+            continue
+        kept = []
+        for e in entries:
+            if isinstance(e, dict) and isinstance(e.get("hooks"), list):
+                live = [h for h in e["hooks"]
+                        if not (isinstance(h, dict) and hooks_dir in expand(h.get("command") or "")
+                                and script_base(h.get("command") or "") not in CCAGE_OWNED | src_names)]
+                if len(live) != len(e["hooks"]):
+                    changed = True
+                    if not live:
+                        continue
+                    e = dict(e, hooks=live)
+            kept.append(e)
+        hooks[event] = kept
 
 if changed:
     data["hooks"] = hooks

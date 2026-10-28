@@ -57,6 +57,9 @@ if [ -f "$ask_guard" ]; then
     run rm -f "$ask_guard"
     printf 'removed %s\n' "$ask_guard"
 fi
+for f in "$prefix/share/ccage/lib/ccage_plan.py" "$prefix/share/ccage/prompts/review.md"; do
+    if [ -f "$f" ]; then run rm -f "$f"; printf 'removed %s\n' "$f"; fi
+done
 if [ -f "$prefix/share/ccage/ccage-handoff.sh" ]; then
     run rm -f "$prefix/share/ccage/ccage-handoff.sh"
     printf 'removed %s/share/ccage/ccage-handoff.sh\n' "$prefix"
@@ -102,13 +105,13 @@ if command -v python3 >/dev/null 2>&1; then
 else
     printf 'warning: python3 not found — per-cage hook entries NOT removed.\n'
     printf '         run "ccage doctor --unseed" before deleting the CLI, or remove the\n'
-    printf '         resume_autoload/session_doc_chunk/resume_budget_check entries and any wrapped statusLine\n'
+    printf '         resume_autoload/session_doc_chunk/resume_budget_check/plan_contract_guard entries and any wrapped statusLine\n'
     printf '         from each cage settings.json.\n'
 fi
 
 # Session-docs assets (Phase 7): hooks, /checkpoint skill, CLAUDE.md anchor.
 hooks_dir="${CCAGE_HOOKS_DIR:-$HOME/.claude/hooks}"
-for f in "$hooks_dir/resume_autoload.sh" "$hooks_dir/session_doc_chunk.sh" "$hooks_dir/resume_budget_check.sh" "$hooks_dir/ccage-statusline-tee.sh" "$hooks_dir/lib/plan_docs.sh"; do
+for f in "$hooks_dir/resume_autoload.sh" "$hooks_dir/session_doc_chunk.sh" "$hooks_dir/resume_budget_check.sh" "$hooks_dir/plan_contract_guard.sh" "$hooks_dir/ccage_plan.py" "$hooks_dir/ccage-statusline-tee.sh" "$hooks_dir/lib/plan_docs.sh"; do
     if [ -f "$f" ]; then run rm -f "$f"; printf 'removed %s\n' "$f"; fi
 done
 # lib/ may hold other files (the status line keeps its own); remove it only when empty.

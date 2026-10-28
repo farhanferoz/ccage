@@ -233,7 +233,7 @@ Long sessions end at `/clear` — and the next one starts cold. ccage ships an o
 - **Budget hook** — a non-blocking `PostToolUse` reminder when a `RESUME` file grows past 3 session blocks.
 - **`ccage doctor`** — one-shot sweep across every existing cage: backfills the two hook entries into each `settings.json` (idempotent merge, existing keys preserved) and prints a worklist of bloated `RESUME*.md` files and messy memory dirs. `--dry-run` previews without writing.
 
-`install.sh` deploys the hooks and the skill (skip all of it with `--no-session-docs`). Seeding the hook entries into cages is opt-in via `CCAGE_SESSION_DOCS=1`; per-hook opt-outs are `CCAGE_NO_AUTOLOAD=1` and `CCAGE_NO_BUDGET_HOOK=1`.
+`install.sh` deploys the hooks and the skill (skip all of it with `--no-session-docs`). Seeding the hook entries into cages is opt-in via `CCAGE_SESSION_DOCS=1`; per-hook opt-outs are `CCAGE_NO_AUTOLOAD=1`, `CCAGE_NO_BUDGET_HOOK=1` and `CCAGE_NO_PLAN_GUARD=1`. See the CHANGELOG entry for the plan contract (`ccage plan-report`, `ccage review`).
 
 > **Caveat:** the auto-read hook injects `RESUME.md` from whatever repo you're in — including one you just cloned. A malicious repo could ship a crafted `RESUME.md` as a prompt-injection vector. Documented in `docs/FEATURES.md`; disable per-cage with `CCAGE_NO_AUTOLOAD=1` if you work in untrusted checkouts.
 
@@ -369,6 +369,7 @@ All off by default. Set any of these before launching `claude`:
 | `CCAGE_SESSION_DOCS=1` | Opt **in**: seed the session-continuity hooks into each cage's `settings.json`. |
 | `CCAGE_NO_AUTOLOAD=1` | Don't seed the `RESUME.md` auto-read hook. |
 | `CCAGE_NO_BUDGET_HOOK=1` | Don't seed the RESUME-size reminder hook. |
+| `CCAGE_NO_PLAN_GUARD=1` | Don't seed the plan-contract guard (ticks need a passing `done when` check; drops need the owner's quoted words). |
 | `CCAGE_TIER_BUDGET_BYTES` | Byte budget for the always-loaded startup tier (`CLAUDE.md` + `main-session-doctrine.md` + `rules/*.md`), default `26000`. A write that grows the *total* past it is blocked; one that doesn't increase it never is. Machine-wide, not per cage. See [docs/FEATURES.md](docs/FEATURES.md). |
 | `CCAGE_SEED_LOCAL_HOOKS=1` | Opt **in**: seed the user's own policy hooks (from `~/.claude/settings.json`) into each cage's `settings.json`. See `docs/FEATURES.md`. |
 | `CCAGE_ROOT=/some/dir` | Parent directory for isolated configs (default `$HOME`). |

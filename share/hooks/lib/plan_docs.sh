@@ -40,6 +40,17 @@ plan_box_counts() {
     printf '%s %s %s\n' "${open_n:-0}" "${done_n:-0}" "${vague:-0}"
 }
 
+# plan_open_unchecked DOC
+#   Prints the ID (first word after the box) of every open `- [ ]` item that carries no
+#   ` — done when: `command`` check, one per line: items nothing can verify (plan contract,
+#   lib/ccage_plan.py).
+plan_open_unchecked() {
+    # shellcheck disable=SC2016  # literal backticks are the pattern
+    grep -E '^[[:space:]]*[-*][[:space:]]+\[[[:space:]]\]' "$1" 2>/dev/null \
+        | grep -vE ' — done when: `[^`]+`[[:space:]]*$' \
+        | sed -E 's/^[[:space:]]*[-*][[:space:]]+\[[[:space:]]\][[:space:]]+([^[:space:]]+).*/\1/'
+}
+
 # plan_ticked_missing DOC
 #   Prints, one per line, every path-looking backticked token on a DONE (`- [x]`) line that does
 #   not exist on disk: a tick whose deliverable is absent. A token is path-looking when it starts

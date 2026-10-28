@@ -2,6 +2,19 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Plan contract: a plan item is done when its check passes.** A `## Progress` line may end with ` — done when: `<command>``. `share/hooks/plan_contract_guard.sh` (PreToolUse on Edit, Write and MultiEdit of any markdown file with a `## Progress` section; seeded into cages with the session-docs hooks, opt out with `CCAGE_NO_PLAN_GUARD=1`) refuses to tick `- [ ]` to `- [x]` unless the item's command exits 0 (run in the plan's git root, 120 s cap), and refuses to drop an item or change its ID, title, write set or done-when unless the plan carries `owner approved: "<quote>"` for it, with a quote of 20+ characters that appears in a user turn of the session transcript. An internal error allows the edit and is logged to `plan_contract_guard.log`. Logic in `lib/ccage_plan.py`.
+- **`ccage plan-report <plan.md> [--no-run]`** prints each item with its state and the result of its check now; a ticked item whose check fails is REGRESSED and the exit status is non-zero.
+- **`ccage review <plan.md> <ID> [--diff RANGE] [--files F...] [--model opus] [--effort high]`** asks an independent model (agentcall, tools off, JSON schema) whether the work does what the item says, and saves `reviews/<ID>-<UTC time>.md` with the verdict, findings and provenance. Prompt: `share/prompts/review.md`. Exit 0 on PASS, 1 on NEEDS_WORK.
+- The session-start PLAN STATE line names open items with no done-when check as "not checkable".
+
+### Changed
+
+- **`CCAGE_SEED_LOCAL_HOOKS` now removes retired hooks.** A cage registration whose script is in the hooks dir but is no longer registered anywhere in the user's own `settings.json` is removed from the cage. ccage-owned hooks and hooks outside the hooks dir are untouched, and nothing is removed when the source registers no hook from the hooks dir at all.
+
 ## [0.21.1] — 2026-10-31
 
 Patch: two fixes, no new options.

@@ -726,6 +726,16 @@ plan_with() {   # plan_with <filename> <contents>
     run run_hook
     [[ "$output" == *"PLAN STATE"* ]]
     [[ "$output" == *"p.md: 1 of 2 items OPEN"* ]]
+    [[ "$output" == *"1 not checkable (no done-when)"* ]]
+}
+
+@test "plan readiness: an open item with a done-when check is checkable" {
+    plan_with p.md '## Progress
+- [ ] T1 one `lib/a.py` — done when: `true`
+'
+    run run_hook
+    [[ "$output" == *"p.md: 1 of 1 items OPEN"* ]]
+    [[ "$output" != *"not checkable"* ]]
 }
 
 @test "plan readiness: flags open items that name no file" {

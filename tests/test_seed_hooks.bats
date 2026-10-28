@@ -46,6 +46,8 @@ has_cmd() {
     has_cmd PostToolUse  "$BUDGET_CMD"
     [ "$(jq -r '.hooks.SessionStart[0].matcher' "$SETTINGS")" = "startup|resume|clear|compact" ]
     [ "$(jq -r '.hooks.PostToolUse[0].matcher'  "$SETTINGS")" = "Write|Edit" ]
+    has_cmd PreToolUse "bash $HOOKS_DIR/plan_contract_guard.sh"
+    [ "$(jq -r '.hooks.PreToolUse[0].matcher' "$SETTINGS")" = "Write|Edit|MultiEdit" ]
 }
 
 @test "opt-in preserves existing unrelated keys (statusLine, plugins, effort)" {

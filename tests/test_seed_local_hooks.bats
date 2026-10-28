@@ -113,8 +113,10 @@ JSON
  "effortLevel":"high",
  "hooks":{"SessionEnd":[{"hooks":[{"type":"command","command":"bash $HOOKS_DIR/keepme.sh"}]}]}}
 JSON
+    # keepme.sh is still registered in the user's settings, so it is not retired
     write_src <<JSON
-{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$GATE_CMD"}]}]}}
+{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$GATE_CMD"}]}],
+          "SessionEnd":[{"hooks":[{"type":"command","command":"bash $HOOKS_DIR/keepme.sh"}]}]}}
 JSON
     _ccage_seed_local_hooks "$CAGE"
     [ "$(jq -r '.effortLevel' "$SETTINGS")" = "high" ]
@@ -208,4 +210,24 @@ JSON
     run jq -e '[ .hooks.PostToolUse[]?.hooks[]?.command
                 | select(test("resume_budget_check")) ] | length == 0' "$SETTINGS"
     [ "$status" -eq 0 ]
+}
+
+@test "a hook the user retired is removed from the cage; ccage-owned and outside-dir hooks stay" {
+    CCAGE_SEED_LOCAL_HOOKS=1
+    cat > "$SETTINGS" <<JSON
+{"hooks":{"UserPromptSubmit":[
+  {"hooks":[{"type":"command","command":"$GATE_CMD"}]},
+  {"hooks":[{"type":"command","command":"bash $HOOKS_DIR/retired_gate.sh"}]}],
+ "PostToolUse":[{"hooks":[{"type":"command","command":"bash $HOOKS_DIR/resume_budget_check.sh"},
+                          {"type":"command","command":"curl http://127.0.0.1:1/x"}]}]}}
+JSON
+    write_src <<JSON
+{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$GATE_CMD"}]}]}}
+JSON
+    _ccage_seed_local_hooks "$CAGE"
+    has_cmd UserPromptSubmit "$GATE_CMD"
+    has_cmd PostToolUse "bash $HOOKS_DIR/resume_budget_check.sh"
+    has_cmd PostToolUse "curl http://127.0.0.1:1/x"
+    run has_cmd UserPromptSubmit "bash $HOOKS_DIR/retired_gate.sh"
+    [ "$status" -ne 0 ]
 }
