@@ -105,10 +105,13 @@ def test_review_saves_the_verdict_and_exits_by_it(tmp_path, monkeypatch):
     assert "EVIDENCE-BLOCK" in seen["prompt"] and "{{" not in seen["prompt"]
 
 
-def test_items_with_a_shared_first_word_are_keyed_by_title(tmp_path):
-    old = "## Progress\n- [ ] Step 2 — wire it\n- [ ] Step 5 — ship it\n"
+def test_only_items_with_a_shared_first_word_are_keyed_by_title(tmp_path):
+    old = "## Progress\n- [ ] Step 2 — wire it\n- [ ] Step 5 — ship it\n- [ ] A2 Second — x\n"
     code, err = guard(tmp_path, old, old.replace("[ ] Step 2", "[x] Step 2"))
     assert code == 2 and "TICK Step 2" in err and "no done-when" in err
+    t = transcript(tmp_path, user(f"ok: {QUOTE}, go ahead"))
+    dropped = old.replace("- [ ] A2 Second — x\n", "") + f'A2 owner approved: "{QUOTE}"\n'
+    assert guard(tmp_path, old, dropped, t)[0] == 0
 
 
 def test_a_quote_found_only_in_a_teammate_message_is_denied(tmp_path):

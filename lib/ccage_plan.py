@@ -79,19 +79,19 @@ def _rests(text: str) -> list[str]:
     return out
 
 
-def by_title(*texts: str) -> bool:
-    """True when first words collide ("Step 2", "Step 5"), so items must be keyed by title."""
+def colliding_words(*texts: str) -> set[str]:
+    """First words shared by two items of one text ("Step" for "Step 2", "Step 5")."""
+    out: set[str] = set()
     for t in texts:
         firsts = [r.split()[0] for r in _rests(t)]
-        if len(firsts) != len(set(firsts)):
-            return True
-    return False
+        out |= {w for w in firsts if firsts.count(w) > 1}
+    return out
 
 
-def parse_progress(text: str, titled: bool | None = None) -> dict[str, Item]:
-    """Items of the `## Progress` section in file order, keyed by first word (ID) or, when
-    first words are not unique, by the text before the first " — " (the title)."""
-    titled = by_title(text) if titled is None else titled
+def parse_progress(text: str, colliding: set[str] | None = None) -> dict[str, Item]:
+    """Items of the `## Progress` section in file order, keyed by first word (ID), or by the
+    text before the first " — " (the title) when the first word collides with another item's."""
+    colliding = colliding_words(text) if colliding is None else colliding
     items: dict[str, Item] = {}
     inside = False
     for line in text.splitlines():
@@ -107,7 +107,7 @@ def parse_progress(text: str, titled: bool | None = None) -> dict[str, Item]:
         if not rest:
             continue
         dw = DONE_WHEN.search(rest)
-        item_id = rest.split(" — ")[0] if titled else rest.split()[0]
+        item_id = rest.split(" — ")[0] if rest.split()[0] in colliding else rest.split()[0]
         items[item_id] = Item(item_id, m.group(1) in "xX", rest, dw.group(1) if dw else None)
     return items
 
@@ -174,8 +174,8 @@ def approved_quotes(text: str, item_id: str) -> list[str]:
 
 
 def violations(old: str, new: str, plan: Path, transcript: Path | None) -> list[str]:
-    titled = by_title(old, new)
-    before, after = parse_progress(old, titled), parse_progress(new, titled)
+    shared = colliding_words(old, new)
+    before, after = parse_progress(old, shared), parse_progress(new, shared)
     out: list[str] = []
     root = git_root(plan)
     deadline = time.monotonic() + float(os.environ.get("CCAGE_PLAN_GUARD_BUDGET_S", GUARD_BUDGET_S))
