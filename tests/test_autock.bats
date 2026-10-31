@@ -1156,6 +1156,9 @@ line two' </dev/null"
     [ "$status" -eq 0 ]
     [[ "$output" != *"LAUNCHED"* ]]
     [ "$(cat "$REPO/.ccage-say")" = "line one line two" ]
+    # No session runs here: the sender must hear that the message waits.
+    [[ "$output" == *"NO session is running here now"* ]]
+    [[ "$output" == *"tell the user now"* ]]
     # A slotted session gets its own file. Two slots can share one project dir,
     # and a message must reach only the slot it was sent to.
     run bash -c "cd '$REPO' && CCAGE_SLOT=opencode '$AUTO' --say hello"
@@ -1174,27 +1177,47 @@ line two' </dev/null"
     [ "$status" -eq 1 ]
     [[ "$output" == *"still pending"* ]]
     # No watcher runs here, so "send again after the next poll" would be false:
-    # a watcher started later drops the older message as stale.
-    [[ "$output" == *"no watcher is running for this slot"* ]]
-    [[ "$output" == *"delete $REPO/.ccage-say to replace it"* ]]
+    # the pending message waits for the next session.
+    [[ "$output" == *"no session is running here to type it"* ]]
+    [[ "$output" == *"delete that file and --say them together"* ]]
     [[ "$output" != *"next poll"* ]]
     [ "$(cat "$REPO/.ccage-say")" = "first" ]
     [ -z "$(compgen -G "$REPO/.ccage-say*.tmp")" ]
 }
 
 @test "--say refusal with a live watcher here still says to wait for its next poll" {
+    # A live watcher of ANOTHER slot is not one for this slot. Written by the
+    # watcher's own record writer, so writer and reader are tested together.
+    python3 - "$AUTO" "$REPO" "$$" <<'PY'
+import importlib.util, importlib.machinery, os, sys
+loader = importlib.machinery.SourceFileLoader("ccageauto", sys.argv[1])
+spec = importlib.util.spec_from_loader("ccageauto", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+os.environ["CCAGE_SLOT"] = "other"
+m.write_watcher_pidfile(sys.argv[2], int(sys.argv[3]))   # this shell: alive
+PY
     run conf --say first
     [ "$status" -eq 0 ]
-    printf 'pid=%d\n' "$$" > "$REPO/.ccage-autock.pid.$$"   # this shell: alive
+    [[ "$output" == *"NO session is running here now"* ]]
+    rm -f "$REPO/.ccage-say"
+    run bash -c "cd '$REPO' && CCAGE_SLOT=other '$AUTO' --say first"
+    [[ "$output" == *"a session is running here: typed within one poll"* ]]
+    rm -f "$REPO/.ccage-say.other"
+    # A record from before records carried a slot counts as this slot's.
+    printf 'pid=%d\n' "$$" > "$REPO/.ccage-autock.pid.$$"
+    run conf --say first
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"a session is running here: typed within one poll"* ]]
+    [[ "$output" != *"NO session"* ]]
     run conf --say second
     rm -f "$REPO/.ccage-autock.pid.$$"
     [ "$status" -eq 1 ]
     [[ "$output" == *"next poll"* ]]
 }
 
-@test "Watcher._deliver_say: types a queued message once, only when ready and not clearing, never a stale one or another slot's (unit)" {
+@test "Watcher._deliver_say: types a queued message once, only when ready, not clearing and no draft open, an old one after the first prompt with its time, never another slot's (unit)" {
     run python3 - "$AUTO" "$REPO" "$SDIR" <<'PY'
-import importlib.util, importlib.machinery, os, sys, threading
+import importlib.util, importlib.machinery, os, re, sys, threading, time
 loader = importlib.machinery.SourceFileLoader("ccageauto", sys.argv[1])
 spec = importlib.util.spec_from_loader("ccageauto", loader)
 m = importlib.util.module_from_spec(spec); loader.exec_module(m)
@@ -1229,6 +1252,11 @@ wat._deliver_say()                     # it would land in the session being wipe
 assert typed() == b"" and os.path.exists(path)
 
 wat.state = wat.NORMAL
+wat.kw_draft = True                    # the user is half-way through a message
+wat._deliver_say()
+assert typed() == b"" and os.path.exists(path)
+
+wat.kw_draft = False
 wat.paused = True                      # pause governs checkpoints, not messages
 wat._deliver_say()
 assert typed() == b"hello there\r", "not typed"
@@ -1237,9 +1265,15 @@ assert [n for n in os.listdir(cwd) if n.startswith(".ccage-say")] == [], os.list
 wat._deliver_say()                     # consumed: typed exactly once
 assert typed() == b""
 
-queue("from a previous run", age=60)   # queued before this watcher started
-wat._deliver_say()
-assert typed() == b"" and not os.path.exists(path)
+queue("from a previous run", age=2 * 86400 + 60)   # queued while no session ran here
+wat._deliver_say()                     # no first prompt yet: a start-up dialog may be showing
+assert typed() == b"" and os.path.exists(path)
+wat.kw_enter_at = time.time()          # the user has sent the first prompt
+wat._deliver_say()                     # typed, led by when it was queued
+got = typed()
+assert re.fullmatch(rb"\[queued \d{4}-\d\d-\d\d \d\d:\d\d, 2 days before this session started; "
+                    rb"check it still holds before acting on it\] from a previous run\r", got), got
+assert not os.path.exists(path)
 
 unslotted = os.path.join(cwd, ".ccage-say")
 with open(unslotted, "w") as f:

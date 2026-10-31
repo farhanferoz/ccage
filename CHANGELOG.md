@@ -2,6 +2,12 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **`ccage-auto --say` no longer loses a message sent while no session is running.** A watcher used to drop any message older than itself, so a message sent to a closed session was thrown away unread when the next one started (2026-10-31: two messages from another project's session, kept nowhere else). The next session now types it once it has had its first prompt, led by when it was queued, how long it waited and a reminder to check it still holds. `--say` also says plainly when no session of that slot is running to take the message (watcher records now carry their slot), and, when one is already waiting, how to send both together. A message, new or old, now waits while the user has a half-typed prompt instead of being added to it and submitted.
+
 ## [0.21.0] — 2026-10-05
 
 Minor: the resume prompt now says something different, and session docs gain a way to bound their own size.

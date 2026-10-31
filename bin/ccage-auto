@@ -1151,9 +1151,23 @@ def _read_watcher_pid(path):
     return None
 
 
+def _read_watcher_slot(path):
+    """The `slot=` value (a slot suffix, "" when unslotted) from a watcher
+    liveness record, or None for a record written before records carried one."""
+    try:
+        with open(path) as f:
+            for line in f:
+                if line.startswith("slot="):
+                    return line[5:].strip()
+    except OSError:
+        return None
+    return None
+
+
 def _live_watcher_here(cwd):
-    """True if any watcher liveness record in cwd names a live process. Records
-    carry no slot, so this answers for the project dir, not one slot."""
+    """True if a watcher liveness record in cwd names a live process of THIS
+    slot (two slots can share a project dir). A record with no slot line comes
+    from a watcher started before records carried one and counts as a match."""
     try:
         names = os.listdir(cwd)
     except OSError:
@@ -1161,8 +1175,11 @@ def _live_watcher_here(cwd):
     prefix = WATCHER_PIDFILE_BASE + "."
     for name in names:
         if name.startswith(prefix):
-            pid = _read_watcher_pid(os.path.join(cwd, name))
-            if pid is not None and _pid_alive(pid):
+            path = os.path.join(cwd, name)
+            pid = _read_watcher_pid(path)
+            if pid is None or not _pid_alive(pid):
+                continue
+            if _read_watcher_slot(path) in (None, slot_suffix()):
                 return True
     return False
 
@@ -1210,6 +1227,7 @@ def write_watcher_pidfile(cwd, pid):
             f.write("pid=%d\n" % pid)
             if start is not None:
                 f.write("start=%d\n" % int(start))
+            f.write(f"slot={slot_suffix()}\n")
         os.replace(tmp, path)
         _git_exclude(cwd, WATCHER_PIDFILE_GLOB)
     except OSError:
@@ -1248,6 +1266,16 @@ def control_path(cwd):
 
 
 SAY_FILE = ".ccage-say"
+
+
+def _say_age(seconds):
+    """How long a message waited, in the largest whole unit: '5 minutes',
+    '3 hours', '2 days'."""
+    for unit, size in (("day", 86400), ("hour", 3600), ("minute", 60)):
+        n = int(seconds // size)
+        if n >= 1:
+            return f"{n} {unit}{'' if n == 1 else 's'}"
+    return "under a minute"
 
 
 def say_path(cwd):
@@ -1800,20 +1828,35 @@ class Watcher:
 
         Held while the TUI is not ready, and while a /clear is in flight, where
         it would land in the session being wiped. Not held by pause, which
-        governs checkpoints only. A message older than this watcher was queued
-        for an earlier run and is dropped, not typed. Returns True when it typed
-        one."""
-        if self.state == self.CLEARING or not self.tui_ready.is_set():
+        governs checkpoints only. Held while the user has a half-typed draft,
+        which the message and its Enter would otherwise submit.
+
+        A message older than this watcher was queued while no session ran here.
+        It is typed too, once the session has had its first prompt (so it never
+        answers a start-up dialog or joins the user's first message), led by
+        when it was queued and a reminder to check it still holds. It used to be
+        dropped, which lost messages the sender held nowhere else (2026-10-31:
+        two from another project's session, sent while this one was closed).
+        Returns True when it typed one."""
+        if (self.state == self.CLEARING or not self.tui_ready.is_set()
+                or self.kw_draft):
             return False
         path = say_path(self.cwd)
+        try:
+            queued = os.path.getmtime(path)
+        except OSError:
+            return False
+        started = bool(self.cfg.init_prompt) or self.kw_enter_at > 0
+        if queued < self.start_time and not started:
+            return False
         taken = path + ".taken"
         try:
             os.rename(path, taken)   # atomic claim: typed at most once
         except OSError:
             return False
         try:
-            stale = os.path.getmtime(taken) < self.start_time
-            with open(taken) as f:
+            queued = os.path.getmtime(taken)
+            with open(taken, errors="replace") as f:
                 text = " ".join(f.read().split())
         except OSError:
             return False
@@ -1822,14 +1865,19 @@ class Watcher:
                 os.remove(taken)
             except OSError:
                 pass
-        if stale:
-            self._log("dropped a --say message queued before this watcher started: %s"
-                      % text[:80])
-        elif text:
+        if not text:
+            return False
+        if queued < self.start_time:
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(queued))
+            age = _say_age(self.start_time - queued)
+            text = (f"[queued {when}, {age} before this session started; "
+                    f"check it still holds before acting on it] {text}")
+            self._log("typing a --say message queued before this watcher started: %s"
+                      % text[:120])
+        else:
             self._log("typing --say message: %s" % text[:80])
-            self._type(text)
-            return True
-        return False
+        self._type(text)
+        return True
 
     def _weekly_warn_msg(self, remaining):
         return (
@@ -3527,18 +3575,24 @@ def control_command(argv):
                 sys.stderr.write("[ccage-auto] --say: a message is still pending in %s; "
                                  "send again after the watcher's next poll\n" % path)
             else:
-                # A watcher started later drops a message older than itself, so
-                # "wait for the next poll" would never come true.
+                # No poll is coming: the pending message waits for the next
+                # session, so "send again after the next poll" would be false.
                 sys.stderr.write("[ccage-auto] --say: a message is still pending in %s, "
-                                 "and no watcher is running for this slot; the pending "
-                                 "message will be dropped when one starts — delete %s "
-                                 "to replace it\n" % (path, path))
+                                 "and no session is running here to type it; it is typed "
+                                 "when the next one starts. Send yours after that, or "
+                                 "send both as one: delete that file and --say them "
+                                 "together\n" % path)
             return 1
         finally:
             os.remove(tmp)
         _git_exclude(cwd, os.path.basename(path))
         print("ccage-auto: message queued in %s" % path)
-        print("            typed within one poll if a watcher is running for this slot.")
+        if _live_watcher_here(cwd):
+            print("            a session is running here: typed within one poll.")
+        else:
+            print("            NO session is running here now: the message waits and is "
+                  "typed when the next one starts in this slot. If you need an answer "
+                  "soon, tell the user now, so they can start that session.")
         return 0
 
     # --set: one or more key=value tokens (space- or comma-separated).
