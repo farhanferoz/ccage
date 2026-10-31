@@ -2,10 +2,13 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.21.1] — 2026-10-31
+
+Patch: two fixes, no new options.
 
 ### Fixed
 
+- **earlyoom can spare a session's wrapper and watcher.** Under memory pressure earlyoom ended three sessions on 2026-10-18 by killing their `ccage-auto` wrappers: as plain `python3` they matched its `--prefer` rule. `ccage-auto` and `ccage-watch` now set their process name at startup, so an `--avoid` rule can match them by name. A no-op where that call is unavailable; running processes keep the old name until they restart.
 - **`ccage-auto --say` no longer loses a message sent while no session is running.** A watcher used to drop any message older than itself, so a message sent to a closed session was thrown away unread when the next one started (2026-10-31: two messages from another project's session, kept nowhere else). The next session now types it once it has had its first prompt, led by when it was queued, how long it waited and a reminder to check it still holds. `--say` also says plainly when no session of that slot is running to take the message (watcher records now carry their slot), and, when one is already waiting, how to send both together. A message, new or old, now waits while the user has a half-typed prompt instead of being added to it and submitted.
 
 ## [0.21.0] — 2026-10-05
