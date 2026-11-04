@@ -2,7 +2,9 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.22.0] — 2026-11-04
+
+Minor: a plan item is done when its check passes, and two new commands report and review plan items.
 
 ### Added
 
