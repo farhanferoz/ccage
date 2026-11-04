@@ -10,7 +10,8 @@ load helpers
 setup() {
     command -v python3 >/dev/null 2>&1 || skip "python3 not available"
     load_ccage
-    unset CCAGE_SESSION_DOCS CCAGE_NO_AUTOLOAD CCAGE_NO_BUDGET_HOOK
+    # CCAGE_DOC_CHUNKS too: a user's exported value (e.g. 64) made the fallback test expect it
+    unset CCAGE_SESSION_DOCS CCAGE_NO_AUTOLOAD CCAGE_NO_BUDGET_HOOK CCAGE_DOC_CHUNKS
 
     CAGE="$BATS_TEST_TMPDIR/cage"
     mkdir -p "$CAGE"

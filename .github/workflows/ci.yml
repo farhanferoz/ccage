@@ -80,3 +80,14 @@ jobs:
           printf 'suite running under: '; bash --version | head -1
           ./tests/bats/bin/bats tests/
         shell: bash
+
+      # Python unit tests (tests/*.py): run by no CI leg before 0.22.1. One leg is enough to
+      # catch a broken test. Ubuntu's system python refuses pip installs (PEP 668), so pytest
+      # goes into a throwaway venv; the tests' own subprocesses still use the system python3.
+      - name: pytest
+        if: matrix.os == 'ubuntu-latest' && matrix.shell == 'bash'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/pytest-venv"
+          "$RUNNER_TEMP/pytest-venv/bin/pip" install --quiet pytest
+          "$RUNNER_TEMP/pytest-venv/bin/python" -m pytest tests/ -q -p no:cacheprovider
+        shell: bash

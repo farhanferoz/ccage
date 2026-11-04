@@ -79,14 +79,24 @@ fi
 #    SIGHUP-close fixes) were executed by nothing. A new test file must be picked
 #    up by being written, not by being remembered here.
 step "pytest (Python unit tests)"
+# A python3 without pytest falls back to uvx rather than skipping: the skip made a green
+# local run look complete while 200+ tests had not run.
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import pytest' >/dev/null 2>&1; then
-    if python3 -m pytest tests/ -p no:hydra_pytest -q; then
+    pytest_cmd="python3 -m pytest"
+elif command -v uvx >/dev/null 2>&1; then
+    pytest_cmd="uvx --with pytest pytest"
+else
+    pytest_cmd=""
+fi
+if [ -n "$pytest_cmd" ]; then
+    # shellcheck disable=SC2086  # word-splitting the command is intended
+    if $pytest_cmd tests/ -p no:hydra_pytest -p no:cacheprovider -q; then
         ok "pytest"
     else
         bad "pytest"
     fi
 else
-    printf 'SKIP: python3/pytest not available (CI shell legs lack it; run before pushing CB changes)\n'
+    bad "pytest not available (no python3 with pytest, no uvx) — CI's ubuntu leg runs it"
 fi
 
 step "summary"

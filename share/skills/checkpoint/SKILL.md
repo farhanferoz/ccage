@@ -82,7 +82,8 @@ same-directory case.
   Touches only the continuity files, not memory. Also clears any
   `.ccage-session-done` marker (§6) — a plain checkpoint means "still working."
 - **`--final`** (work is genuinely done) — do the lean checkpoint, **then** write
-  the `.ccage-session-done` marker (§6). This is the only mode that writes it; use
+  the `.ccage-session-done` marker (§6), which waits on the end-of-work audit
+  (§3 step 8). This is the only mode that writes it; use
   it when the session's actual task is complete and you're winding down for real,
   not for a routine mid-work save. It's what lets background helpers stop:
   `/keepwarm` self-stops on its next wake and `ccage-auto` stands down instead of
@@ -383,6 +384,28 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    - **`--final` in the invocation** (alone or with `--tidy`) → run
      `bash "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/checkpoint/checkpoint-init.sh" mark-done`.
      `--final` always wins: `--final --tidy` marks done **and** tidies.
+     `mark-done` first runs the **end-of-work audit** when
+     `~/.claude/scripts/end_of_work_audit.py` exists (it is not part of ccage; without it this
+     step is skipped). The audit is read-only and reports: leftover changes,
+     worktrees, branches, stashes, unpushed commits, junk-named files, a ≥ 1 GB
+     folder Syncthing would copy to every machine, superseded images and stopped
+     or unlabelled containers of this repo's compose projects (`FIX`), and paths
+     in RESUME/DISK/planning that no longer exist (`CHECK`). Its disk section
+     (`hooks/lib/disk_ledger.py`, also printed at every session start by
+     `hooks/disk_due_report.sh`) adds `FIX` for a DISK.md row whose
+     `[study: <folder>]` is closed while data remains and for >= 1 GB on a
+     `remote-roots:` machine with no line, and `CHECK` for a run folder with more
+     than 20 per-epoch, snapshot or rung-fit checkpoints. Research checkpoints go
+     only after one owner OK with the exact keep-set; a row that must stay gets
+     `[keep: <reason>]`. On a `FIX` it exits
+     3 and writes no marker: fix each item (delete, move, register in DISK.md,
+     update the stale note), then re-run; only an item that must stay is passed
+     through `CHECKPOINT_AUDIT_ACCEPT="<why>"`. Also check what the script
+     cannot see: data placed per the project's rules (NAS vs local disk), large
+     items registered in DISK.md, GPU leases released. **Report the audit's
+     result in the step-9 message** — the owner should never have to ask whether
+     clean-up was done (owner, 2026-10-17: "i should not have to ask you again
+     and again").
    - **no `--final`** (plain, `--tidy` alone, `--merge-slots`) → run the same
      helper with `clear-done`.
 
@@ -390,7 +413,8 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    going otherwise. Skip gracefully if the helper is missing.
 9. **End by telling the user:** `RESUME updated — safe to /clear.` (append
    `, CHANGELOG rolled` only if step 5 actually moved a block; append
-   `, marked done` on `--final`).
+   `, marked done` on `--final`, followed by the audit result: what was cleaned,
+   what was accepted and why).
 
 Use the same six-part structure as a `session-handoff` brief for the per-session
 narrative if helpful — but `/checkpoint` differs in that it writes a persistent,

@@ -232,10 +232,15 @@ if [ "$install_session_docs" = 1 ]; then
     install_file "$REPO_ROOT/share/skills/skill-catalog/SKILL.md"        "$share_from/skills/skill-catalog/SKILL.md"
     install_file "$REPO_ROOT/share/skills/skill-catalog/skill-catalog.sh" "$share_from/skills/skill-catalog/skill-catalog.sh" 0755
 
-    # CLAUDE.md anchor — short always-on note, marker-guarded so re-runs are safe.
+    # CLAUDE.md anchor — short always-on note, marker-guarded so re-runs are safe. A file
+    # that carries its own "Session continuity (ccage)" section (the user replaced the
+    # anchor with their own wording) is left alone too; re-appending put the removed
+    # block back on every install.
     claude_md="$HOME/.claude/CLAUDE.md"
     if [ -f "$claude_md" ] && grep -qF 'ccage:session-docs:start' "$claude_md" 2>/dev/null; then
         printf 'note: %s already has the ccage session-docs anchor — not modifying\n' "$claude_md"
+    elif [ -f "$claude_md" ] && grep -qE '^#+ Session continuity \(ccage\)' "$claude_md" 2>/dev/null; then
+        printf 'note: %s has its own "Session continuity (ccage)" section — not adding the anchor\n' "$claude_md"
     elif [ "$dry_run" = 1 ]; then
         printf '+ append session-docs anchor to %s\n' "$claude_md"
     else

@@ -202,6 +202,10 @@ setup() {
     grep -qx '# my global instructions' "$FAKE_HOME/.claude/CLAUDE.md"
     grep -qx 'be terse' "$FAKE_HOME/.claude/CLAUDE.md"
     grep -q 'ccage:session-docs:start' "$FAKE_HOME/.claude/CLAUDE.md"
+    # the user's own section replaces the anchor: it is not put back
+    printf '%s\n' '# rules' '## Session continuity (ccage)' '- my wording' > "$FAKE_HOME/.claude/CLAUDE.md"
+    HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
+    ! grep -q 'ccage:session-docs:start' "$FAKE_HOME/.claude/CLAUDE.md"
 }
 
 @test "install --no-session-docs: hooks, skill, anchor all skipped" {

@@ -98,6 +98,21 @@ in_repo() { ( cd "$REPO" && "$@" ); }
     [ -z "$( cd "$REPO" && git status --porcelain )" ]
 }
 
+@test "mark-done: an end-of-work audit with findings refuses the marker unless accepted" {
+    # installed layout: <cfg>/skills/checkpoint/checkpoint-init.sh, audit at <cfg>/scripts/
+    cfg="$BATS_TEST_TMPDIR/cfg"
+    mkdir -p "$cfg/skills/checkpoint" "$cfg/scripts"
+    cp "$HELPER" "$cfg/skills/checkpoint/checkpoint-init.sh"
+    printf 'import sys\nprint("FIX leftover")\nsys.exit(1)\n' > "$cfg/scripts/end_of_work_audit.py"
+    ( cd "$REPO" && git init -q )
+    run in_repo bash "$cfg/skills/checkpoint/checkpoint-init.sh" mark-done
+    [ "$status" -eq 3 ]
+    [ ! -f "$REPO/.ccage-session-done" ]
+    CHECKPOINT_AUDIT_ACCEPT="kept on purpose" run in_repo bash "$cfg/skills/checkpoint/checkpoint-init.sh" mark-done
+    [ "$status" -eq 0 ]
+    grep -q 'audit findings accepted: kept on purpose' "$REPO/.ccage-session-done"
+}
+
 @test "mark-done is idempotent: re-run does not duplicate the exclude line" {
     ( cd "$REPO" && git init -q )
     in_repo bash "$HELPER" mark-done

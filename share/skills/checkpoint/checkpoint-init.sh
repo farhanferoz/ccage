@@ -107,10 +107,25 @@ EOF
         ;;
 
     mark-done)
-        # Terminal done-signal for /checkpoint --final. Write the marker with a
-        # UTC timestamp (informational; consumers only test existence/mtime) and
-        # keep it out of git — it's transient local state, like RESUME.
+        # Terminal done-signal for /checkpoint --final. First the end-of-work
+        # audit (scripts/end_of_work_audit.py: git leftovers, junk files, heavy
+        # synced folders, superseded images, stale paths). Findings refuse the
+        # marker until fixed, or until CHECKPOINT_AUDIT_ACCEPT names why they
+        # stay (recorded in the marker). Added 2026-10-17: a session marked done
+        # with 12 GB of superseded images and stale data paths left behind.
+        audit="$(dirname "$(readlink -f "$0")")/../../scripts/end_of_work_audit.py"
+        if [ -f "$audit" ]; then
+            python3 "$audit" .
+            if [ $? -eq 1 ] && [ -z "${CHECKPOINT_AUDIT_ACCEPT:-}" ]; then
+                printf 'NOT marked done: fix the FIX lines above, or re-run with CHECKPOINT_AUDIT_ACCEPT="<why they stay>"\n' >&2
+                exit 3
+            fi
+        fi
+        # Write the marker with a UTC timestamp (informational; consumers only
+        # test existence/mtime) and keep it out of git — it's transient local
+        # state, like RESUME.
         printf 'session marked done: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)" > "$marker"
+        [ -n "${CHECKPOINT_AUDIT_ACCEPT:-}" ] && printf 'audit findings accepted: %s\n' "$CHECKPOINT_AUDIT_ACCEPT" >> "$marker"
         if git rev-parse --git-dir >/dev/null 2>&1; then
             ex="$(git rev-parse --git-dir)/info/exclude"
             mkdir -p "$(dirname "$ex")"
