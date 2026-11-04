@@ -151,7 +151,7 @@ Commands:
                 (--no-run to skip); exits non-zero if a ticked item's check fails.
   review        ccage review <plan.md> <ID> [--diff RANGE] [--files F...] [--model opus]
                 [--effort high]: independent model review of one plan item, saved to
-                <git root>/reviews/. Exit 0 PASS, 1 NEEDS_WORK.
+                <git root>/reviews/. Exit 0 PASS, 1 NEEDS_WORK, 2 error.
 
 Env:
   CCAGE_LIB           Override library directory (default: \$(dirname \$0)/../share).

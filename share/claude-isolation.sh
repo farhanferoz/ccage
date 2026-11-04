@@ -459,7 +459,7 @@ _ccage_seed_local_hooks() {
     [ "$src" = "$settings" ] && return 0
 
     python3 - "$settings" "$src" "$hooks_dir" <<'PY' 2>/dev/null || true
-import json, os, sys, tempfile
+import json, os, sys, tempfile, time
 
 settings_path, src_path, hooks_dir = sys.argv[1], sys.argv[2], sys.argv[3]
 
@@ -592,31 +592,64 @@ for event, entries in (src.get("hooks") or {}).items():
 # script -- on every launch. ccage-owned hooks and anything outside the hooks dir are
 # never touched. Skipped when the source registers no hook from the hooks dir at all,
 # so an emptied or half-written source cannot strip every cage.
+def under_hooks_dir(cmd):
+    """A command word is a path inside the hooks dir (not a sibling such as hooks_backup/)."""
+    root = hooks_dir.rstrip("/") + "/"
+    return any(t.startswith(root) for t in expand(cmd).split())
+
+
 src_names = {script_base(h.get("command") or "")
              for entries in (src.get("hooks") or {}).values() if isinstance(entries, list)
              for e in entries if isinstance(e, dict)
              for h in (e.get("hooks") or []) if isinstance(h, dict)
-             if hooks_dir in expand(h.get("command") or "")}
+             if under_hooks_dir(h.get("command") or "")}
 src_names.discard("")
-if src_names:
-    for event in list(hooks):
-        entries = hooks[event]
-        if not isinstance(entries, list):
-            continue
-        kept = []
-        for e in entries:
-            if isinstance(e, dict) and isinstance(e.get("hooks"), list):
-                live = [h for h in e["hooks"]
-                        if not (isinstance(h, dict) and hooks_dir in expand(h.get("command") or "")
-                                and script_base(h.get("command") or "") not in CCAGE_OWNED | src_names)]
-                if len(live) != len(e["hooks"]):
-                    changed = True
-                    if not live:
-                        continue
-                    e = dict(e, hooks=live)
-            kept.append(e)
-        hooks[event] = kept
 
+
+def retired(h):
+    return (isinstance(h, dict) and under_hooks_dir(h.get("command") or "")
+            and script_base(h.get("command") or "") not in CCAGE_OWNED | src_names)
+
+
+# Every removal (and every removal the empty-source check held back) is logged to
+# <cage>/ccage-seed-hooks.log: stderr is discarded, and a hook that silently vanishes
+# from a cage is otherwise unexplainable.
+removed, withheld = [], []
+for event in list(hooks):
+    entries = hooks[event]
+    if not isinstance(entries, list):
+        continue
+    kept = []
+    for e in entries:
+        if isinstance(e, dict) and isinstance(e.get("hooks"), list):
+            gone = [h.get("command") for h in e["hooks"] if retired(h)]
+            if gone and not src_names:
+                withheld += [(event, c) for c in gone]
+            elif gone:
+                removed += [(event, c) for c in gone]
+                changed = True
+                live = [h for h in e["hooks"] if not retired(h)]
+                if not live:
+                    continue
+                e = dict(e, hooks=live)
+        kept.append(e)
+    hooks[event] = kept
+
+
+def seed_log(verdict, pairs, why):
+    if not pairs:
+        return
+    try:
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        with open(os.path.join(os.path.dirname(settings_path) or ".", "ccage-seed-hooks.log"), "a") as f:
+            for event, cmd in pairs:
+                f.write(f"{stamp} {verdict} {event} {cmd!r}: {why}\n")
+    except OSError:
+        pass
+
+
+seed_log("WITHHELD", withheld, f"{src_path} registers no hook from {hooks_dir}, so nothing is retired")
+written = False
 if changed:
     data["hooks"] = hooks
     d = os.path.dirname(settings_path) or "."
@@ -628,11 +661,14 @@ if changed:
         if mode is not None:
             os.chmod(tmp, mode)
         os.replace(tmp, settings_path)
+        written = True
     except OSError:
         try:
             os.unlink(tmp)
         except OSError:
             pass
+if written:
+    seed_log("REMOVED", removed, f"no longer registered in {src_path}")
 PY
 }
 

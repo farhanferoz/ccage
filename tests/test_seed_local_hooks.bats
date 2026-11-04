@@ -123,6 +123,8 @@ JSON
     [ "$(jq -r '.statusLine.command' "$SETTINGS")" = "x" ]
     has_cmd SessionEnd "bash $HOOKS_DIR/keepme.sh"
     has_cmd UserPromptSubmit "$GATE_CMD"
+    # nothing removed or held back: no removal log is created
+    [ ! -e "$CAGE/ccage-seed-hooks.log" ]
 }
 
 @test "never clobbers a present-but-unparseable settings.json" {
@@ -217,7 +219,8 @@ JSON
     cat > "$SETTINGS" <<JSON
 {"hooks":{"UserPromptSubmit":[
   {"hooks":[{"type":"command","command":"$GATE_CMD"}]},
-  {"hooks":[{"type":"command","command":"bash $HOOKS_DIR/retired_gate.sh"}]}],
+  {"hooks":[{"type":"command","command":"bash $HOOKS_DIR/retired_gate.sh"}]},
+  {"hooks":[{"type":"command","command":"bash ${HOOKS_DIR}_backup/old_gate.sh"}]}],
  "PostToolUse":[{"hooks":[{"type":"command","command":"bash $HOOKS_DIR/resume_budget_check.sh"},
                           {"type":"command","command":"curl http://127.0.0.1:1/x"}]}]}}
 JSON
@@ -228,6 +231,18 @@ JSON
     has_cmd UserPromptSubmit "$GATE_CMD"
     has_cmd PostToolUse "bash $HOOKS_DIR/resume_budget_check.sh"
     has_cmd PostToolUse "curl http://127.0.0.1:1/x"
+    # a sibling dir sharing the hooks dir's name prefix is outside it: never retired
+    has_cmd UserPromptSubmit "bash ${HOOKS_DIR}_backup/old_gate.sh"
     run has_cmd UserPromptSubmit "bash $HOOKS_DIR/retired_gate.sh"
     [ "$status" -ne 0 ]
+    grep -q "REMOVED UserPromptSubmit 'bash $HOOKS_DIR/retired_gate.sh'" "$CAGE/ccage-seed-hooks.log"
+
+    # A source that registers nothing from the hooks dir (emptied, half-written) retires
+    # nothing: the cage keeps its hooks and the held-back removal is logged.
+    write_src <<JSON
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"curl http://127.0.0.1:1/y"}]}]}}
+JSON
+    _ccage_seed_local_hooks "$CAGE"
+    has_cmd UserPromptSubmit "$GATE_CMD"
+    grep -q "WITHHELD UserPromptSubmit '$GATE_CMD'" "$CAGE/ccage-seed-hooks.log"
 }

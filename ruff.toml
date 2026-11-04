@@ -1,6 +1,12 @@
 # Ruff config for ccage's Python tooling (bin/ccage-auto helpers, tests).
 # Scope is deliberately narrow: the repo is shell-first, so this only exists to
 # tune the PLR2004 magic-value check that the code-hygiene hook feeds back on.
+
+# The floor the Python runs on (stock macOS python3 is 3.9). Without it ruff assumes a
+# newer one and UP017 rewrites `datetime.timezone.utc` to `datetime.UTC` (3.11+), which
+# made the plan guard crash before every refusal on 3.9/3.10.
+target-version = "py39"
+
 [lint.per-file-ignores]
 # Test assertions compare against reviewed literal expectations (timeouts,
 # byte counts, tier thresholds). PLR2004 is a false positive there — the whole

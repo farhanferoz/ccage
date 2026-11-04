@@ -26,6 +26,7 @@ import datetime as dt
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -43,11 +44,14 @@ APPROVED = re.compile(r'owner approved:\s*"(.+)"')
 # call, so a guard call stops running checks after this many seconds and denies the rest.
 GUARD_BUDGET_S = 480
 # Entries the harness records as user turns although the owner did not type them: other
-# sessions and teammates, task notifications, command output, hook feedback, ccage-auto's
-# own nudges. A quote found only in one of these is not the owner's approval.
+# sessions and teammates, task notifications, command output, hook feedback, and the text
+# ccage-auto types itself (bin/ccage-auto: auto-checkpoint and supervisor nudges, the
+# post-/clear resume prompt, a --say message queued before the session started). A quote
+# found only in one of these is not the owner's approval. KNOWN LIMIT: a --say message
+# typed into a running session carries no marker and counts.
 NOT_OWNER_PREFIXES = ("<system-reminder>", "<teammate-message", "Another Claude session sent a message",
                       "<local-command", "<command-name>", "[SYSTEM NOTIFICATION", "Stop hook feedback",
-                      "[auto-checkpoint]")
+                      "[auto-checkpoint]", "[supervisor]", "Resume the task from RESUME.md", "[queued ")
 REVIEW_TIMEOUT_S = 900
 DIFF_CAP_CHARS = 200_000
 SECTION_CAP_CHARS = 6000
@@ -65,7 +69,8 @@ def has_progress(text: str) -> bool:
     return bool(HEADING_PROGRESS.search(text))
 
 
-def _rests(text: str) -> list[str]:
+def _progress_lines(text: str) -> list[tuple[bool, str]]:
+    """(checked, rest) for each checkbox line of the `## Progress` section, rest whitespace-collapsed."""
     inside, out = False, []
     for line in text.splitlines():
         if HEADING_PROGRESS.match(line):
@@ -74,75 +79,108 @@ def _rests(text: str) -> list[str]:
         if inside and re.match(r"^#{1,2}\s", line):
             inside = False
         m = ITEM.match(line) if inside else None
-        if m and m.group(2).strip():
-            out.append(" ".join(m.group(2).split()))
+        rest = " ".join(m.group(2).split()) if m else ""
+        if rest:
+            out.append((m.group(1) in "xX", rest))
     return out
 
 
-def colliding_words(*texts: str) -> set[str]:
-    """First words shared by two items of one text ("Step" for "Step 2", "Step 5")."""
-    out: set[str] = set()
+def _word(item_id: str) -> re.Pattern[str]:
+    """Matches item_id as a whole word."""
+    return re.compile(r"(?<!\w)" + re.escape(item_id) + r"(?!\w)")
+
+
+def _head(rest: str) -> str:
+    """ID and title: the text before the first " — "."""
+    return rest.split(" — ")[0]
+
+
+def colliding_keys(*texts: str) -> tuple[set[str], set[str]]:
+    """First words, and heads, shared by two items of one text ("Step" for "Step 2", "Step 5")."""
+    words: set[str] = set()
+    heads: set[str] = set()
     for t in texts:
-        firsts = [r.split()[0] for r in _rests(t)]
-        out |= {w for w in firsts if firsts.count(w) > 1}
-    return out
+        rests = [rest for _, rest in _progress_lines(t)]
+        firsts, hs = [r.split()[0] for r in rests], [_head(r) for r in rests]
+        words |= {w for w in firsts if firsts.count(w) > 1}
+        heads |= {h for h in hs if hs.count(h) > 1}
+    return words, heads
 
 
-def parse_progress(text: str, colliding: set[str] | None = None) -> dict[str, Item]:
-    """Items of the `## Progress` section in file order, keyed by first word (ID), or by the
-    text before the first " — " (the title) when the first word collides with another item's."""
-    colliding = colliding_words(text) if colliding is None else colliding
+def parse_progress(text: str, colliding: tuple[set[str], set[str]] | None = None) -> dict[str, Item]:
+    """Items of the `## Progress` section in file order, keyed by first word (ID); by the head
+    (text before the first " — ") when the first word collides with another item's; by the
+    whole line when the heads collide too. A shared key would hide one item behind another."""
+    words, heads = colliding_keys(text) if colliding is None else colliding
     items: dict[str, Item] = {}
-    inside = False
-    for line in text.splitlines():
-        if HEADING_PROGRESS.match(line):
-            inside = True
-            continue
-        if inside and re.match(r"^#{1,2}\s", line):
-            inside = False
-        m = ITEM.match(line) if inside else None
-        if not m:
-            continue
-        rest = " ".join(m.group(2).split())
-        if not rest:
-            continue
+    for checked, rest in _progress_lines(text):
+        first, head = rest.split()[0], _head(rest)
+        item_id = first if first not in words else head if head not in heads else rest
         dw = DONE_WHEN.search(rest)
-        item_id = rest.split(" — ")[0] if rest.split()[0] in colliding else rest.split()[0]
-        items[item_id] = Item(item_id, m.group(1) in "xX", rest, dw.group(1) if dw else None)
+        items[item_id] = Item(item_id, checked, rest, dw.group(1) if dw else None)
     return items
 
 
+def signature(rest: str) -> tuple[str, tuple[str, ...], str | None]:
+    """What a change needs the owner's approval for: ID and title, write set (the backticked
+    paths), done-when. Other text on the line (an annotation in the write-set part) is free."""
+    dw = DONE_WHEN.search(rest)
+    body = rest[:dw.start()] if dw else rest
+    head = _head(body)
+    return head, tuple(re.findall(r"`([^`]+)`", body[len(head):])), dw.group(1) if dw else None
+
+
 def git_root(path: Path) -> Path:
+    """The plan's git root, else its nearest existing directory (a Write may create the dir)."""
+    start = path.parent
+    while not start.exists() and start != start.parent:
+        start = start.parent
     try:
-        out = subprocess.run(["git", "-C", str(path.parent), "rev-parse", "--show-toplevel"],
+        out = subprocess.run(["git", "-C", str(start), "rev-parse", "--show-toplevel"],
                              capture_output=True, text=True, timeout=10, check=True)
         return Path(out.stdout.strip())
     except (subprocess.SubprocessError, OSError):
-        return path.parent
+        return start
 
 
 def run_check(cmd: str, cwd: Path, timeout: float = CHECK_TIMEOUT_S) -> tuple[bool, str]:
-    """Run a done-when command; (passed, last 20 lines of its output)."""
+    """Run a done-when command; (passed, last 20 lines of its output). It runs in its own
+    process group, so a timeout kills the whole pipeline, not just bash."""
     try:
-        r = subprocess.run(["bash", "-c", cmd], cwd=cwd, capture_output=True, text=True,
-                           timeout=timeout, stdin=subprocess.DEVNULL, check=False)
+        p = subprocess.Popen(["bash", "-c", cmd], cwd=cwd, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True,
+                             start_new_session=True)
+    except OSError as exc:
+        return False, f"could not run: {exc}"
+    try:
+        out, _ = p.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        p.wait()
         return False, f"timed out after {timeout:g} s"
-    out = (r.stdout + r.stderr).splitlines()[-TAIL_LINES:]
-    return r.returncode == 0, "\n".join(out)
+    return p.returncode == 0, "\n".join(out.splitlines()[-TAIL_LINES:])
 
 
 # ---- guard ----------------------------------------------------------------
 
-def user_texts(transcript: Path) -> list[str]:
-    """Text the owner typed: user turns only, never tool results, meta or assistant text."""
+def user_texts(transcript: Path) -> list[str] | None:
+    """Text the owner typed: user turns only, never tool results, meta, a compaction summary
+    or assistant text. None when the transcript cannot be read."""
+    try:
+        raw = transcript.read_text(errors="replace")
+    except OSError:
+        return None
     texts: list[str] = []
-    for line in transcript.read_text(errors="replace").splitlines():
+    for line in raw.splitlines():
         try:
             d = json.loads(line)
         except ValueError:
             continue
-        if d.get("type") != "user" or d.get("isMeta") or (d.get("origin") or {}).get("kind") not in (None, "human"):
+        if (d.get("type") != "user" or d.get("isMeta") or d.get("isCompactSummary")
+                or (d.get("origin") or {}).get("kind") not in (None, "human")):
             continue
         content = (d.get("message") or {}).get("content")
         if isinstance(content, str):
@@ -167,14 +205,36 @@ def new_text(tool: str, tool_input: dict, old: str) -> str | None:
     return text
 
 
+# Claude Code's Edit matches a straight-quote old_string against curly quotes in the file
+# (measured 2026-11-04: `owner's "first"` matched `owner’s “first”` and the edit applied).
+CURLY = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"'})
+
+
+def fold_quotes(obj):
+    """obj with curly quotes made straight in every string inside it."""
+    if isinstance(obj, str):
+        return obj.translate(CURLY)
+    if isinstance(obj, list):
+        return [fold_quotes(v) for v in obj]
+    if isinstance(obj, dict):
+        return {k: fold_quotes(v) for k, v in obj.items()}
+    return obj
+
+
 def approved_quotes(text: str, item_id: str) -> list[str]:
-    word = re.compile(r"(?<!\w)" + re.escape(item_id) + r"(?!\w)")
-    return [m.group(1) for line in text.splitlines() if word.search(line)
-            for m in [APPROVED.search(line)] if m]
+    """Candidate quotes on the approval lines naming item_id: the span to the line's last `"`
+    (a quote may itself contain `"`) and each separate "..." span (a later quoted word on the
+    line must not void the approval)."""
+    word, out = _word(item_id), []
+    for line in text.splitlines():
+        m = APPROVED.search(line) if word.search(line) else None
+        if m:
+            out += [m.group(1), *re.findall(r'"([^"]+)"', line[m.start():])]
+    return out
 
 
 def violations(old: str, new: str, plan: Path, transcript: Path | None) -> list[str]:
-    shared = colliding_words(old, new)
+    shared = colliding_keys(old, new)
     before, after = parse_progress(old, shared), parse_progress(new, shared)
     out: list[str] = []
     root = git_root(plan)
@@ -199,28 +259,32 @@ def violations(old: str, new: str, plan: Path, transcript: Path | None) -> list[
             out.append(f"TICK {item_id}: its check failed, so it stays open. Check: {cmd}\n"
                        f"last {TAIL_LINES} lines:\n{tail}")
     changed = [i for i, was in before.items()
-               if i not in after or after[i].rest != was.rest]
+               if i not in after or signature(after[i].rest) != signature(was.rest)]
     if changed:
         heard = user_texts(transcript) if transcript else None
         for item_id in changed:
-            what = "dropped" if item_id not in after else "changed (ID, title, write set or done-when)"
+            dropped = item_id not in after
+            what = "dropped" if dropped else "changed (ID, title, write set or done-when)"
+            hint = "" if dropped else (" Evidence for an item (a commit, a job, a result) needs no "
+                                       "approval: put it on an indented line below the item, not in its title.")
             quotes = [q for q in approved_quotes(new, item_id) if len(q) >= MIN_QUOTE_CHARS]
             if heard is None:
                 out.append(f"{item_id} {what}: the session transcript is unavailable, so the "
-                           "owner's approval cannot be checked.")
+                           f"owner's approval cannot be checked.{hint}")
             elif not any(q in t for q in quotes for t in heard):
                 out.append(f"{item_id} {what} without the owner's words. Ask the owner; then put "
                            f'a line `owner approved: "<their words, 20+ characters>"` naming {item_id} '
-                           "in the plan, quoting their message verbatim.")
+                           f"in the plan, their message verbatim inside one pair of double quotes.{hint}")
     return out
 
 
 def log(msg: str) -> None:
+    """Append one line to the guard log. Never raises: a refusal must not turn into exit 1."""
     try:
         path = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
         with open(path / "plan_contract_guard.log", "a") as f:
-            f.write(f"{dt.datetime.now(dt.UTC).isoformat(timespec='seconds')} {msg}\n")
-    except OSError:
+            f.write(f"{dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')} {msg}\n")
+    except Exception:  # noqa: BLE001, S110 -- a lost log line is better than a lost refusal
         pass
 
 
@@ -233,6 +297,11 @@ def guard(stdin_text: str) -> int:
             return 0
         old = path.read_text() if path.is_file() else ""
         new = new_text(tool, tin, old)
+        if new is None and tool != "Write":
+            # Not found verbatim: the tool may still apply it with quotes folded, so judge it
+            # that way rather than let it through unjudged.
+            old = old.translate(CURLY)
+            new = new_text(tool, fold_quotes(tin), old)
         if new is None or not (has_progress(old) or has_progress(new)):
             return 0
         tp = payload.get("transcript_path")
@@ -241,7 +310,7 @@ def guard(stdin_text: str) -> int:
         log(f"ERROR-allow {type(exc).__name__}: {exc}")
         return 0
     if found:
-        log(f"DENY {path} {len(found)} violation(s)")
+        log(f"DENY {path} {len(found)} violation(s): " + " | ".join(v.splitlines()[0][:120] for v in found))
         print("Plan contract: this edit to the Progress list is refused.\n\n" + "\n\n".join(found),
               file=sys.stderr)
         return 2
@@ -284,7 +353,7 @@ def plan_report(plan: Path, run: bool) -> int:
 def item_section(text: str, item_id: str) -> str:
     """Plan text under the first heading that names the item, up to the next heading of its level."""
     lines = text.splitlines()
-    word = re.compile(r"(?<!\w)" + re.escape(item_id) + r"(?!\w)")
+    word = _word(item_id)
     for i, line in enumerate(lines):
         m = re.match(r"^(#+)\s", line)
         if m and word.search(line):
@@ -401,8 +470,10 @@ def review(args: argparse.Namespace) -> int:
             "EVIDENCE": gather_evidence(root, args.diff, args.files)}
     prompt = re.sub(r"\{\{(\w+)\}\}", lambda m: fill[m.group(1)], body)
     out = call_agentcall(prompt, system.strip(), args.model, args.effort)
-    path = root / "reviews" / f"{item.id}-{dt.datetime.now(dt.UTC):%Y%m%d-%H%M}.md"
-    path.parent.mkdir(exist_ok=True)
+    # The ID may be a title with "/" in it: keep the file name inside reviews/.
+    safe = re.sub(r"[^\w.-]+", "_", item.id).strip("._") or "item"
+    path = root / "reviews" / f"{safe}-{dt.datetime.now(dt.timezone.utc):%Y%m%d-%H%M%S}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_review(item, out))
     print(f"{out['structured']['verdict']}: {path}")
     return 0 if out["structured"]["verdict"] == "PASS" else 1
@@ -427,7 +498,16 @@ def main(argv: list[str]) -> int:
         return guard(sys.stdin.read())
     if args.cmd == "plan-report":
         return plan_report(Path(args.plan), not args.no_run)
-    return review(args)
+    # 1 means NEEDS_WORK; a review that could not be made exits 2.
+    try:
+        return review(args)
+    except SystemExit as exc:
+        if not isinstance(exc.code, str):
+            raise
+        print(exc.code, file=sys.stderr)
+    except (OSError, subprocess.SubprocessError, ValueError, LookupError, TypeError) as exc:
+        print(f"ccage review: {type(exc).__name__}: {exc}", file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":
