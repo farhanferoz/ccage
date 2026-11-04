@@ -2,6 +2,20 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.22.1] — 2026-11-04
+
+Patch: an install no longer overwrites the user's own edits, and the Python tests run in CI.
+
+### Fixed
+
+- **`install.sh` no longer puts back a CLAUDE.md anchor the user replaced.** A `~/.claude/CLAUDE.md` that carries its own "Session continuity (ccage)" section is left alone; before, every install appended the ccage block again.
+- **The `/checkpoint` skill ships the end-of-work audit**, so an install no longer overwrites it. `checkpoint-init.sh mark-done` runs `~/.claude/scripts/end_of_work_audit.py` when that script exists: findings refuse the done-marker (exit 3) unless `CHECKPOINT_AUDIT_ACCEPT="<why>"` says why they stay, which is recorded in the marker. Without the script nothing changes. The audit had been added to an installed copy only.
+- **`tests/test_seed_hooks.bats` no longer reads `CCAGE_DOC_CHUNKS` from the environment**, which made one test fail for anyone who exports it.
+
+### Changed
+
+- **CI runs the Python tests** (`tests/*.py`) on the ubuntu bash leg; no leg ran them before. `tests/ci-local.sh` falls back to `uvx` for pytest instead of skipping it silently.
+
 ## [0.22.0] — 2026-11-04
 
 Minor: a plan item is done when its check passes, and two new commands report and review plan items.
