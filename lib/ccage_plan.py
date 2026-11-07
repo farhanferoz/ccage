@@ -36,7 +36,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-CHECK_TIMEOUT_S = 120
+# A check may run up to 4 minutes (owner 2026-11-07: "cannot run more than 3 or 4 minutes"), held
+# by its own `timeout 240`; the guard leaves room for that and a few seconds of tests before it.
+CHECK_TIMEOUT_S = 270
 TAIL_LINES = 20
 MIN_QUOTE_CHARS = 20
 HEADING_PROGRESS = re.compile(r"^##\s+Progress\s*$", re.MULTILINE)
