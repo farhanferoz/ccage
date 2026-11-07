@@ -5,7 +5,10 @@
 # and after the edit (rules and plan format: lib/ccage_plan.py header):
 #   * ticking `- [ ]` -> `- [x]` needs the item's `done when` command to exit 0;
 #   * dropping an item, or changing its ID/title/write set/done-when, needs a line
-#     `owner approved: "<quote>"` whose quote appears in a user turn of this session.
+#     `owner approved: "<quote>"` whose quote the owner typed in this session (a user turn, or
+#     a message typed while the session was working);
+#   * moving the item's own committed check, unchanged, into its ` — done when: ` slot is not
+#     a change (logged as MOVE).
 # Everything else is allowed. Any internal error allows the edit and is logged. Checks stop
 # after 480 s in one call (a hook past its timeout does not block); the rest are denied.
 # KNOWN LIMIT: a plan written through Bash (sed, python) is not seen by this hook;

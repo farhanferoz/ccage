@@ -14,7 +14,10 @@ checkbox lines
     - [ ] ID Title — `path` — done when: `command`
 
 The trailing ` — done when: `command`` is optional. A command runs under `bash -c` in the git
-root of the plan file and passes on exit 0.
+root of the plan file and passes on exit 0. A check the item describes in words ("done when:
+... `command`", on its checkbox line or the indented lines under it) may be moved, unchanged,
+into that slot without the owner's approval when the plan as last committed already describes
+it so (described_checks): the item's definition of done is the same, only now the guard can run it.
 
 Dependencies: standard library only. The review calls agentcall through its Python API in an
 interpreter that has it installed (see `call_agentcall`).
@@ -39,6 +42,14 @@ MIN_QUOTE_CHARS = 20
 HEADING_PROGRESS = re.compile(r"^##\s+Progress\s*$", re.MULTILINE)
 ITEM = re.compile(r"^\s*[-*]\s+\[([ xX])\]\s+(.*?)\s*$")
 DONE_WHEN = re.compile(r"\s+—\s+done when:\s+`(.+)`\s*$")
+# A check described in words on the checkbox line ("... fixed. done when: the referee passes"):
+# neither title nor write set, so re-wrapping it under the item changes neither.
+PROSE_DONE_WHEN = re.compile(r"\bdone when:", re.IGNORECASE)
+# The command such a check names: a backticked span right after a colon ("done when: `cmd`",
+# "... read from its log: `cmd`"). Evidence lines under the item ("evidence 2026-11-07: ...")
+# are never the check, however they are written.
+CHECK_SPAN = re.compile(r":\s*`([^`]+)`")
+EVIDENCE_LINE = re.compile(r"^evidence\b", re.IGNORECASE)
 APPROVED = re.compile(r'owner approved:\s*"(.+)"')
 # A PreToolUse command hook that outlives its timeout (600 s default) does not block the
 # call, so a guard call stops running checks after this many seconds and denies the rest.
@@ -47,8 +58,12 @@ GUARD_BUDGET_S = 480
 # sessions and teammates, task notifications, command output, hook feedback, and the text
 # ccage-auto types itself (bin/ccage-auto: auto-checkpoint and supervisor nudges, the
 # post-/clear resume prompt, a --say message queued before the session started). A quote
-# found only in one of these is not the owner's approval. KNOWN LIMIT: a --say message
-# typed into a running session carries no marker and counts.
+# found only in one of these is not the owner's approval. A message the owner types while the
+# session is working is recorded as a queued-command attachment, not a user turn, and counts
+# (user_texts). KNOWN LIMITS: a --say message typed into a running session, idle or mid-turn,
+# carries no marker and counts; the committed plan a moved check is read from (moved_check) is
+# the session's own writing too, so a check committed through Bash and then moved passes, and
+# the MOVE log line names the command for that audit.
 NOT_OWNER_PREFIXES = ("<system-reminder>", "<teammate-message", "Another Claude session sent a message",
                       "<local-command", "<command-name>", "[SYSTEM NOTIFICATION", "Stop hook feedback",
                       "[auto-checkpoint]", "[supervisor]", "Resume the task from RESUME.md", "[queued ")
@@ -63,26 +78,36 @@ class Item:
     checked: bool
     rest: str                 # everything after the checkbox, whitespace-collapsed
     done_when: str | None
+    lines: str = ""           # the indented lines under the checkbox, each whitespace-collapsed, "\n"-joined
 
 
 def has_progress(text: str) -> bool:
     return bool(HEADING_PROGRESS.search(text))
 
 
-def _progress_lines(text: str) -> list[tuple[bool, str]]:
-    """(checked, rest) for each checkbox line of the `## Progress` section, rest whitespace-collapsed."""
-    inside, out = False, []
+def _progress_lines(text: str) -> list[tuple[bool, str, str]]:
+    """(checked, rest, lines) for each checkbox line of the `## Progress` section: rest is the
+    checkbox line after the box, lines the indented lines under it (up to the next checkbox,
+    heading or unindented line), each line whitespace-collapsed, joined by newlines."""
+    inside, under_item, out = False, False, []
     for line in text.splitlines():
         if HEADING_PROGRESS.match(line):
-            inside = True
+            inside, under_item = True, False
             continue
         if inside and re.match(r"^#{1,2}\s", line):
             inside = False
-        m = ITEM.match(line) if inside else None
+        if not inside:
+            continue
+        m = ITEM.match(line)
         rest = " ".join(m.group(2).split()) if m else ""
         if rest:
-            out.append((m.group(1) in "xX", rest))
-    return out
+            out.append([m.group(1) in "xX", rest, ""])
+            under_item = True
+        elif under_item and line[:1].isspace() and line.strip():
+            out[-1][2] = f"{out[-1][2]}\n{' '.join(line.split())}".lstrip("\n")
+        elif line.strip():
+            under_item = False            # an unindented line ends the item's own lines
+    return [(checked, rest, lines) for checked, rest, lines in out]
 
 
 def _word(item_id: str) -> re.Pattern[str]:
@@ -91,8 +116,11 @@ def _word(item_id: str) -> re.Pattern[str]:
 
 
 def _head(rest: str) -> str:
-    """ID and title: the text before the first " — "."""
-    return rest.split(" — ")[0]
+    """ID and title: the text before the first " — " and before a check described in words,
+    without trailing punctuation."""
+    head = rest.split(" — ")[0]
+    prose = PROSE_DONE_WHEN.search(head)
+    return (head[:prose.start()] if prose else head).rstrip(" .,;:")
 
 
 def colliding_keys(*texts: str) -> tuple[set[str], set[str]]:
@@ -100,7 +128,7 @@ def colliding_keys(*texts: str) -> tuple[set[str], set[str]]:
     words: set[str] = set()
     heads: set[str] = set()
     for t in texts:
-        rests = [rest for _, rest in _progress_lines(t)]
+        rests = [rest for _, rest, _ in _progress_lines(t)]
         firsts, hs = [r.split()[0] for r in rests], [_head(r) for r in rests]
         words |= {w for w in firsts if firsts.count(w) > 1}
         heads |= {h for h in hs if hs.count(h) > 1}
@@ -113,21 +141,59 @@ def parse_progress(text: str, colliding: tuple[set[str], set[str]] | None = None
     whole line when the heads collide too. A shared key would hide one item behind another."""
     words, heads = colliding_keys(text) if colliding is None else colliding
     items: dict[str, Item] = {}
-    for checked, rest in _progress_lines(text):
+    for checked, rest, lines in _progress_lines(text):
         first, head = rest.split()[0], _head(rest)
         item_id = first if first not in words else head if head not in heads else rest
         dw = DONE_WHEN.search(rest)
-        items[item_id] = Item(item_id, checked, rest, dw.group(1) if dw else None)
+        items[item_id] = Item(item_id, checked, rest, dw.group(1) if dw else None, lines)
     return items
 
 
 def signature(rest: str) -> tuple[str, tuple[str, ...], str | None]:
     """What a change needs the owner's approval for: ID and title, write set (the backticked
-    paths), done-when. Other text on the line (an annotation in the write-set part) is free."""
+    paths), done-when. Other text on the line (an annotation in the write-set part, a check
+    described in words) is free."""
     dw = DONE_WHEN.search(rest)
     body = rest[:dw.start()] if dw else rest
+    prose = PROSE_DONE_WHEN.search(body)
+    if prose:  # the words run to the next " — " part; a write set after them is still compared
+        end = body.find(" — ", prose.start())
+        body = body[:prose.start()] + (body[end:] if end >= 0 else "")
     head = _head(body)
     return head, tuple(re.findall(r"`([^`]+)`", body[len(head):])), dw.group(1) if dw else None
+
+
+def committed_text(plan: Path) -> str | None:
+    """The plan as last committed (git HEAD), or None when it is not in git or not committed."""
+    try:
+        out = subprocess.run(["git", "-C", str(plan.parent), "show", f"HEAD:./{plan.name}"],
+                             capture_output=True, text=True, errors="replace", timeout=10, check=False)
+    except (subprocess.SubprocessError, OSError):
+        return None
+    return out.stdout if out.returncode == 0 else None
+
+
+def described_checks(item: Item) -> list[str]:
+    """The commands an item's own text gives as its check, whitespace-collapsed: each backticked
+    span right after a colon, from the item's first "done when:" on, before its evidence lines."""
+    own = [item.rest]
+    for line in item.lines.split("\n"):
+        if EVIDENCE_LINE.match(line):
+            break
+        own.append(line)
+    text = "\n".join(own)
+    start = PROSE_DONE_WHEN.search(text)
+    return [" ".join(m.group(1).split()) for m in CHECK_SPAN.finditer(text, start.end() - 1)] if start else []
+
+
+def moved_check(was: Item, now: Item, committed: Item | None) -> bool:
+    """True when the edit only moves the item's own check into the checkbox line's ` — done
+    when: ` slot: the line had none, title and write set are unchanged, and the command is,
+    unchanged, the check the item's own text in the committed plan describes (described_checks).
+    A check first written since the last commit is a new check and still needs the owner."""
+    return (was.done_when is None and now.done_when is not None and committed is not None
+            and signature(was.rest)[:2] == signature(now.rest)[:2]
+            and " ".join(now.done_when.split()) in described_checks(committed))
 
 
 def git_root(path: Path) -> Path:
@@ -167,8 +233,9 @@ def run_check(cmd: str, cwd: Path, timeout: float = CHECK_TIMEOUT_S) -> tuple[bo
 # ---- guard ----------------------------------------------------------------
 
 def user_texts(transcript: Path) -> list[str] | None:
-    """Text the owner typed: user turns only, never tool results, meta, a compaction summary
-    or assistant text. None when the transcript cannot be read."""
+    """Text the owner typed: user turns, and messages typed while the session was working
+    (queued-command attachments of human origin); never tool results, meta, a compaction
+    summary or assistant text. None when the transcript cannot be read."""
     try:
         raw = transcript.read_text(errors="replace")
     except OSError:
@@ -178,6 +245,17 @@ def user_texts(transcript: Path) -> list[str] | None:
         try:
             d = json.loads(line)
         except ValueError:
+            continue
+        att = d.get("attachment") if d.get("type") == "attachment" else None
+        if isinstance(att, dict) and att.get("type") == "queued_command":
+            # measured 2026-11-07: an owner's mid-turn message is {"type": "attachment",
+            # "attachment": {"type": "queued_command", "prompt": ..., "origin": {"kind": "human"}}};
+            # task notifications arrive the same way with origin kind "task-notification".
+            if (att.get("origin") or {}).get("kind") == "human":
+                content = att.get("prompt")
+                texts += [content] if isinstance(content, str) else [
+                    b.get("text", "") for b in (content if isinstance(content, list) else [])
+                    if isinstance(b, dict) and b.get("type") == "text"]
             continue
         if (d.get("type") != "user" or d.get("isMeta") or d.get("isCompactSummary")
                 or (d.get("origin") or {}).get("kind") not in (None, "human")):
@@ -233,9 +311,19 @@ def approved_quotes(text: str, item_id: str) -> list[str]:
     return out
 
 
-def violations(old: str, new: str, plan: Path, transcript: Path | None) -> list[str]:
-    shared = colliding_keys(old, new)
+def violations(old: str, new: str, plan: Path, transcript: Path | None, folded: bool = False) -> list[str]:
+    """Every refusal for this edit; folded: old and new had curly quotes made straight, so the
+    committed plan is read the same way."""
+    committed = committed_text(plan)
+    committed = committed.translate(CURLY) if committed and folded else committed
+    shared = colliding_keys(old, new, *([committed] if committed else []))
     before, after = parse_progress(old, shared), parse_progress(new, shared)
+    at_commit = parse_progress(committed, shared) if committed else {}
+    moved = {i for i, now in after.items()
+             if i in before and moved_check(before[i], now, at_commit.get(i))}
+    for item_id in moved:
+        log(f"MOVE {plan} {item_id}: its committed check moved unchanged onto the checkbox line: "
+            f"`{after[item_id].done_when[:200]}`")
     out: list[str] = []
     root = git_root(plan)
     deadline = time.monotonic() + float(os.environ.get("CCAGE_PLAN_GUARD_BUDGET_S", GUARD_BUDGET_S))
@@ -243,11 +331,13 @@ def violations(old: str, new: str, plan: Path, transcript: Path | None) -> list[
         was = before.get(item_id)
         if not item.checked or (was and was.checked):
             continue
-        cmd = (was or item).done_when
+        cmd = item.done_when if item_id in moved else (was or item).done_when
         if not cmd:
             out.append(f"TICK {item_id}: no done-when command. An item is ticked only when its "
-                       "check passes; add `— done when: `<command>`` through an approved plan "
-                       "change first.")
+                       "check passes; put the check on the checkbox line as "
+                       "` — done when: `<command>``. The check the item already describes (right "
+                       "after its \"done when:\") moves there unchanged without approval; a new or "
+                       "different check needs the owner's words.")
             continue
         left = deadline - time.monotonic()
         if left <= 0:
@@ -259,7 +349,7 @@ def violations(old: str, new: str, plan: Path, transcript: Path | None) -> list[
             out.append(f"TICK {item_id}: its check failed, so it stays open. Check: {cmd}\n"
                        f"last {TAIL_LINES} lines:\n{tail}")
     changed = [i for i, was in before.items()
-               if i not in after or signature(after[i].rest) != signature(was.rest)]
+               if i not in moved and (i not in after or signature(after[i].rest) != signature(was.rest))]
     if changed:
         heard = user_texts(transcript) if transcript else None
         for item_id in changed:
@@ -267,6 +357,11 @@ def violations(old: str, new: str, plan: Path, transcript: Path | None) -> list[
             what = "dropped" if dropped else "changed (ID, title, write set or done-when)"
             hint = "" if dropped else (" Evidence for an item (a commit, a job, a result) needs no "
                                        "approval: put it on an indented line below the item, not in its title.")
+            if not dropped and before[item_id].done_when is None and after[item_id].done_when:
+                hint += (" A check moves onto the checkbox line without approval only when that same "
+                         "command, unchanged, is the check the item describes in the plan as last "
+                         "committed (right after its \"done when:\" or a colon after it, outside its "
+                         "evidence lines); this one is not, so it is a new check.")
             quotes = [q for q in approved_quotes(new, item_id) if len(q) >= MIN_QUOTE_CHARS]
             if heard is None:
                 out.append(f"{item_id} {what}: the session transcript is unavailable, so the "
@@ -296,16 +391,16 @@ def guard(stdin_text: str) -> int:
         if tool not in ("Write", "Edit", "MultiEdit") or path.suffix.lower() != ".md":
             return 0
         old = path.read_text() if path.is_file() else ""
-        new = new_text(tool, tin, old)
+        new, folded = new_text(tool, tin, old), False
         if new is None and tool != "Write":
             # Not found verbatim: the tool may still apply it with quotes folded, so judge it
             # that way rather than let it through unjudged.
-            old = old.translate(CURLY)
+            old, folded = old.translate(CURLY), True
             new = new_text(tool, fold_quotes(tin), old)
         if new is None or not (has_progress(old) or has_progress(new)):
             return 0
         tp = payload.get("transcript_path")
-        found = violations(old, new, path, Path(tp) if tp else None)
+        found = violations(old, new, path, Path(tp) if tp else None, folded)
     except Exception as exc:  # noqa: BLE001 -- a broken guard must not wedge sessions
         log(f"ERROR-allow {type(exc).__name__}: {exc}")
         return 0

@@ -37,6 +37,12 @@ def tool_result(text):
     return {"type": "user", "message": {"content": [{"type": "tool_result", "content": text}]}}
 
 
+def queued(text, kind="human"):
+    """A message that arrived while the session was working (transcript shape of 2026-11-07)."""
+    return {"type": "attachment", "attachment": {"type": "queued_command", "prompt": text,
+                                                 "origin": {"kind": kind}}}
+
+
 def guard(tmp_path, old, new, transcript_path=None, env=None, rel="plan.md", edit=None):
     """Write `old` to a plan (None: the file and its dir do not exist yet), fire the hook for a
     Write of `new` (or an Edit of `edit` = (old_string, new_string)), return (exit code, stderr)."""
@@ -71,6 +77,28 @@ def test_tick_denied_without_a_check(tmp_path):
     old = plan().replace(" — done when: `true`", "", 1)
     code, err = guard(tmp_path, old, old.replace("[ ] T1", "[x] T1"))
     assert code == 2 and "no done-when command" in err
+    # the shape refused on 2026-11-07: the check sits in the item's own lines under a check
+    # described in words (or in those words); moved unchanged onto the checkbox line and ticked,
+    # it needs no approval when the committed plan has it there, and a check written there since
+    # the commit does. "Step" is shared, so these items are keyed by title.
+    prose = ("## Progress\n- [ ] Step 2 referee fixed (owner yes). done when: the referee at commit\n"
+             "  abc (`submit --referee`) passes, read from its log:\n  `{cmd}`\n  evidence: job 1\n"
+             "- [ ] Step 5 ledger fixed (abc1). done when: `{cmd}` passes and goes red\n"
+             "  evidence: `echo ok` passed\n")
+    moved = ("## Progress\n- [x] Step 2 referee fixed (owner yes) — done when: `{cmd}`\n"
+             "  The check: the referee at commit abc passes.\n  evidence: job 1\n"
+             "- [x] Step 5 ledger fixed (abc1) — done when: `{cmd}`\n  It passes and goes red.\n")
+    (tmp_path / "plan.md").write_text(prose.format(cmd="true"))
+    for git in (["init", "-q"], ["add", "plan.md"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "p"]):
+        subprocess.run(["git", "-C", str(tmp_path), *git], check=True)
+    assert guard(tmp_path, prose.format(cmd="true"), moved.format(cmd="true"))[0] == 0
+    assert "MOVE" in (tmp_path / "plan_contract_guard.log").read_text()
+    code, err = guard(tmp_path, prose.format(cmd="echo hi"), moved.format(cmd="echo hi"))
+    assert code == 2 and "Step 2 referee fixed (owner yes) changed" in err and "new check" in err
+    # a committed span that is not the check moves nowhere: one beside the words, one in evidence
+    other = moved.format(cmd="true").replace("`true`", "`submit --referee`", 1).replace("`true`", "`echo ok`", 1)
+    code, err = guard(tmp_path, prose.format(cmd="true"), other)
+    assert code == 2 and "Step 2 referee fixed (owner yes) changed" in err and "Step 5 ledger fixed (abc1) changed" in err
 
 
 def test_tick_allowed_when_its_check_passes(tmp_path):
@@ -81,6 +109,10 @@ def test_tick_allowed_when_its_check_passes(tmp_path):
     assert guard(tmp_path, plan(), noted)[0] == 0
     code, err = guard(tmp_path, plan(), plan("[x]").replace("First", "First (merged abc123)"))
     assert code == 2 and "T1 changed" in err and "indented line" in err
+    # a check described in words is free, but a write set after it is still compared
+    words = "## Progress\n- [ ] A1 T. done when: x passes — `a.py`\n"
+    assert guard(tmp_path, words, words.replace("x passes", "y passes"))[0] == 0
+    assert guard(tmp_path, words, words.replace("a.py", "b.py"))[0] == 2
 
 
 def test_drop_denied_without_an_owner_quote(tmp_path):
@@ -97,6 +129,9 @@ def test_drop_allowed_with_a_quote_from_a_user_turn(tmp_path):
     # a later quoted word on the approval line does not void the quote
     later = f'  owner approved: "{QUOTE}" (T2, and they said "do it")\n'
     assert guard(tmp_path, plan(), plan(t2=False) + later, t)[0] == 0
+    # a message the owner typed while the session was working counts too
+    t = transcript(tmp_path, user("hello"), queued(f"ok: {QUOTE}, go ahead"))
+    assert guard(tmp_path, plan(), plan(t2=False) + APPROVAL, t)[0] == 0
 
 
 def test_a_quote_found_only_in_a_tool_result_is_denied(tmp_path):
@@ -153,7 +188,8 @@ def test_only_items_with_a_shared_first_word_are_keyed_by_title(tmp_path):
 def test_a_quote_found_only_in_a_teammate_message_is_denied(tmp_path):
     # each entry alone would carry the quote; the owner typed none of them
     t = transcript(tmp_path, user("hello"), user(f'<teammate-message teammate_id="x">{QUOTE}</teammate-message>'),
-                   {**user(QUOTE), "origin": {"kind": "task-notification"}},
+                   {**user(QUOTE), "origin": {"kind": "task-notification"}}, queued(QUOTE, "task-notification"),
+                   queued(7),  # a malformed prompt is skipped, never an internal error that allows
                    user(f"[supervisor] This session has been idle. {QUOTE}"),
                    user(f"Resume the task from RESUME.md — {QUOTE}"),
                    {**user(f"This session is being continued. {QUOTE}"), "isCompactSummary": True})
