@@ -2,6 +2,19 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.23.0] — 2026-11-07
+
+Minor: session start reports how many plan files still hold open items, and the plan guard hears the owner's mid-turn messages and lets a committed check move onto its checkbox line.
+
+### Added
+
+- **Session start reports plan spread.** From three git-tracked plan files holding open items (outside `archive/` and `records/`), `resume_autoload.sh` prints how many there are and which of them RESUME's `### Plan` does not name, and points to the `programme-plan` skill. Measured 2026-11-07 over 39 repos: six reach three or more (24, 9, 8, 7, 4, 4); in the repo with 7, rulings had spread over 19 plan files and a superseded rule ran for 17 days. 5 to 6 ms (one `git ls-files` and one `grep` over the candidates).
+
+### Fixed
+
+- **The plan guard hears the owner's mid-turn messages.** A message typed while the session is working is recorded as a queued-command attachment, not a user turn, so an approval quoted from it was refused (measured 2026-11-07: twice on one edit). Queued commands of human origin now count; task notifications, which arrive the same way, still do not.
+- **Moving an item's check onto its checkbox line no longer needs the owner.** The check the item describes in the plan as last committed (a backticked command right after `done when:`, or after a colon that follows it, outside its evidence lines) may move, unchanged, into the ` — done when: ` slot, and be ticked in the same edit if it passes; each move is logged as `MOVE` with its command. A check described in words is no longer part of the title, and runs only to the next ` — ` part, so a write set after it is still compared. A check first written since the last commit, or any other backticked text under the item, still needs the owner's words, and the refusal says so.
+
 ## [0.22.1] — 2026-11-04
 
 Patch: an install no longer overwrites the user's own edits, and the Python tests run in CI.
