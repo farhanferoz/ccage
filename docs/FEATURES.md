@@ -466,7 +466,7 @@ Closes the loop between the structural `ccage handoff` brief and a repo's durabl
 
 ### Auto-read hook (SessionStart)
 
-`share/hooks/resume_autoload.sh`, registered on `SessionStart` for `startup|resume|clear|compact`. A SessionStart hook's stdout is injected into the model's context, so after `/clear` the prior state is reloaded automatically — that is the whole point of the `clear` source. This hook carries the *side effects* (stale-marker clearing, watcher reaping, plan-doc pointers) and the one-line health NOTEs: *RESUME over budget → run `/checkpoint`*, *DECISIONS over budget → retire spent entries*, and *memory dir messy → run `/checkpoint --tidy`*. It always exits 0.
+`share/hooks/resume_autoload.sh`, registered on `SessionStart` for `startup|resume|clear|compact`. A SessionStart hook's stdout is injected into the model's context, so after `/clear` the prior state is reloaded automatically — that is the whole point of the `clear` source. This hook carries the *side effects* (stale-marker clearing, watcher reaping, plan-doc pointers), the plan facts (PLAN STATE: each registered plan's open items; PLAN SPREAD, from three git-tracked plan files with open items outside `archive/` or `records/`: how many there are, and which of them RESUME's `### Plan` does not name, pointing to the `programme-plan` skill) and the one-line health NOTEs: *RESUME over budget → run `/checkpoint`*, *DECISIONS over budget → retire spent entries*, and *memory dir messy → run `/checkpoint --tidy`*. It always exits 0.
 
 The **document bodies** are delivered by a second hook — see below.
 

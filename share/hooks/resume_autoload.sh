@@ -363,6 +363,29 @@ EOF
         printf 'doc, name its exact path under "### Plan" at the next checkpoint; until then no\n'
         printf 'status report from this session can claim how much of it is done.\n'
     fi
+
+    # ---- 1d. plan spread: how many plan files still hold open items -----------
+    # A fact, like 1c. Measured 2026-11-07 over the 39 repos on this machine: plan files with
+    # open items numbered 24, 9, 8, 7, 4 and 4 in six repos and 2 or fewer in the rest; in the
+    # repo with 7, the owner's rulings had spread over 19 plan files and a superseded rule ran
+    # for 17 days. Three live plans is where "which one governs" starts, so the line appears
+    # from three. RESUME naming only some of them is the stale-index half of the same fault.
+    live="$(plan_live_files "$base")"
+    live_n="$(printf '%s' "$live" | grep -c . || true)"
+    if [ "${live_n:-0}" -ge 3 ]; then
+        named="$(plan_doc_paths "$resume" "$base" | xargs -r -d '\n' realpath -m 2>/dev/null | sort -u)"
+        live_real="$(printf '%s\n' "$live" | xargs -r -d '\n' realpath -m 2>/dev/null | sort -u)"
+        unnamed="$(comm -23 <(printf '%s\n' "$live_real") <(printf '%s\n' "$named") | grep . || true)"
+        unnamed_n="$(printf '%s' "$unnamed" | grep -c . || true)"
+        printf '\nPLAN SPREAD (fact): %s plan files here still hold open items; RESUME "### Plan" names %s of them' \
+            "$live_n" "$((live_n - ${unnamed_n:-0}))"
+        if [ "${unnamed_n:-0}" -gt 0 ]; then
+            printf '; not named: %s' "$(printf '%s\n' "$unnamed" | head -3 | xargs -r -d '\n' -n1 basename | paste -sd, - | sed 's/,/, /g')"
+            [ "$unnamed_n" -gt 3 ] && printf ' (+%s)' "$((unnamed_n - 3))"
+        fi
+        printf '.\nItems and rulings in several live plans drift apart; the programme-plan skill puts\n'
+        printf 'them under one index and archives the superseded ones.\n'
+    fi
 fi
 
 # ---- 1b. post-compaction nudge ----

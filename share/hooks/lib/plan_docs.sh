@@ -81,3 +81,19 @@ plan_ticked_missing() {
             [ -e "$p" ] || printf '%s\n' "$tok"
         done
 }
+
+# plan_live_files BASE
+#   Every git-tracked markdown plan under BASE that still holds an open `- [ ]` box, one path
+#   per line (BASE/relative). A plan is a file in a plan/, plans/ or planning/ folder, or whose
+#   name has the word "plan", "plans" or "planning" (coverage-plan-2026.md, X_PLAN.md; not
+#   explanation.md or plant-care.md). Files under archive/ or records/ folders are left out:
+#   that is where superseded plans go (the programme-plan skill). Prints nothing outside git.
+plan_live_files() {
+    local base="$1"
+    # one grep over every candidate, not one per file; quotePath off keeps non-ASCII names plain
+    (cd "$base" 2>/dev/null && git -c core.quotePath=false ls-files -- '*.md' 2>/dev/null \
+        | grep -iE '(^|/)plan(s|ning)?/|(^|[/_.-])plan(s|ning)?([^/[:alpha:]][^/]*)?\.md$' \
+        | grep -viE '(^|/)(archive|archived|records?)/' \
+        | xargs -r -d '\n' grep -lE '^[[:space:]]*[-*][[:space:]]+\[[[:space:]]\]' -- 2>/dev/null) \
+        | while IFS= read -r rel; do printf '%s/%s\n' "$base" "$rel"; done
+}

@@ -804,6 +804,25 @@ Prose only. Several things remain to be done, described in sentences.
     [[ "$output" != *"PLAN STATE"* ]]
 }
 
+@test "plan spread: three live plans are counted and the ones RESUME omits are named" {
+    # live: a tracked plan file with an open box; archive/ and plan-less names do not count
+    git -C "$REPO" init -q
+    mkdir -p "$REPO/plans/archive" "$REPO/docs" "$REPO/notes"
+    printf '# RESUME\n\n### Plan\n- %s/plans/a-plan.md\n' "$REPO" > "$REPO/RESUME.md"
+    for f in plans/a-plan.md plans/b.md docs/X_PLAN.md plans/archive/old.md notes/explanation.md notes/plant-care.md; do
+        printf -- '- [ ] open, `x.py`\n' > "$REPO/$f"
+    done
+    printf -- '- [x] done, `x.py`\n' > "$REPO/plans/c.md"
+    git -C "$REPO" add -A
+    run run_hook
+    [[ "$output" == *'PLAN SPREAD (fact): 3 plan files here still hold open items; RESUME "### Plan" names 1 of them; not named: X_PLAN.md, b.md.'* ]]
+    [[ "$output" == *"programme-plan"* ]]
+    # two live plans are not a spread
+    git -C "$REPO" rm -q --cached docs/X_PLAN.md
+    run run_hook
+    [[ "$output" != *"PLAN SPREAD"* ]]
+}
+
 # ---- watcher reap wiring (added 2026-08-11) --------------------------------
 # ccage-watch writes to RESUME only when its condition fires or its TTL expires;
 # killed any other way it writes nothing, so a death used to be indistinguishable
