@@ -23,11 +23,41 @@
 #   CCAGE_RESUME_BUDGET_BYTES RESUME byte budget before nagging (default 14000)
 #   CCAGE_DECISIONS_BUDGET_BYTES DECISIONS byte budget before nagging (def 48000)
 #   CCAGE_MEMORY_ORPHAN_MAX   max un-indexed memory files before nagging (def 3)
+#   CCAGE_RESUME_BUDGET_BLOCKS  `## Session` blocks in RESUME before nagging (def 3)
+#   CCAGE_MEMORY_FLAT_INDEX_FILES  memory files past which a header-less index is flat (def 8)
+#   CCAGE_PLAN_SPREAD_MIN     live plan files from which PLAN SPREAD is reported (def 3)
+#   CCAGE_AUTOLOAD_MAX_PLANS  plan files named in the delivered plan note (def 5)
+#   CCAGE_AUTOLOAD_STDIN_TIMEOUT_S, CCAGE_AUTOLOAD_REAP_TIMEOUT_S,
+#   CCAGE_AUTOLOAD_WATCHER_START_TOLERANCE_S  seconds (defs 2, 10, 2)
 #   CLAUDE_PROJECT_DIR        project root (falls back to $PWD)
 #   CLAUDE_CONFIG_DIR         cage dir, for locating this cage's memory/
 
+# A non-negative integer setting from the environment variable named $1 (default $2). A value
+# that is not all digits is ignored, and one line naming the variable goes to this hook's log:
+# a hook never fails a session start over a setting. (Used for the settings added with
+# CCAGE_RESUME_BUDGET_BLOCKS; the older ones below are read bare, as they always were.)
+_setting() {
+    local v="${!1:-}"
+    case "$v" in
+        '')       printf '%s\n' "$2" ;;
+        *[!0-9]*)
+            if [ -d "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" ]; then
+                printf '%s  SETTING-IGNORED %s=%s: not a non-negative integer; using %s\n' \
+                    "$(date '+%Y-%m-%d %H:%M:%S')" "$1" "$v" "$2" \
+                    >> "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/resume-autoload.log" 2>/dev/null
+            fi
+            printf '%s\n' "$2" ;;
+        *)        printf '%s\n' "$v" ;;
+    esac
+}
+
 budget="${CCAGE_RESUME_BUDGET_LINES:-250}"
 budget_bytes="${CCAGE_RESUME_BUDGET_BYTES:-14000}"
+max_blocks="$(_setting CCAGE_RESUME_BUDGET_BLOCKS 3)"   # resume_budget_check.sh and `ccage doctor` read it too
+flat_files="$(_setting CCAGE_MEMORY_FLAT_INDEX_FILES 8)"   # `ccage doctor` reads it too
+spread_min="$(_setting CCAGE_PLAN_SPREAD_MIN 3)"
+max_plans="$(_setting CCAGE_AUTOLOAD_MAX_PLANS 5)"
+start_tolerance="$(_setting CCAGE_AUTOLOAD_WATCHER_START_TOLERANCE_S 2)"
 orphan_max="${CCAGE_MEMORY_ORPHAN_MAX:-3}"
 note_max="${CCAGE_MEMORY_MAX_NOTES:-40}"
 index_max="${CCAGE_MEMORY_MAX_INDEX_BYTES:-8192}"
@@ -40,7 +70,7 @@ base="${CLAUDE_PROJECT_DIR:-$PWD}"
 # Source is extracted with sed, not jq — stock macOS ships neither timeout nor
 # jq, and a silently-empty $src would disable the marker clear and compact nudge.
 if command -v timeout >/dev/null 2>&1; then
-    hook_input="$(timeout 2 cat 2>/dev/null)"
+    hook_input="$(timeout "$(_setting CCAGE_AUTOLOAD_STDIN_TIMEOUT_S 2)" cat 2>/dev/null)"
 else
     hook_input="$(cat 2>/dev/null)"
 fi
@@ -166,7 +196,7 @@ if [ "$src" = "startup" ] || [ "$src" = "resume" ]; then
                 now_start=$(( $(date +%s) - now_etime_secs ))
                 diff=$(( now_start - wstart ))
                 [ "$diff" -lt 0 ] && diff=$(( -diff ))
-                [ "$diff" -le 2 ] || continue
+                [ "$diff" -le "$start_tolerance" ] || continue
             fi
             watcher_elsewhere=1
             break
@@ -202,7 +232,7 @@ if [ -n "$watch_bin" ]; then
     (
         cd "$base" 2>/dev/null || exit 0
         if command -v timeout >/dev/null 2>&1; then
-            timeout 10 "$watch_bin" reap 2>/dev/null || exit 0
+            timeout "$(_setting CCAGE_AUTOLOAD_REAP_TIMEOUT_S 10)" "$watch_bin" reap 2>/dev/null || exit 0
         else
             "$watch_bin" reap 2>/dev/null || exit 0
         fi
@@ -272,7 +302,7 @@ if [ -f "$resume" ]; then
     plan_kept=0
     plan_dropped=""
     for cand in $(plan_doc_paths "$resume" "$base"); do
-        if [ "$plan_kept" -lt 5 ]; then
+        if [ "$plan_kept" -lt "$max_plans" ]; then
             plan_kept=$((plan_kept + 1))
             plan_note="${plan_note}  - ${cand}
 "
@@ -372,7 +402,7 @@ EOF
     # from three. RESUME naming only some of them is the stale-index half of the same fault.
     live="$(plan_live_files "$base")"
     live_n="$(printf '%s' "$live" | grep -c . || true)"
-    if [ "${live_n:-0}" -ge 3 ]; then
+    if [ "${live_n:-0}" -ge "$spread_min" ]; then
         named="$(plan_doc_paths "$resume" "$base" | xargs -r -d '\n' realpath -m 2>/dev/null | sort -u)"
         live_real="$(printf '%s\n' "$live" | xargs -r -d '\n' realpath -m 2>/dev/null | sort -u)"
         unnamed="$(comm -23 <(printf '%s\n' "$live_real") <(printf '%s\n' "$named") | grep . || true)"
@@ -397,7 +427,7 @@ if [ "$src" = "compact" ]; then
 fi
 
 # ---- 2. health notes (one line each, only when something is wrong) ----
-# RESUME budget: too many lines, more than 3 "## Session" blocks, or too many
+# RESUME budget: too many lines, more than $max_blocks "## Session" blocks, or too many
 # bytes (a dense file — long lines — can bloat well under the line cap).
 if [ -f "$resume" ]; then
     lines=$(wc -l < "$resume" 2>/dev/null | tr -d '[:space:]')
@@ -406,7 +436,7 @@ if [ -f "$resume" ]; then
     [ -n "$lines" ] || lines=0
     [ -n "$blocks" ] || blocks=0
     [ -n "$bytes" ] || bytes=0
-    if { [ "$lines" -gt "$budget" ] || [ "$blocks" -gt 3 ] || [ "$bytes" -gt "$budget_bytes" ]; } 2>/dev/null; then
+    if { [ "$lines" -gt "$budget" ] || [ "$blocks" -gt "$max_blocks" ] || [ "$bytes" -gt "$budget_bytes" ]; } 2>/dev/null; then
         printf 'NOTE: RESUME is over budget — run /checkpoint to trim (shipped Threads to CHANGELOG; ### Decisions to DECISIONS.md, which is auto-loaded — never to CHANGELOG).\n'
     fi
 fi
@@ -463,7 +493,7 @@ if [ -f "$index" ]; then
         [ "$((files - idx))" -gt "$orphan_max" ] && needs_tidy=1
 
         # (c) large flat index with no section headers at all.
-        if [ "$needs_tidy" -eq 0 ] && [ "$files" -gt 8 ] && ! grep -q '^## ' "$index" 2>/dev/null; then
+        if [ "$needs_tidy" -eq 0 ] && [ "$files" -gt "$flat_files" ] && ! grep -q '^## ' "$index" 2>/dev/null; then
             needs_tidy=1
         fi
     fi

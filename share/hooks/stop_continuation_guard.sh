@@ -65,21 +65,44 @@ try:
 except ValueError:
     MAX_BLOCKS = 2
 
+# Every window, cap and limit below is read from CCAGE_STOPGUARD_<NAME> (docs/FEATURES.md
+# lists them); the two rules shared with bin/ccage-auto read ITS variable, so the pair
+# cannot drift. A value that is not a non-negative number is ignored: the default is used
+# and one line naming the variable goes to the guard log (flushed once append_log exists,
+# since the constants below are read before the config dir is known). A hook never fails
+# a session over a setting.
+_SETTING_WARNINGS = []
+
+
+def _setting(name, default):
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        val = float(raw)
+    except ValueError:
+        val = -1.0
+    if not 0 <= val < float("inf"):   # negative, infinite or NaN
+        _SETTING_WARNINGS.append("SETTING-IGNORED %s=%r: not a non-negative number; using %s"
+                                 % (name, raw, default))
+        return default
+    return type(default)(val)
+
 # Freshness window for "this subagent is alive": its transcript was touched
 # recently. Mirrors the mtime liveness test used elsewhere in this setup.
-LIVE_WINDOW_S = 180
+LIVE_WINDOW_S = _setting("CCAGE_STOPGUARD_LIVE_WINDOW_S", 180)
 
 # Freshness window for a session-declared serial gate (see the shape B
 # exemption below) -- longer than LIVE_WINDOW_S because a gate is declared
 # once and then waited on, not refreshed every heartbeat.
-SERIAL_GATE_WINDOW_S = 2700  # 45 minutes
+SERIAL_GATE_WINDOW_S = _setting("CCAGE_STOPGUARD_SERIAL_GATE_WINDOW_S", 2700)  # default 45 minutes
 
 # How recently the human must have TYPED for this session to count as attended.
 # 15 minutes: on 2026-08-12 the user typed at 08:23 and 08:24 and the guard went
 # on firing at 08:34, 08:35, 08:43 and 08:49, telling a person sitting at the
 # keyboard that nobody was there. A window this size covers a working exchange
 # while still letting a genuinely-departed session return to unattended rules.
-ATTENDED_WINDOW_S = 900
+ATTENDED_WINDOW_S = _setting("CCAGE_STOPGUARD_ATTENDED_WINDOW_S", 900)
 
 # How close ccage-auto's own injection stamp must be to a "typed" turn to
 # claim it as its own rather than the user's. Wide enough for the pty write +
@@ -93,7 +116,20 @@ ATTENDED_WINDOW_S = 900
 # injection, not as them -- narrow and self-correcting, since the very next
 # typed turn more than this many seconds after the last injection is read
 # correctly.
-INJECTION_TOLERANCE_S = 30
+INJECTION_TOLERANCE_S = _setting("CCAGE_AUTOCK_INJECTION_TOLERANCE_S", 30)
+
+# Same two reads bin/ccage-auto makes, so they take ITS variables: characters of a
+# background job's output searched for a terminal marker, and the byte tail of the
+# transcript searched for the human's last typed turn.
+JOB_TAIL_CHARS = _setting("CCAGE_AUTOCK_JOB_TAIL_CHARS", 400)
+TYPED_SCAN_BYTES = _setting("CCAGE_AUTOCK_TYPED_SCAN_BYTES", 400_000)
+# Plan documents followed from RESUME's `### Plan`, characters of the final message
+# searched for a question or a stated commitment, decision-log lines kept, and the
+# `git` probe's timeout (s).
+MAX_PLAN_REFS = _setting("CCAGE_STOPGUARD_MAX_PLAN_REFS", 5)
+TAIL_CHARS = _setting("CCAGE_STOPGUARD_TAIL_CHARS", 1200)
+LOG_LINES = max(1, _setting("CCAGE_STOPGUARD_LOG_LINES", 500))   # fact: the log keeps at least this line
+GIT_TIMEOUT_S = _setting("CCAGE_STOPGUARD_GIT_TIMEOUT_S", 5)
 
 # Every way the harness records that a background job has ENDED. Closed set, so
 # it is a named constant rather than a magic string inline: `[exited with code N]`
@@ -264,7 +300,7 @@ def _unfinished_task_outputs():
                 body = f.read()
         except OSError:
             continue
-        if any(m in body[-400:] for m in TERMINAL_JOB_MARKERS):
+        if any(m in body[-JOB_TAIL_CHARS:] for m in TERMINAL_JOB_MARKERS):
             continue
         yield name[:-len(".output")], body
 
@@ -352,7 +388,7 @@ def user_recently_typed():
         return False
     try:
         with open(path, "rb") as f:                 # tail only; these get large
-            f.seek(max(0, size - 400_000))
+            f.seek(max(0, size - TYPED_SCAN_BYTES))
             lines = f.read().decode("utf-8", "replace").splitlines()
     except OSError:
         return False
@@ -534,7 +570,7 @@ def plan_open_items():
             break
         if inplan:
             refs += re.findall(r"[~/A-Za-z0-9._-][A-Za-z0-9._/~-]*\.md", ln)
-    for ref in refs[:5]:
+    for ref in refs[:MAX_PLAN_REFS]:
         path = os.path.expanduser(ref) if ref.startswith("~/") else ref
         if not os.path.isabs(path):
             path = os.path.join(project, path)
@@ -604,9 +640,9 @@ def _scratch_root(sid):
 
 # An orphan from a long-dead run must not resurrect: the exit marker decides
 # liveness, and this only stops an ancient unmarked file counting forever.
-STALE_JOB_S = 86400
+STALE_JOB_S = _setting("CCAGE_STOPGUARD_STALE_JOB_S", 86400)
 # Cap the snapshot so a scratchpad full of artifacts cannot bloat the record.
-MAX_SNAPSHOT = 200
+MAX_SNAPSHOT = _setting("CCAGE_STOPGUARD_MAX_SNAPSHOT", 200)
 
 
 def live_background_jobs():
@@ -705,7 +741,7 @@ def open_task_count():
                if status.get(t, "pending") in ("pending", "in_progress"))
 
 
-tail = last_msg[-1200:] if last_msg else ""
+tail = last_msg[-TAIL_CHARS:] if last_msg else ""
 asked = bool(ASKED_USER.search(tail))
 committed = bool(COMMIT.search(tail)) and not asked
 
@@ -736,13 +772,17 @@ LOG_PATH = os.path.join(config, "stop_continuation_guard.log")
 
 
 def append_log(line):
-    """Keep the last 500 lines of the guard's decision log. Fail-open."""
+    """Keep the last LOG_LINES lines of the guard's decision log. Fail-open."""
     try:
-        prev = (open(LOG_PATH).read().splitlines()[-499:]
-                if os.path.exists(LOG_PATH) else [])
+        prev = open(LOG_PATH).read().splitlines() if os.path.exists(LOG_PATH) else []
+        prev = prev[max(0, len(prev) - (LOG_LINES - 1)):]
         open(LOG_PATH, "w").write("\n".join(prev + [line]) + "\n")
     except OSError:
         pass
+
+
+for _w in _SETTING_WARNINGS:
+    append_log("%s %s %s" % (time.strftime("%Y-%m-%dT%H:%M:%S"), MODE.upper(), _w))
 
 
 def log_decision(verdict, path):
@@ -921,7 +961,7 @@ def unpushed_vs_ci():
     def git(*a):
         try:
             p = subprocess.run(("git", "-C", project) + a, capture_output=True,
-                               text=True, timeout=5)
+                               text=True, timeout=GIT_TIMEOUT_S)
             return p.stdout.strip() if p.returncode == 0 else ""
         except Exception:
             return ""

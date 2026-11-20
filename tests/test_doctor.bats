@@ -85,6 +85,19 @@ has_cmd() {
     [[ "$output" == *"$repo"* ]]
 }
 
+@test "doctor reads the session-block budget from CCAGE_RESUME_BUDGET_BLOCKS, like the hooks" {
+    local repo="$BATS_TEST_TMPDIR/repo6b"; mkdir -p "$repo"
+    printf '## Session 1\n## Session 2\n## Session 3\n## Session 4\n' > "$repo/RESUME.md"
+    mkcage proj6b "$repo" >/dev/null
+    CCAGE_RESUME_BUDGET_BLOCKS=5 run "$CCAGE" doctor
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"$repo"* ]]
+    # a value that is not a number falls back to the default of 3, so four blocks is bloated
+    CCAGE_RESUME_BUDGET_BLOCKS=lots run "$CCAGE" doctor
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"$repo"* ]]
+}
+
 @test "doctor lists a cage with messy memory (dead index link)" {
     local repo="$BATS_TEST_TMPDIR/repo7"; mkdir -p "$repo"
     local cage; cage=$(mkcage proj7 "$repo")

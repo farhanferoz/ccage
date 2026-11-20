@@ -300,15 +300,26 @@ print("changed" if changed else "unchanged")
 PY
 }
 
-# Bloated RESUME?  lines > budget OR more than 3 "## Session" blocks.
+# A non-negative integer setting: VALUE when it is all digits, else DEFAULT. Declared here
+# as well as in share/claude-isolation.sh, deliberately: this file is sourced without it
+# (uninstall.sh). KEEP IN SYNC with _ccage_uint there.
+_ccage_doctor_uint() {
+    case "$1" in
+        ''|*[!0-9]*) printf '%s\n' "$2" ;;
+        *)           printf '%s\n' "$1" ;;
+    esac
+}
+
+# Bloated RESUME?  lines > budget OR more than CCAGE_RESUME_BUDGET_BLOCKS (default 3) "## Session" blocks.
 # KEEP IN SYNC with the health check in share/hooks/resume_autoload.sh.
 _ccage_doctor_resume_bloated() {
     local f="$1" budget="$2"
     [ -f "$f" ] || return 1
-    local lines blocks
+    local lines blocks max_blocks
+    max_blocks=$(_ccage_doctor_uint "${CCAGE_RESUME_BUDGET_BLOCKS:-}" 3)
     lines=$(wc -l < "$f" 2>/dev/null | tr -d '[:space:]'); [ -n "$lines" ] || lines=0
     blocks=$(grep -c '^## Session' "$f" 2>/dev/null); [ -n "$blocks" ] || blocks=0
-    { [ "$lines" -gt "$budget" ] || [ "$blocks" -gt 3 ]; } 2>/dev/null
+    { [ "$lines" -gt "$budget" ] || [ "$blocks" -gt "$max_blocks" ]; } 2>/dev/null
 }
 
 # Messy memory dir?  dead index link OR many orphan files OR large flat index.
@@ -318,6 +329,8 @@ _ccage_doctor_memory_messy() {
     local index="$memdir/MEMORY.md"
     [ -f "$index" ] || return 1
     local orphan_max="${CCAGE_MEMORY_ORPHAN_MAX:-3}"
+    local flat_files
+    flat_files=$(_ccage_doctor_uint "${CCAGE_MEMORY_FLAT_INDEX_FILES:-}" 8)
 
     local ref
     while IFS= read -r ref; do
@@ -331,7 +344,7 @@ _ccage_doctor_memory_messy() {
     [ -n "$files" ] || files=0
     [ -n "$idx" ] || idx=0
     [ "$((files - idx))" -gt "$orphan_max" ] && return 0
-    [ "$files" -gt 8 ] && ! grep -q '^## ' "$index" 2>/dev/null && return 0
+    [ "$files" -gt "$flat_files" ] && ! grep -q '^## ' "$index" 2>/dev/null && return 0
     return 1
 }
 

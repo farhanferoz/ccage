@@ -107,6 +107,13 @@ STUB
     [ "$output" = "0" ]
 }
 
+@test "peak_cache_read: the floor comes from CCAGE_PEAK_MIN_CACHE_READ, and a bad value keeps 1000" {
+    CCAGE_PEAK_MIN_CACHE_READ=30000 run _ccage_handoff_peak_cache_read "$FIXTURES/minimal.jsonl"
+    [ "$output" = "0" ]
+    CCAGE_PEAK_MIN_CACHE_READ=lots run _ccage_handoff_peak_cache_read "$FIXTURES/minimal.jsonl"
+    [ "$output" = "22000" ]
+}
+
 @test "last_model: minimal, diverse, and 'unknown' fallback on empty" {
     run _ccage_handoff_last_model "$FIXTURES/minimal.jsonl"
     [ "$output" = "claude-opus-4-7" ]
@@ -310,6 +317,19 @@ JSONL
     local longest
     longest=$(printf '%s\n' "$output" | grep '^- `' | awk '{ print length($0) }' | sort -rn | head -1)
     [ "$longest" -le 150 ]
+}
+
+@test "commands: the line width comes from CCAGE_HANDOFF_MAX_CMD_CHARS, and a bad value keeps 140" {
+    local f="$BATS_TEST_TMPDIR/cmdw.jsonl"
+    cat > "$f" <<JSONL
+{"type":"assistant","timestamp":"2026-07-20T09:00:00.000Z","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"$(printf 'echo %.0sX' $(seq 1 200))"}}],"usage":{"input_tokens":1,"output_tokens":1}}}
+JSONL
+    run bash -c "export CCAGE_HANDOFF_MAX_CMD_CHARS=40; source '$REPO_ROOT/share/ccage-handoff.sh'; _ccage_handoff_generate '$f' --stdout"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep '^- `' | awk '{ print length($0) }' | sort -rn | head -1)" -le 50 ]
+    run bash -c "export CCAGE_HANDOFF_MAX_CMD_CHARS=wide; source '$REPO_ROOT/share/ccage-handoff.sh'; _ccage_handoff_generate '$f' --stdout"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep '^- `' | awk '{ print length($0) }' | sort -rn | head -1)" -gt 100 ]
 }
 
 # The predicate is anchored, so a human who merely QUOTES a marker keeps their

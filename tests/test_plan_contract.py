@@ -196,6 +196,29 @@ def test_a_quote_found_only_in_a_teammate_message_is_denied(tmp_path):
     assert guard(tmp_path, plan(), plan(t2=False) + APPROVAL, t)[0] == 2
 
 
+def test_guard_limits_come_from_the_environment(tmp_path):
+    """A cap is chosen by CCAGE_PLAN_<NAME>, the default unchanged: a failing check prints its
+    last 20 lines, or the last 1 when CCAGE_PLAN_TAIL_LINES=1."""
+    check = "`seq 11 13; false`"
+    code, err = guard(tmp_path, plan(t1_check=check), plan("[x]", check))
+    assert code == 2 and "last 20 lines:\n11\n12\n13" in err
+    code, err = guard(tmp_path, plan(t1_check=check), plan("[x]", check), env={"CCAGE_PLAN_TAIL_LINES": "1"})
+    assert code == 2 and "last 1 lines:\n13" in err and "\n12\n" not in err
+
+
+def test_a_bad_guard_setting_is_ignored_and_logged(tmp_path):
+    """A hook never fails over a setting: a value that is not a non-negative number leaves the
+    default in force and names the variable in the guard log (the budget one used to make the
+    guard allow every tick)."""
+    check = "`false`"
+    # `inf` parses as a number but has no integer value; it must fall back too, not crash.
+    for var, bad in (("CCAGE_PLAN_TAIL_LINES", "lots"), ("CCAGE_PLAN_TAIL_LINES", "inf"),
+                     ("CCAGE_PLAN_GUARD_BUDGET_S", "lots")):
+        code, err = guard(tmp_path, plan(t1_check=check), plan("[x]", check), env={var: bad})
+        assert code == 2 and "check failed" in err and "last 20 lines" in err
+        assert f"IGNORED-setting {var}={bad!r}" in (tmp_path / "plan_contract_guard.log").read_text()
+
+
 def test_ticks_beyond_the_time_budget_are_denied_unchecked(tmp_path):
     code, err = guard(tmp_path, plan(), plan("[x]"), env={"CCAGE_PLAN_GUARD_BUDGET_S": "0"})
     assert code == 2 and "time budget" in err

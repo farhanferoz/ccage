@@ -193,6 +193,15 @@ make_decisions() {
     [[ "$output" != *$'\n201\n'* ]]
 }
 
+@test "the RESUME line cap is CCAGE_RESUME_CAP_FACTOR times the budget, and a bad factor falls back to 2" {
+    seq 1 600 > "$REPO/RESUME.md"
+    CCAGE_RESUME_BUDGET_LINES=100 CCAGE_RESUME_CAP_FACTOR=3 run bash -c 'for k in $(seq 1 12); do "$0" resume "$k" 12; done' "$HOOK"
+    [[ "$output" == *"truncated at 300 lines"* ]]
+    CCAGE_RESUME_BUDGET_LINES=100 CCAGE_RESUME_CAP_FACTOR=lots run bash -c 'for k in $(seq 1 12); do "$0" resume "$k" 12; done' "$HOOK"
+    [[ "$output" == *"truncated at 200 lines"* ]]
+    grep -q "status=setting-ignored var=CCAGE_RESUME_CAP_FACTOR value=lots" "$LOG"
+}
+
 # ===== 5: run-time resolution, never a seed-time path =====
 
 @test "the doc is resolved from CLAUDE_PROJECT_DIR and CCAGE_SLOT at run time" {

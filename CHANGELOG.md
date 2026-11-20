@@ -2,6 +2,21 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Every timing, window and cap is now a setting.** 88 values that were written into the code (ccage-auto's key delays, exit graces and margins; ccage-watch's interval, ttl and probe timeouts; the plan guard's check timeout and caps; the stop guard's windows; the circuit breaker's debounce, lock retries and timeouts; handoff and resume-cost caps; the autoload and budget hooks' counts) each read an environment variable whose default is today's value, so with none set nothing changes. `docs/FEATURES.md` lists them under "Timings, windows and caps". A value shared by two files reads one variable in both (`CCAGE_AUTOCK_INJECTION_TOLERANCE_S` in ccage-auto and the stop guard, `CCAGE_RESUME_BUDGET_BLOCKS` in the budget hook, the autoload hook and `ccage doctor`). A value that does not parse never fails a session: the hooks and ccage-watch ignore it, use the default and log or print one line naming the variable. Constants that are facts (exit codes, the cache lifetimes, Anthropic's price multiples, the hook output limit) stay in code, each marked as a fact.
+
+### Changed
+
+- **The README states the shared-settings cache problem as it was, and that it now looks fixed upstream.** It said one project's cache entries evicted another's; what happened was that a setting saved by one session changed the start of the other sessions' requests, so they missed the cache. A test on Claude Code 2.1.329 found a session keeping its cache when its settings file gained a permission and then an environment variable; model and effort changes were not tested.
+
+### Fixed
+
+- **A bad `CCAGE_PLAN_GUARD_BUDGET_S` made the plan guard allow every tick.** It was read with a bare `float()`; it now goes through the guard's validated reader, which ignores a value that is not a finite non-negative number and logs it.
+- **A tick's check gets four and a half minutes.** The plan guard stopped each check at 120 s, so an item whose check is a three-minute build could never be ticked; checks may run up to four minutes under their own 240-second cap, and the guard now allows 270 s.
+
 ## [0.23.0] — 2026-11-07
 
 Minor: session start reports how many plan files still hold open items, and the plan guard hears the owner's mid-turn messages and lets a committed check move onto its checkbox line.

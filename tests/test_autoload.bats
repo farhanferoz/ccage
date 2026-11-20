@@ -123,6 +123,22 @@ memdir() {
     [[ "$output" == *"over budget"* ]]
 }
 
+@test "the session-block budget comes from CCAGE_RESUME_BUDGET_BLOCKS" {
+    printf '## Session 1\n## Session 2\n## Session 3\n## Session 4\n' > "$REPO/RESUME.md"
+    CCAGE_RESUME_BUDGET_BLOCKS=5 run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"over budget"* ]]
+}
+
+@test "a bad CCAGE_RESUME_BUDGET_BLOCKS keeps the default of 3 and the hook log names it" {
+    mkdir -p "$CAGE"
+    printf '## Session 1\n## Session 2\n## Session 3\n## Session 4\n' > "$REPO/RESUME.md"
+    CCAGE_RESUME_BUDGET_BLOCKS=lots run run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"over budget"* ]]
+    grep -q "SETTING-IGNORED CCAGE_RESUME_BUDGET_BLOCKS=lots" "$CAGE/resume-autoload.log"
+}
+
 @test "messy memory (dead index link): emits tidy NOTE" {
     local md; md="$(memdir)"; mkdir -p "$md"
     printf -- '- [Gone](missing_note.md) — hook\n' > "$md/MEMORY.md"

@@ -54,6 +54,29 @@ def test_config_reads_env_overrides(monkeypatch):
     assert cfg.t_soft_min == 45  # untouched default
 
 
+def test_config_timings_and_counts_come_from_env(monkeypatch):
+    """The tick-level timings and counts are CCB_* settings with today's values as defaults,
+    and a value that is not all digits keeps the default."""
+    from lib.ccb_types import CCBConfig
+    from lib.subagent_watch import evaluate
+
+    default = CCBConfig.from_env()
+    assert (default.debounce_ticks, default.extend_hint_min, default.flock_retries,
+            default.flock_retry_delay_ms, default.notify_timeout_s, default.tokenol_timeout_s) == (2, 60, 3, 200, 10, 3)
+    monkeypatch.setenv("CCB_DEBOUNCE_TICKS", "5")
+    monkeypatch.setenv("CCB_NOTIFY_TIMEOUT_S", "7")
+    monkeypatch.setenv("CCB_FLOCK_RETRIES", "many")
+    cfg = CCBConfig.from_env()
+    assert (cfg.debounce_ticks, cfg.notify_timeout_s, cfg.flock_retries) == (5, 7, 3)
+    # the value reaches behaviour: the first tier step waits for cfg.debounce_ticks breach polls
+    o = _obs(elapsed_min=60, stale_min=15)
+    for ticks, phase in ((2, AgentPhase.NUDGED), (4, AgentPhase.SUSPECT)):
+        rec = _rec()
+        for _ in range(2):
+            rec, _actions = evaluate(rec, o, CCBConfig(max_tier=Tier.STOP, debounce_ticks=ticks))
+        assert rec.phase is phase
+
+
 def test_config_rejects_bad_tier(monkeypatch):
     from lib.ccb_types import CCBConfig, Tier
 

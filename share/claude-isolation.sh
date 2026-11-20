@@ -51,8 +51,21 @@ else
     _CCAGE_SHA1_CMD=openssl
 fi
 
+# A non-negative integer setting: VALUE when it is all digits, else DEFAULT. Takes the
+# value, not the variable's name, because this file is sourced by zsh too (no ${!name}).
+# Same fallback as CCAGE_DOC_CHUNKS in _ccage_seed_session_docs_hooks: a garbage value
+# must never break the shell it is sourced into. Usage: _ccage_uint "${CCAGE_X:-}" 25
+_ccage_uint() {
+    case "$1" in
+        ''|*[!0-9]*) printf '%s\n' "$2" ;;
+        *)           printf '%s\n' "$1" ;;
+    esac
+}
+
 _ccage_sha1() {
     case "$_CCAGE_SHA1_CMD" in
+        # fact: 8 hex characters of the path hash is the collision-suffix length documented in
+        # docs/FEATURES.md (cage names must stay stable across machines).
         sha1sum) printf '%s' "$1" | sha1sum            | cut -c1-8 ;;
         shasum)  printf '%s' "$1" | shasum -a 1        | cut -c1-8 ;;
         openssl) printf '%s' "$1" | openssl dgst -sha1 | awk '{print $NF}' | cut -c1-8 ;;
@@ -856,7 +869,7 @@ _ccage_resume_price_input() {
 }
 
 _ccage_resume_price_cache_write() {
-    awk -v i="$(_ccage_resume_price_input "$1")" 'BEGIN { printf "%g\n", i * 2.00 }'
+    awk -v i="$(_ccage_resume_price_input "$1")" 'BEGIN { printf "%g\n", i * 2.00 }' # fact: Anthropic bills a 1-hour cache write at 2x the input rate
 }
 
 # Cache READS are not a flat 0.1x: 0.05x on Opus 5.5, 0.025x on Fable / Mythos
@@ -920,7 +933,9 @@ _ccage_is_resume_invocation() {
 _ccage_resume_session_summary() {
     local jsonl="$1"
     [ -f "$jsonl" ] || { printf '0\tunknown\t\t\tunknown\n'; return 0; }
-    jq -Rrn '
+    # Turns whose cache_read is at or below CCAGE_PEAK_MIN_CACHE_READ are metadata turns near
+    # the session start, not the conversation; same floor as ccage-handoff.sh's peak.
+    jq -Rrn --argjson minread "$(_ccage_uint "${CCAGE_PEAK_MIN_CACHE_READ:-}" 1000)" '
         reduce (inputs | fromjson? // empty) as $r (
             {peak: 0, model: "unknown", session_id: "", last_ts: "", tier: "unknown"};
             ( if .session_id == "" and ($r.sessionId // null) != null
@@ -932,7 +947,7 @@ _ccage_resume_session_summary() {
                       and $r.message.model != "<synthetic>"
                     then .model = $r.message.model else . end )
                   | ( ($r.message.usage.cache_read_input_tokens // 0) as $cur
-                      | if $cur > 1000 and $cur > .peak
+                      | if $cur > $minread and $cur > .peak
                         then .peak = $cur else . end )
                   | ( ($r.message.usage.cache_creation // {}) as $cc
                       | if ($cc.ephemeral_1h_input_tokens // 0) > 0 then .tier = "1h"
@@ -952,15 +967,21 @@ _ccage_resume_session_summary() {
 #                   measured 2026-10-05 (see _ccage_resume_cache_state).
 _ccage_resume_compute_cost() {
     local peak="$1" model="$2" state="${3:-cold}"
+    # The band around the estimate (percent either side; default 25) and the tokens
+    # of tools + system prompt that a cold resume does not rewrite (default 19000).
+    local band prefix
+    band=$(_ccage_uint "${CCAGE_ESTIMATE_BAND_PCT:-}" 25)
+    prefix=$(_ccage_uint "${CCAGE_PREFIX_TOKENS:-}" 19000)
     if [ "$state" = warm ]; then
         [ "$peak" -gt 0 ] 2>/dev/null || { printf '0.00\t0.00\t0\n'; return 0; }
-        awk -v r="$peak" -v p="$(_ccage_resume_price_cache_read "$model")" 'BEGIN {
+        awk -v r="$peak" -v p="$(_ccage_resume_price_cache_read "$model")" -v b="$band" 'BEGIN {
             mid = r / 1000000 * p
-            printf "%.2f\t%.2f\t%d\n", mid * 0.75, mid * 1.25, r
+            lo = 1 - b / 100; if (lo < 0) lo = 0
+            printf "%.2f\t%.2f\t%d\n", mid * lo, mid * (1 + b / 100), r
         }'
         return 0
     fi
-    local rewrite=$((peak - 19000))     # subtract ~19K tools+system prefix
+    local rewrite=$((peak - prefix))     # subtract the tools+system prefix (~19K by default)
     [ "$rewrite" -lt 0 ] && rewrite=0
     if [ "$rewrite" -eq 0 ]; then
         printf '0.00\t0.00\t0\n'
@@ -968,9 +989,10 @@ _ccage_resume_compute_cost() {
     fi
     local rate
     rate=$(_ccage_resume_price_cache_write "$model")
-    awk -v r="$rewrite" -v p="$rate" 'BEGIN {
+    awk -v r="$rewrite" -v p="$rate" -v b="$band" 'BEGIN {
         mid = r / 1000000 * p
-        printf "%.2f\t%.2f\t%d\n", mid * 0.75, mid * 1.25, r
+        lo = 1 - b / 100; if (lo < 0) lo = 0
+        printf "%.2f\t%.2f\t%d\n", mid * lo, mid * (1 + b / 100), r
     }'
 }
 
@@ -1021,9 +1043,9 @@ _ccage_resume_age_sec() {
 # real bill, a wrong "cold" only over-warns.
 # Args: last_ts tier [now_epoch]
 _ccage_resume_cache_state() {
-    local sec ttl=300
+    local sec ttl=300   # fact: the 5-minute prompt-cache lifetime
     sec=$(_ccage_resume_age_sec "$1" "${3:-}")
-    [ "$2" = 1h ] && ttl=3600
+    [ "$2" = 1h ] && ttl=3600   # fact: the 1-hour prompt-cache lifetime
     if [ -n "$sec" ] && [ "$sec" -ge 0 ] && [ "$sec" -lt "$ttl" ]; then
         echo warm
     else

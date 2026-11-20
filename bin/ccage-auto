@@ -94,6 +94,8 @@
 #     clamped to [1,24]; default 6), CCAGE_AUTOCK_KEEPWARM_MIN_TOKENS (no ping
 #     below this context size; default 100000).
 #   CCAGE_SLOT is honoured for RESUME naming.
+#   The remaining timings, windows and caps (CCAGE_AUTOCK_KEY_DELAY, _EXIT_GRACE,
+#     _HARD_MARGIN, _TAIL_MAX_BYTES, ...) are listed in docs/FEATURES.md.
 #
 # Keep-warm (on by default). While the session sits idle, one tiny typed turn
 # every ~55 minutes re-reads the cached conversation (cache-read price) and
@@ -190,6 +192,25 @@ _ccb_watch, _ccb_types = _load_ccb()
 # Configuration
 # ----------------------------------------------------------------------------
 
+def _truthy(v, default):
+    if v is None:
+        return default
+    return str(v).strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def _num(v, default):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+
+# Every tunable below is read from CCAGE_AUTOCK_<NAME> at import (a bad value falls
+# back to the default, like every Config value). docs/FEATURES.md lists them.
 SENTINEL_DEFAULT = "CHECKPOINTED"
 
 # The transcript does NOT record the context window: a 1M session logs its model
@@ -199,6 +220,8 @@ SENTINEL_DEFAULT = "CHECKPOINTED"
 # down to 200000 for a standard-context session. Defaulting HIGH is the safe
 # failure: at worst the watcher defers to the hard threshold / auto-compact,
 # whereas defaulting LOW would make it fire spuriously early.
+# fact: the two context-window sizes Claude Code ships (1M long-context variant, 200K
+# standard). Which one applies is chosen by --window / CCAGE_AUTOCK_WINDOW(S), not here.
 WINDOW_1M = 1_000_000
 WINDOW_STD = 200_000
 ONE_M_MARKERS = ("[1m]", "-1m", "_1m")
@@ -207,21 +230,21 @@ DEFAULT_WINDOW = WINDOW_1M    # fallback when the model is unknown / ambiguous
 
 # Timing constants (seconds). Conservative; the fragile part is slash-command
 # entry, so we settle generously before pressing Enter.
-KEY_DELAY = 0.25        # pause between typing a line and submitting it
-CLEAR_SETTLE = 3.0      # wait after /clear for the SessionStart hook + reload
-ESC_TAIL = 0.2          # _clean_input: extra gap after _interrupt's 0.5s, so ESC
+KEY_DELAY = _num(os.environ.get("CCAGE_AUTOCK_KEY_DELAY"), 0.25)   # pause between typing a line and submitting it
+CLEAR_SETTLE = _num(os.environ.get("CCAGE_AUTOCK_CLEAR_SETTLE"), 3.0)   # wait after /clear for the SessionStart hook + reload
+ESC_TAIL = _num(os.environ.get("CCAGE_AUTOCK_ESC_TAIL"), 0.2)   # _clean_input: extra gap after _interrupt's 0.5s, so ESC
                         # and the next key clear the ~500ms escape timeout and are
                         # decoded as two keypresses, not one Alt-modified one
-EXIT_GRACE = 8.0        # wait for /exit to take before signalling the pty child
-EXIT_KILL_GRACE = 3.0   # wait after SIGHUP, then after SIGKILL
+EXIT_GRACE = _num(os.environ.get("CCAGE_AUTOCK_EXIT_GRACE"), 8.0)   # wait for /exit to take before signalling the pty child
+EXIT_KILL_GRACE = _num(os.environ.get("CCAGE_AUTOCK_EXIT_KILL_GRACE"), 3.0)   # wait after SIGHUP, then after SIGKILL
 DONE_IDLE_GRACE = 10.0  # transcript quiet for this long before closing on done
-DONE_CLOSE_CEILING = 180.0   # ...but never wait longer than this to close
+DONE_CLOSE_CEILING = _num(os.environ.get("CCAGE_AUTOCK_DONE_CLOSE_CEILING"), 180.0)   # ...but never wait longer than this to close
 COOLDOWN = 30.0         # ignore thresholds for this long after a reset
 NUDGE_TIMEOUT = 600.0   # weekly-floor stand-down only: re-nudge if the model
                         # hasn't confirmed after this long (no occupancy signal
                         # applies once floored). The context/occupancy machine
                         # below escalates on occupancy alone — no timer.
-MAX_RENUDGE = 1         # soft re-nudges before escalating to the hard path
+MAX_RENUDGE = int(_num(os.environ.get("CCAGE_AUTOCK_MAX_RENUDGE"), 1))   # soft re-nudges before escalating to the hard path
 STALL_IDLE = 600.0      # silent-stall watchdog: while NUDGED, if this many
                         # seconds pass since the last nudge with ZERO transcript
                         # growth, the model went quiet without the sentinel
@@ -243,17 +266,17 @@ STALL_IDLE = 600.0      # silent-stall watchdog: while NUDGED, if this many
 # valve for an explicitly-conflicting soft/hard pair (soft >= hard), unchanged
 # from before this contract existed.
 DEFAULT_SOFT = 40.0
-HARD_MARGIN = 20.0
-RENUDGE_MARGIN = 5.0
-COLLISION_MARGIN = 10.0
+HARD_MARGIN = _num(os.environ.get("CCAGE_AUTOCK_HARD_MARGIN"), 20.0)
+RENUDGE_MARGIN = _num(os.environ.get("CCAGE_AUTOCK_RENUDGE_MARGIN"), 5.0)
+COLLISION_MARGIN = _num(os.environ.get("CCAGE_AUTOCK_COLLISION_MARGIN"), 10.0)
 
 # Weekly-limit floor. The state file is written by ccage-statusline-tee.sh at
 # the cage's config root on every statusline render; a reading older than the
 # stale window is treated as no reading at all (a closed laptop must not
 # trigger a stand-down off yesterday's number).
 RATE_LIMITS_STATE = "rate-limits-state.json"
-WEEKLY_WARN_MARGIN = 5.0        # warn stage fires at floor + this (remaining %)
-WEEKLY_STALE_S = 30 * 60.0      # sensor readings older than this are unknown
+WEEKLY_WARN_MARGIN = _num(os.environ.get("CCAGE_AUTOCK_WEEKLY_WARN_MARGIN"), 5.0)   # warn stage fires at floor + this (remaining %)
+WEEKLY_STALE_S = _num(os.environ.get("CCAGE_AUTOCK_WEEKLY_STALE_S"), 30 * 60.0)   # sensor readings older than this are unknown
 
 # ---------------------------------------------------------------- keep-warm
 # One ping is a minimal turn that re-reads the cached conversation at the
@@ -265,7 +288,7 @@ KEEPWARM_INTERVAL_RANGE = (1.0, 59.0)   # >= the 1-hour TTL could never refresh 
 KEEPWARM_MAX = 6                 # pings per idle stretch
 KEEPWARM_MAX_RANGE = (1, 24)     # past ~25 pings a rewrite would have been cheaper
 KEEPWARM_MIN_TOKENS = 100_000    # below this a rewrite costs cents: don't bother
-KEEPWARM_OWN_TURN_S = 120.0      # transcript growth this soon after a ping is the
+KEEPWARM_OWN_TURN_S = _num(os.environ.get("CCAGE_AUTOCK_KEEPWARM_OWN_TURN_S"), 120.0)   # transcript growth this soon after a ping is the
                                  # ping's own turn, not the user coming back
 KEEPWARM_PING = ("[keep-warm] Automated cache refresh while you are away — no "
                  "action needed. Reply with only: ok")
@@ -287,9 +310,11 @@ _ENTER_BYTES = b"\r\n"
 SUPERVISOR_IDLE = 300.0      # transcript quiet this long -> one poke
 SUPERVISOR_ESCALATE = 300.0  # still quiet this long after the poke -> clear
 # Kept EQUAL to share/hooks/stop_continuation_guard.sh's INJECTION_TOLERANCE_S by
-# tests/test_autock.bats, which greps both files: two spellings of one rule is how
-# the slug regex drifted into five copies and turned 28 macOS tests red in 0.15.0.
-INJECTION_TOLERANCE_S = 30
+# reading the SAME variable, CCAGE_AUTOCK_INJECTION_TOLERANCE_S, with the same
+# default (tests/test_autock.bats greps both files for it): two spellings of one rule
+# is how the slug regex drifted into five copies and turned 28 macOS tests red in
+# 0.15.0.
+INJECTION_TOLERANCE_S = _num(os.environ.get("CCAGE_AUTOCK_INJECTION_TOLERANCE_S"), 30)
 # Mirrors bin/ccage-watch's Kind.HOLD. A hold spec means "this session declared it
 # is waiting on the user" and is NOT a watcher: it has no pid and no condition.
 HOLD_KIND = "hold"
@@ -302,7 +327,7 @@ HOLD_KIND = "hold"
 # session's cooperation; this constant is what guarantees that, whatever ttl the
 # spec asked for. The watcher daemon keeps its own ttl and still files its own
 # EXPIRED report -- this bounds only what the supervisor honours.
-SUP_WAIT_MAX_S = 86400.0
+SUP_WAIT_MAX_S = _num(os.environ.get("CCAGE_AUTOCK_SUP_WAIT_MAX_S"), 86400.0)
 # A freshly armed watcher spec carries `pid: None` until its daemon's first act
 # overwrites it (bin/ccage-watch's daemon()). cmd_arm allows SETTLE_S = 0.2 s for
 # that, but SETTLE_S is the PARENT's grace and a loaded machine can delay the
@@ -310,7 +335,38 @@ SUP_WAIT_MAX_S = 86400.0
 # 2 * SETTLE_S. It stays negligible against sup_idle (minutes), which is the
 # property that matters: a spec whose daemon never started can never buy a
 # meaningful silence. Past this age a pid-less spec is not a declaration.
-SUP_PIDLESS_GRACE_S = 5.0
+SUP_PIDLESS_GRACE_S = _num(os.environ.get("CCAGE_AUTOCK_SUP_PIDLESS_GRACE_S"), 5.0)
+
+# ----------------------------------------------------- probes, windows, settles
+# Subprocess timeouts (s): config-dir resolution through an interactive shell, the
+# `ps` elapsed-time probe, and the `git rev-parse` of the control-file excluder.
+RESOLVE_TIMEOUT_S = _num(os.environ.get("CCAGE_AUTOCK_RESOLVE_TIMEOUT_S"), 15)
+PS_TIMEOUT_S = _num(os.environ.get("CCAGE_AUTOCK_PS_TIMEOUT_S"), 3)
+GIT_TIMEOUT_S = _num(os.environ.get("CCAGE_AUTOCK_GIT_TIMEOUT_S"), 5)
+# Transcript tail reads (bytes): occupancy / usage parsing, the supervisor's
+# "worked since" scan, and its "human typed since" scan. Transcripts get large.
+TAIL_MAX_BYTES = int(_num(os.environ.get("CCAGE_AUTOCK_TAIL_MAX_BYTES"), 512 * 1024))
+WORK_SCAN_BYTES = int(_num(os.environ.get("CCAGE_AUTOCK_WORK_SCAN_BYTES"), 200_000))
+TYPED_SCAN_BYTES = int(_num(os.environ.get("CCAGE_AUTOCK_TYPED_SCAN_BYTES"), 400_000))
+# Characters of a background-job output tail searched for a terminal marker.
+JOB_TAIL_CHARS = int(_num(os.environ.get("CCAGE_AUTOCK_JOB_TAIL_CHARS"), 400))
+# Seconds after a nudge before a sentinel alone (no fresh RESUME) is accepted.
+CONFIRM_FALLBACK_S = _num(os.environ.get("CCAGE_AUTOCK_CONFIRM_FALLBACK_S"), 20)
+# Key-timing settles (s) beyond KEY_DELAY: after ESC, after clearing the input
+# line, between the exit-wait polls, after the bypass-screen Down key, and the
+# TUI-ready poll slice / paint settle before the kickoff prompt.
+INTERRUPT_SETTLE = _num(os.environ.get("CCAGE_AUTOCK_INTERRUPT_SETTLE"), 0.5)
+INPUT_CLEAR_SETTLE = _num(os.environ.get("CCAGE_AUTOCK_INPUT_CLEAR_SETTLE"), 0.3)
+EXIT_POLL_S = _num(os.environ.get("CCAGE_AUTOCK_EXIT_POLL_S"), 0.2)
+BYPASS_KEY_DELAY = _num(os.environ.get("CCAGE_AUTOCK_BYPASS_KEY_DELAY"), 0.3)
+INIT_READY_POLL_S = _num(os.environ.get("CCAGE_AUTOCK_INIT_READY_POLL_S"), 0.5)
+INIT_PAINT_SETTLE = _num(os.environ.get("CCAGE_AUTOCK_INIT_PAINT_SETTLE"), 1.0)
+# Screen scanning at startup: seconds the bypass screen is looked for, the slack
+# added to CCAGE_AUTOCK_INIT_DELAY for the ready marker, and the ANSI-stripped
+# bytes kept for matching.
+SCAN_WINDOW_S = _num(os.environ.get("CCAGE_AUTOCK_SCAN_WINDOW_S"), 60)
+READY_SLACK_S = _num(os.environ.get("CCAGE_AUTOCK_READY_SLACK_S"), 5.0)
+SCAN_BUF_BYTES = int(_num(os.environ.get("CCAGE_AUTOCK_SCAN_BUF_BYTES"), 4096))
 # The TUI lays words out with cursor-move escapes rather than spaces, so once the
 # escapes are stripped the screen text has NO spaces in it at all. Screen matching
 # therefore compares whitespace-free forms on both sides.
@@ -337,23 +393,6 @@ def bypass_screen_visible(clean_buf):
 # by tests/test_autock.bats, which greps both files. Two spellings of one closed
 # set is how the `[killed]` case went missing from both readers at once.
 TERMINAL_JOB_MARKERS = ("[exited with code", "[killed]")
-
-
-def _truthy(v, default):
-    if v is None:
-        return default
-    return str(v).strip().lower() not in ("0", "false", "no", "off", "")
-
-
-def _num(v, default):
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return default
-
-
-def _clamp(v, lo, hi):
-    return max(lo, min(hi, v))
 
 
 def launch_command(cfg):
@@ -730,7 +769,7 @@ def resolve_config_dir(cwd):
     try:
         out = subprocess.run(
             [shell, "-ic", '_ccage_config_dir_for "$PWD" 2>/dev/null'],
-            cwd=cwd, capture_output=True, text=True, timeout=15,
+            cwd=cwd, capture_output=True, text=True, timeout=RESOLVE_TIMEOUT_S,
         ).stdout.strip()
         if out:
             return out.splitlines()[-1].strip()
@@ -782,7 +821,7 @@ def _resolve_config_dir_noninteractive(cwd, shell):
         try:
             out = subprocess.run(
                 [shell, "-c", script],
-                cwd=cwd, capture_output=True, text=True, timeout=15,
+                cwd=cwd, capture_output=True, text=True, timeout=RESOLVE_TIMEOUT_S,
             ).stdout.strip()
             if out:
                 return out.splitlines()[-1].strip()
@@ -844,7 +883,7 @@ def active_jsonl(sdir, since=None):
 # Reading context occupancy from the transcript
 # ----------------------------------------------------------------------------
 
-def _tail(path, maxbytes=512 * 1024):
+def _tail(path, maxbytes=TAIL_MAX_BYTES):
     try:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
@@ -1112,7 +1151,7 @@ def _process_start_epoch(pid):
     parse."""
     try:
         out = subprocess.run(["ps", "-o", "etime=", "-p", str(pid)],
-                              capture_output=True, text=True, timeout=3).stdout.strip()
+                              capture_output=True, text=True, timeout=PS_TIMEOUT_S).stdout.strip()
         elapsed = _parse_etime(out)
         if elapsed is None:
             return None
@@ -1321,7 +1360,7 @@ def _git_exclude(cwd, name):
     A no-op outside a git repo or if anything fails."""
     try:
         gd = subprocess.run(["git", "rev-parse", "--git-dir"], cwd=cwd,
-                            capture_output=True, text=True, timeout=5).stdout.strip()
+                            capture_output=True, text=True, timeout=GIT_TIMEOUT_S).stdout.strip()
     except Exception:
         return
     if not gd:
@@ -1575,14 +1614,14 @@ class Watcher:
             self._write(b"\x05")              # Ctrl+E -> end of line
             time.sleep(KEY_DELAY)
             self._write(b"\x15")              # Ctrl+U -> delete to line start
-        time.sleep(0.3)
+        time.sleep(INPUT_CLEAR_SETTLE)
 
     def _interrupt(self):
         # Escape interrupts a running turn (forces the model to yield) and also
         # dismisses any open autocomplete menu when the prompt is idle.
         with self.lock:
             self._write(b"\x1b")
-        time.sleep(0.5)
+        time.sleep(INTERRUPT_SETTLE)
 
     def _soft_nudge(self, pct):
         if self.cfg.nudge:
@@ -2024,7 +2063,7 @@ class Watcher:
                 return True
             if time.time() >= deadline:
                 return False
-            time.sleep(0.2)
+            time.sleep(EXIT_POLL_S)
 
     def _close_session(self) -> None:
         """Close the claude session, leaving the caller's terminal and shell alive.
@@ -2163,7 +2202,7 @@ class Watcher:
         # Sentinel is primary; RESUME freshness corroborates.
         if seen and resume_fresh:
             return True
-        if seen and (time.time() - self.nudge_at) > 20:
+        if seen and (time.time() - self.nudge_at) > CONFIRM_FALLBACK_S:
             return True
         return False
 
@@ -2209,7 +2248,7 @@ class Watcher:
         try:
             size = os.path.getsize(path)
             with open(path, "rb") as fh:
-                fh.seek(max(0, size - 200_000))
+                fh.seek(max(0, size - WORK_SCAN_BYTES))
                 blob = fh.read().decode("utf-8", "replace")
         except OSError:
             return False
@@ -2275,7 +2314,7 @@ class Watcher:
         try:
             size = os.path.getsize(path)
             with open(path, "rb") as fh:
-                fh.seek(max(0, size - 400_000))
+                fh.seek(max(0, size - TYPED_SCAN_BYTES))
                 lines = fh.read().decode("utf-8", "replace").splitlines()
         except OSError:
             return False
@@ -2494,7 +2533,7 @@ class Watcher:
             # never `[exited with code N]`. Keying on the exit form alone meant a
             # stopped job never read as landed, so the session never got the
             # "your job finished" poke for it (found 2026-08-17).
-            if any(m in body[-400:] for m in TERMINAL_JOB_MARKERS):
+            if any(m in body[-JOB_TAIL_CHARS:] for m in TERMINAL_JOB_MARKERS):
                 return True
         return False
 
@@ -2806,11 +2845,11 @@ class Watcher:
                     self._log("ready-marker not seen after %.0fs — typing init prompt anyway"
                               % cfg.init_delay)
                     break
-                if self.tui_ready.wait(timeout=min(remaining, 0.5)):
-                    time.sleep(1.0)          # settle: let the frame finish painting
+                if self.tui_ready.wait(timeout=min(remaining, INIT_READY_POLL_S)):
+                    time.sleep(INIT_PAINT_SETTLE)          # settle: let the frame finish painting
                     if self.tui_ready.is_set():   # not invalidated by bypass-accept
                         self._log("TUI ready after %.1fs — sending init prompt"
-                                  % (cfg.init_delay - remaining + 1.0))
+                                  % (cfg.init_delay - remaining + INIT_PAINT_SETTLE))
                         break
             if not self.stop:
                 self._type(cfg.init_prompt)
@@ -3329,7 +3368,7 @@ class SubagentWatcher:
 
 def set_winsize(fd):
     try:
-        sz = fcntl.ioctl(0, termios.TIOCGWINSZ, b"\x00" * 8)
+        sz = fcntl.ioctl(0, termios.TIOCGWINSZ, b"\x00" * 8)   # fact: struct winsize is 4 unsigned shorts = 8 bytes
         fcntl.ioctl(fd, termios.TIOCSWINSZ, sz)
     except OSError:
         pass
@@ -3345,7 +3384,7 @@ def run_proxy(cfg, cwd, sdir, logpath):
     pid, master_fd = pty.fork()
     if pid == 0:  # child: becomes the cage's claude session
         os.execvp(shell, child_argv)
-        os._exit(127)
+        os._exit(127)   # fact: shell exit code for "command not found / exec failed"
 
     set_winsize(master_fd)
 
@@ -3414,7 +3453,7 @@ def run_proxy(cfg, cwd, sdir, logpath):
                 raise
             if master_fd in rfds:
                 try:
-                    data = os.read(master_fd, 65536)
+                    data = os.read(master_fd, 65536)   # fact: pty read chunk, one 64 KiB pipe buffer
                 except OSError:
                     break
                 if not data:
@@ -3424,10 +3463,10 @@ def run_proxy(cfg, cwd, sdir, logpath):
                 # screen (60s window) or TUI readiness (until found or the
                 # kickoff ceiling + slack lapses) — never for the whole session.
                 elapsed = time.time() - started
-                scan_window = elapsed < 60
-                ready_window = elapsed < max(60.0, cfg.init_delay + 5.0)
+                scan_window = elapsed < SCAN_WINDOW_S
+                ready_window = elapsed < max(SCAN_WINDOW_S, cfg.init_delay + READY_SLACK_S)
                 if (not watcher.tui_ready.is_set() and ready_window) or (not bypass_done and scan_window):
-                    out_buf = ANSI.sub(b"", out_buf + data)[-4096:]
+                    out_buf = ANSI.sub(b"", out_buf + data)[-SCAN_BUF_BYTES:]
                     # Match the screen's distinctive title AND its accept-option
                     # label, not the bare words "Bypass"/"accept" — those occur in
                     # ordinary repo content (changelogs, licences) and a loose
@@ -3438,7 +3477,7 @@ def run_proxy(cfg, cwd, sdir, logpath):
                        bypass_screen_visible(out_buf):
                         with write_lock:
                             os.write(master_fd, b"\x1b[B")   # down -> "Yes, I accept"
-                            time.sleep(0.3)
+                            time.sleep(BYPASS_KEY_DELAY)
                             os.write(master_fd, b"\r")        # confirm
                         bypass_done = True
                         # The bypass menu renders ❯ as its selection caret — any
@@ -3456,7 +3495,7 @@ def run_proxy(cfg, cwd, sdir, logpath):
                         logf.flush()
             if stdin_ok and 0 in rfds:
                 try:
-                    data = os.read(0, 65536)
+                    data = os.read(0, 65536)   # fact: stdin read chunk, one 64 KiB pipe buffer
                 except OSError:
                     data = b""
                 if not data:
@@ -3727,7 +3766,7 @@ def _name_process(name):
     try:
         import ctypes
 
-        ctypes.CDLL(None).prctl(15, name.encode()[:15], 0, 0, 0)  # PR_SET_NAME
+        ctypes.CDLL(None).prctl(15, name.encode()[:15], 0, 0, 0)  # fact: PR_SET_NAME is 15; the kernel keeps 15 name bytes
     except (OSError, AttributeError):
         pass
 
@@ -3765,7 +3804,7 @@ def main():
         shell = os.environ.get("SHELL", "/bin/bash")
         launch = os.environ.get("CCAGE_AUTOCK_EXEC") or 'claude "$@"'
         os.execvp(shell, [shell, "-ic", launch, shell] + cfg.claude_args)
-        return 127
+        return 127   # fact: shell exit code for "command not found / exec failed"
 
     # Mark the launched session (and its hooks) as autonomous, and register the
     # AskUserQuestion guard for this run only. The disabled pass-through above
@@ -3806,4 +3845,4 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
-        sys.exit(130)
+        sys.exit(130)   # fact: 128 + SIGINT, the shell convention for an interrupted process

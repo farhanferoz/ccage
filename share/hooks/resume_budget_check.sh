@@ -41,9 +41,12 @@
 #   CCAGE_RESUME_BUDGET_MODE=observe   restores advisory-only, all three kinds
 #   CCAGE_RESUME_BUDGET_BYTES          RESUME byte budget      (default 14000)
 #   CCAGE_TIER_BUDGET_BYTES            startup-tier budget     (default 26000)
+#   CCAGE_RESUME_BUDGET_BLOCKS         `## Session` blocks     (default 3; resume_autoload.sh
+#                                      and `ccage doctor` read the same variable)
 # Deliberately no `set -e`: a hook that aborts on a parse hiccup is worse than
 # one that no-ops.
-MAX=3
+# A bad value (not all digits) falls back to 3 and says so in the log, like any setting here.
+MAX="${CCAGE_RESUME_BUDGET_BLOCKS:-3}"
 
 # Advisory note as PostToolUse JSON. jq when it is there; a hand-rolled fallback
 # when it is not, because the whole point of the jq handling below is that this
@@ -248,6 +251,11 @@ if [ "$kind" = decisions ]; then
         } END { print out }' "$fp" 2>/dev/null)"
 fi
 
+case "$MAX" in
+    ''|*[!0-9]*)
+        _log "SETTING-IGNORED" "CCAGE_RESUME_BUDGET_BLOCKS=$MAX: not a non-negative integer; using 3"
+        MAX=3 ;;
+esac
 over=0
 { [ "$n" -gt "$MAX" ] || [ "$bytes" -gt "$budget_bytes" ]; } 2>/dev/null && over=1
 

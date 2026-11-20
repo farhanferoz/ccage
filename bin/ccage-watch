@@ -48,23 +48,52 @@ import subprocess
 import sys
 import time
 
-DEFAULT_INTERVAL_S = 600
-DEFAULT_TTL_S = 24 * 60 * 60
+
+def _env_num(name, default):
+    """Number from the environment variable `name`, `default` when it is unset.
+
+    The result has the type of `default` (an int default takes whole numbers
+    only). A value that does not parse, or is negative or infinite, is ignored with one stderr
+    line naming the variable, because none of these settings can be negative and a
+    watcher must still start: set `name` to a non-negative number to change it."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        val = type(default)(raw)
+    except ValueError:
+        val = -1
+    if not 0 <= val < float("inf"):   # negative, infinite or NaN
+        sys.stderr.write("ccage-watch: ignoring %s=%r: not a non-negative %s; using %s\n"
+                         % (name, raw, type(default).__name__, default))
+        return default
+    return val
+
+
+# Every setting below is read from CCAGE_WATCH_<NAME>; docs/FEATURES.md lists them.
+DEFAULT_INTERVAL_S = _env_num("CCAGE_WATCH_INTERVAL_S", 600)
+DEFAULT_TTL_S = _env_num("CCAGE_WATCH_TTL_S", 24 * 60 * 60)
 # A hold lapses rather than lasting forever. If the user never comes back, the
 # alternative is a run that is silent indefinitely — which is the 11-hour idle
 # incident the supervisor was built to end. On lapse the ladder simply resumes:
 # one poke, not a restart. Longer than a watcher's ttl because a human answering
 # a question is slower than a job finishing.
-DEFAULT_HOLD_TTL_S = 72 * 60 * 60
-CONDITION_TIMEOUT_S = 120          # a probe that hangs must not wedge the watcher
-ID_LEN = 12                        # chars of sha1 used as the watcher id
-SETTLE_S = 0.2                     # parent's grace for the daemon to write state
-EXIT_OK = 0
+DEFAULT_HOLD_TTL_S = _env_num("CCAGE_WATCH_HOLD_TTL_S", 72 * 60 * 60)
+CONDITION_TIMEOUT_S = _env_num("CCAGE_WATCH_CONDITION_TIMEOUT_S", 120)   # a probe that hangs must not wedge the watcher
+ID_LEN = 12                        # fact: chars of sha1 used as the watcher id
+SETTLE_S = _env_num("CCAGE_WATCH_SETTLE_S", 0.2)   # parent's grace for the daemon to write state
+EXIT_OK = 0   # fact: process exit status for success
 
 MARK_BEGIN = "<!-- ccage-watch:begin -->"
 MARK_END = "<!-- ccage-watch:end -->"
 SECTION = "## Watch results (from ccage-watch — unmerged)"
-PROC_TIMEOUT_S = 5                 # liveness probes must never wedge a session start
+# Self-test waits: how long it polls for a fired / expired watcher to write its report,
+# the poll gap, and how many gaps it waits for a killed watcher's pid to stop being live.
+SELFTEST_WAIT_S = _env_num("CCAGE_WATCH_SELFTEST_WAIT_S", 20)
+SELFTEST_POLL_S = _env_num("CCAGE_WATCH_SELFTEST_POLL_S", 0.5)
+SELFTEST_REAP_TRIES = _env_num("CCAGE_WATCH_SELFTEST_REAP_TRIES", 40)
+SELFTEST_REAP_POLL_S = _env_num("CCAGE_WATCH_SELFTEST_REAP_POLL_S", 0.25)
+PROC_TIMEOUT_S = _env_num("CCAGE_WATCH_PROC_TIMEOUT_S", 5)   # liveness probes must never wedge a session start
 
 
 class Kind(str, enum.Enum):
@@ -697,10 +726,10 @@ def cmd_selftest(_args):
         check("second arm refused", "already armed" in r2.stdout)
 
         open(flag, "w").close()
-        deadline = time.time() + 20
+        deadline = time.time() + SELFTEST_WAIT_S
         resume = os.path.join(proj, "RESUME.md")
         while time.time() < deadline and not os.path.exists(resume):
-            time.sleep(0.5)
+            time.sleep(SELFTEST_POLL_S)
         text = open(resume).read() if os.path.exists(resume) else ""
         check("fired and wrote RESUME.md", "WATCH FIRED" in text)
         check("RESUME entry is well-formed",
@@ -712,10 +741,10 @@ def cmd_selftest(_args):
         print("3. expires on TTL, and says so rather than going quiet")
         _st_run(cage, proj, "arm", "--cond", "false", "--note", "selftest ttl",
                 "--interval", "1", "--ttl", "1")
-        deadline = time.time() + 20
+        deadline = time.time() + SELFTEST_WAIT_S
         while time.time() < deadline and "WATCH EXPIRED" not in (
                 open(resume).read() if os.path.exists(resume) else ""):
-            time.sleep(0.5)
+            time.sleep(SELFTEST_POLL_S)
         text = open(resume).read() if os.path.exists(resume) else ""
         check("expiry recorded distinctly from success", "WATCH EXPIRED" in text)
         check("expiry is not mistakable for success", "UNKNOWN, not as success" in text)
@@ -739,10 +768,10 @@ def cmd_selftest(_args):
         pid = (spec or {}).get("pid")
         if pid:
             os.kill(pid, signal.SIGKILL)
-            for _ in range(40):                 # reaping a not-yet-dead pid proves nothing
+            for _ in range(SELFTEST_REAP_TRIES):                 # reaping a not-yet-dead pid proves nothing
                 if liveness(pid) is not Liveness.LIVE:
                     break
-                time.sleep(0.25)
+                time.sleep(SELFTEST_REAP_POLL_S)
         r5b = _st_run(cage, proj, "reap")
         text = open(resume).read() if os.path.exists(resume) else ""
         check("reap names the dead watcher", "DIED" in r5b.stdout, r5b.stdout.strip()[:120])
@@ -764,10 +793,10 @@ def cmd_selftest(_args):
         check("arm names the resolved RESUME path",
               os.path.join(os.path.realpath(proj), "RESUME.md") in r6.stdout,
               r6.stdout.strip()[:160])
-        deadline = time.time() + 20
+        deadline = time.time() + SELFTEST_WAIT_S
         while time.time() < deadline and "WATCH FIRED" not in (
                 open(resume).read() if os.path.exists(resume) else ""):
-            time.sleep(0.5)
+            time.sleep(SELFTEST_POLL_S)
         check("armed from a subdirectory, reported at the project root",
               "WATCH FIRED" in open(resume).read())
         check("no stray RESUME.md in the subdirectory",
@@ -777,9 +806,9 @@ def cmd_selftest(_args):
         slotted = os.path.join(proj, "RESUME.slotb.md")
         _st_run(cage, proj, "arm", "--cond", "true", "--interval", "1",
                 "--ttl", "30", CCAGE_SLOT="slotb")
-        deadline = time.time() + 20
+        deadline = time.time() + SELFTEST_WAIT_S
         while time.time() < deadline and not os.path.exists(slotted):
-            time.sleep(0.5)
+            time.sleep(SELFTEST_POLL_S)
         check("slot outcome lands in RESUME.<slot>.md",
               os.path.exists(slotted) and "WATCH FIRED" in open(slotted).read())
 

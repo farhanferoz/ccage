@@ -52,6 +52,19 @@ specs() { ls "$CLAUDE_CONFIG_DIR"/watch/*.json 2>/dev/null | wc -l | tr -d ' '; 
     [ "$(specs)" -eq 1 ]
 }
 
+@test "arm's default interval and ttl come from CCAGE_WATCH_INTERVAL_S and CCAGE_WATCH_TTL_S" {
+    CCAGE_WATCH_INTERVAL_S=3 CCAGE_WATCH_TTL_S=45 run python3 "$WATCH" arm --cond "false"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"checks every 3s, expires in 45s"* ]]
+}
+
+@test "a bad CCAGE_WATCH_* value is ignored with one line naming it, and the default is used" {
+    CCAGE_WATCH_INTERVAL_S=bogus run --separate-stderr python3 "$WATCH" arm --cond "false"
+    [ "$status" -eq 0 ]
+    [[ "$stderr" == *"ignoring CCAGE_WATCH_INTERVAL_S='bogus'"* ]]
+    [[ "$output" == *"checks every 600s"* ]]
+}
+
 @test "the watcher outlives the process that armed it" {
     # bash -c is a separate process; it exits before the assertion runs.
     bash -c "python3 '$WATCH' arm --cond false --interval 1 --ttl 30" >/dev/null

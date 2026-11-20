@@ -807,6 +807,148 @@ A `## Progress` checkbox line may end with ` — done when: `<command>``. The Pr
 
 **Known limits:** a plan written through Bash (sed, python) bypasses the guard; `ccage plan-report` shows a ticked item whose check fails as REGRESSED, which catches a bypassed tick afterwards. A `--say` message typed into a running session, idle or mid-turn, carries no marker and counts as the owner's words. The committed plan a moved check is read from is the session's own writing too: a check committed through Bash and then moved passes; the `MOVE` log line names its command for that audit.
 
+## Timings, windows and caps [shipped]
+
+Every duration, window, cap and count the tools use is a variable with today's value as its default; with none set, behaviour is unchanged. Names follow the component's existing prefix. A value that does not parse never fails a session: it is ignored and the default used, as each group below says.
+
+### `ccage-auto` timings, windows and caps (`CCAGE_AUTOCK_*`)
+
+`bin/ccage-auto`. Each is read once at start. A value that is not a number is ignored and the default is used, like every other `CCAGE_AUTOCK_*` value; negative or `nan` values are not rejected, so keep them non-negative.
+
+| Variable | Default | Controls |
+|---|---|---|
+| `CCAGE_AUTOCK_KEY_DELAY` | `0.25` | Seconds between typing a line into the session and pressing Enter. |
+| `CCAGE_AUTOCK_CLEAR_SETTLE` | `3.0` | Seconds to wait after a typed `/clear` for the SessionStart hook and reload. |
+| `CCAGE_AUTOCK_ESC_TAIL` | `0.2` | Extra seconds after Escape before the next key, so the two are not read as one Alt-key. |
+| `CCAGE_AUTOCK_EXIT_GRACE` | `8.0` | Seconds to wait for a typed `/exit` to take before signalling the child. |
+| `CCAGE_AUTOCK_EXIT_KILL_GRACE` | `3.0` | Seconds to wait after SIGHUP, then again after SIGKILL, for the child to exit. |
+| `CCAGE_AUTOCK_DONE_CLOSE_CEILING` | `180.0` | Longest wait (s) for the transcript to go quiet before the done-marker close types `/exit` anyway. |
+| `CCAGE_AUTOCK_MAX_RENUDGE` | `1` | Soft re-nudges before escalating to the hard path. |
+| `CCAGE_AUTOCK_HARD_MARGIN` | `20.0` | Percentage points above soft at which hard defaults when `CCAGE_AUTOCK_HARD` is unset (capped at 100). |
+| `CCAGE_AUTOCK_RENUDGE_MARGIN` | `5.0` | Percentage points below hard at which the occupancy-anchored re-nudge fires. |
+| `CCAGE_AUTOCK_COLLISION_MARGIN` | `10.0` | Percentage points above soft used as hard when an explicit soft and hard collide. |
+| `CCAGE_AUTOCK_WEEKLY_WARN_MARGIN` | `5.0` | Remaining-% above the weekly floor at which the warn stage fires. |
+| `CCAGE_AUTOCK_WEEKLY_STALE_S` | `1800.0` | Seconds after which a weekly-limit sensor reading counts as unknown. |
+| `CCAGE_AUTOCK_KEEPWARM_OWN_TURN_S` | `120.0` | Seconds after a keep-warm ping within which transcript growth is the ping's own turn. |
+| `CCAGE_AUTOCK_INJECTION_TOLERANCE_S` | `30` | Seconds within which a typed turn is attributed to ccage-auto's own injection rather than the user. Read by `ccage-auto` and by `stop_continuation_guard.sh`, so the two cannot drift. |
+| `CCAGE_AUTOCK_SUP_WAIT_MAX_S` | `86400.0` | Ceiling (s) on any declared wait the supervisor honours, whatever ttl the spec asked for. |
+| `CCAGE_AUTOCK_SUP_PIDLESS_GRACE_S` | `5.0` | Seconds a freshly armed watcher spec may carry no pid before it stops counting as a declaration. |
+| `CCAGE_AUTOCK_RESOLVE_TIMEOUT_S` | `15` | Timeout (s) of each shell probe that resolves the cage config dir. |
+| `CCAGE_AUTOCK_PS_TIMEOUT_S` | `3` | Timeout (s) of the `ps` elapsed-time probe. |
+| `CCAGE_AUTOCK_GIT_TIMEOUT_S` | `5` | Timeout (s) of the `git rev-parse` that excludes the control file. |
+| `CCAGE_AUTOCK_TAIL_MAX_BYTES` | `524288` | Bytes read from the end of the transcript to find the latest usage. |
+| `CCAGE_AUTOCK_WORK_SCAN_BYTES` | `200000` | Bytes read from the end of the transcript to see whether a tool call followed a hold. |
+| `CCAGE_AUTOCK_TYPED_SCAN_BYTES` | `400000` | Bytes read from the end of the transcript to see whether the human typed since a hold. Also read by `stop_continuation_guard.sh`. |
+| `CCAGE_AUTOCK_JOB_TAIL_CHARS` | `400` | Characters of a background job's output searched for a terminal marker. Also read by `stop_continuation_guard.sh`. |
+| `CCAGE_AUTOCK_CONFIRM_FALLBACK_S` | `20` | Seconds after a nudge before the sentinel alone (no fresh RESUME) confirms the checkpoint. |
+| `CCAGE_AUTOCK_INTERRUPT_SETTLE` | `0.5` | Seconds to settle after the Escape that interrupts a running turn. |
+| `CCAGE_AUTOCK_INPUT_CLEAR_SETTLE` | `0.3` | Seconds to settle after clearing the input line. |
+| `CCAGE_AUTOCK_EXIT_POLL_S` | `0.2` | Poll gap (s) while waiting for the child to exit. |
+| `CCAGE_AUTOCK_BYPASS_KEY_DELAY` | `0.3` | Seconds between the Down key and Enter on the bypass-permissions screen. |
+| `CCAGE_AUTOCK_INIT_READY_POLL_S` | `0.5` | Slice (s) of each wait for the TUI ready marker before the kickoff prompt. |
+| `CCAGE_AUTOCK_INIT_PAINT_SETTLE` | `1.0` | Seconds to let the first frame finish painting before the kickoff prompt. |
+| `CCAGE_AUTOCK_SCAN_WINDOW_S` | `60` | Seconds from launch during which the bypass screen is looked for. |
+| `CCAGE_AUTOCK_READY_SLACK_S` | `5.0` | Seconds added to `CCAGE_AUTOCK_INIT_DELAY` for the ready-marker scan window. |
+| `CCAGE_AUTOCK_SCAN_BUF_BYTES` | `4096` | ANSI-stripped output bytes kept for matching the bypass screen and ready marker. |
+
+### `ccage-watch` (`CCAGE_WATCH_*`)
+
+`bin/ccage-watch`. A value that is not a non-negative number is ignored with one stderr line naming the variable, and the default is used. The `arm` / `hold` flags still win over the defaults here.
+
+| Variable | Default | Controls |
+|---|---|---|
+| `CCAGE_WATCH_INTERVAL_S` | `600` | Default `--interval` of `ccage-watch arm`, seconds between condition checks. |
+| `CCAGE_WATCH_TTL_S` | `86400` | Default `--ttl` of `ccage-watch arm`, seconds before an unmet watcher expires. |
+| `CCAGE_WATCH_HOLD_TTL_S` | `259200` | Default `--ttl` of `ccage-watch hold`, seconds before a declared wait lapses. |
+| `CCAGE_WATCH_CONDITION_TIMEOUT_S` | `120` | Seconds a condition probe may run before it is killed. |
+| `CCAGE_WATCH_SETTLE_S` | `0.2` | Seconds the arming parent waits for the daemon to write its state. |
+| `CCAGE_WATCH_PROC_TIMEOUT_S` | `5` | Timeout (s) of the liveness probes. |
+| `CCAGE_WATCH_SELFTEST_WAIT_S` | `20` | Self-test: seconds to poll for a fired or expired watcher's report. |
+| `CCAGE_WATCH_SELFTEST_POLL_S` | `0.5` | Self-test: poll gap (s) of those waits. |
+| `CCAGE_WATCH_SELFTEST_REAP_TRIES` | `40` | Self-test: polls waiting for a killed watcher's pid to stop being live. |
+| `CCAGE_WATCH_SELFTEST_REAP_POLL_S` | `0.25` | Self-test: poll gap (s) of that wait. |
+
+### Plan contract guard and review (`CCAGE_PLAN_*` timings and caps)
+
+`lib/ccage_plan.py`, read each time it is used. A value that is not a non-negative number is ignored, the default is used and one `IGNORED-setting` line goes to `plan_contract_guard.log`.
+
+| Variable | Default | Controls |
+|---|---|---|
+| `CCAGE_PLAN_CHECK_TIMEOUT_S` | `270` | Seconds a plan item's done-when check may run in the guard and in `plan-report`. |
+| `CCAGE_PLAN_TAIL_LINES` | `20` | Lines of a failed check's output shown in the refusal. |
+| `CCAGE_PLAN_MIN_QUOTE_CHARS` | `20` | Shortest owner quotation that counts as approval of a plan edit. |
+| `CCAGE_PLAN_GUARD_BUDGET_S` | `480` | Seconds one guard call may spend running checks. Already configurable; now read through the same validated reader. |
+| `CCAGE_PLAN_GIT_TIMEOUT_S` | `10` | Timeout (s) of the `git show` / `git rev-parse` calls on a plan file. |
+| `CCAGE_PLAN_DIFF_TIMEOUT_S` | `60` | Timeout (s) of the `git diff` gathered for `ccage review`. |
+| `CCAGE_PLAN_REVIEW_TIMEOUT_S` | `900` | Seconds the `ccage review` model call may take. |
+| `CCAGE_PLAN_REVIEW_SLACK_S` | `60` | Seconds the review subprocess may outlive the model call's own timeout. |
+| `CCAGE_PLAN_DIFF_CAP_CHARS` | `200000` | Characters of a diff or file given to `ccage review`. |
+| `CCAGE_PLAN_SECTION_CAP_CHARS` | `6000` | Characters of a plan section given to `ccage review`. |
+
+### Subagent circuit breaker (`CCB_*`)
+
+`lib/ccb_types.py` (`CCBConfig.from_env`), alongside the thresholds in `docs/CIRCUIT-BREAKER.md`. A value that is not all digits is ignored and the default is kept.
+
+| Variable | Default | Controls |
+|---|---|---|
+| `CCB_DEBOUNCE_TICKS` | `2` | Consecutive breach polls before the circuit breaker's first step. |
+| `CCB_EXTEND_HINT_MIN` | `60` | Minutes the nudge tells the model to write in its `CCB-VOUCH` marker. |
+| `CCB_FLOCK_RETRIES` | `3` | Tries to lock RESUME.md before a stuck-subagent alert is skipped for the tick (at least 1). |
+| `CCB_FLOCK_RETRY_DELAY_MS` | `200` | Milliseconds between those tries. |
+| `CCB_NOTIFY_TIMEOUT_S` | `10` | Seconds the `CCB_NOTIFY_CMD` command may run. |
+| `CCB_TOKENOL_TIMEOUT_S` | `3` | Seconds the tokenol cost lookup may take. |
+
+### Stop guard (`CCAGE_STOPGUARD_*`)
+
+`share/hooks/stop_continuation_guard.sh`. A value that is not a non-negative number is ignored, the default is used and one `SETTING-IGNORED` line goes to `stop_continuation_guard.log`. (`CCLAUDE_STOPGUARD_MODE` and `CCLAUDE_STOPGUARD_MAX` are older and unchanged.) The hook also reads `CCAGE_AUTOCK_INJECTION_TOLERANCE_S`, `CCAGE_AUTOCK_TYPED_SCAN_BYTES` and `CCAGE_AUTOCK_JOB_TAIL_CHARS` above.
+
+| Variable | Default | Controls |
+|---|---|---|
+| `CCAGE_STOPGUARD_LIVE_WINDOW_S` | `180` | Seconds a subagent transcript may be untouched and still count as alive. |
+| `CCAGE_STOPGUARD_SERIAL_GATE_WINDOW_S` | `2700` | Seconds a declared serial gate stays valid. |
+| `CCAGE_STOPGUARD_ATTENDED_WINDOW_S` | `900` | Seconds after the human last typed during which the session counts as attended. |
+| `CCAGE_STOPGUARD_STALE_JOB_S` | `86400` | Age (s) past which an unmarked background-job output stops counting as live. |
+| `CCAGE_STOPGUARD_MAX_SNAPSHOT` | `200` | Cap on scratchpad entries in the parked record. |
+| `CCAGE_STOPGUARD_MAX_PLAN_REFS` | `5` | Plan documents followed from RESUME's `### Plan`. |
+| `CCAGE_STOPGUARD_TAIL_CHARS` | `1200` | Characters of the final message searched for a question or a stated commitment. |
+| `CCAGE_STOPGUARD_LOG_LINES` | `500` | Lines kept in the guard's decision log (at least 1). |
+| `CCAGE_STOPGUARD_GIT_TIMEOUT_S` | `5` | Timeout (s) of the guard's `git` probe for CI state. |
+
+### Session-start and RESUME hooks, `ccage doctor`
+
+`resume_autoload.sh`, `resume_budget_check.sh`, `session_doc_chunk.sh`, `ccage-doctor.sh`. A value that is not all digits is ignored, the default is used and one `SETTING-IGNORED` line goes to the hook's own log.
+
+| Variable | Default | Controls |
+|---|---|---|
+| `CCAGE_RESUME_BUDGET_BLOCKS` | `3` | `## Session` blocks RESUME may hold before the budget hook, the auto-read NOTE and `ccage doctor` flag it. One variable for all three. |
+| `CCAGE_MEMORY_FLAT_INDEX_FILES` | `8` | Memory files past which an index with no `## ` headers is called flat. Read by the auto-read hook and `ccage doctor`. |
+| `CCAGE_PLAN_SPREAD_MIN` | `3` | Live plan files from which the session start prints the PLAN SPREAD line. |
+| `CCAGE_AUTOLOAD_MAX_PLANS` | `5` | Plan files named in the plan note the auto-read hook delivers. |
+| `CCAGE_AUTOLOAD_STDIN_TIMEOUT_S` | `2` | Seconds the auto-read hook waits for its stdin JSON. |
+| `CCAGE_AUTOLOAD_REAP_TIMEOUT_S` | `10` | Seconds the auto-read hook lets `ccage-watch reap` run. |
+| `CCAGE_AUTOLOAD_WATCHER_START_TOLERANCE_S` | `2` | Seconds the recorded start of a live `ccage-auto` pid may differ from its real start. |
+| `CCAGE_RESUME_CAP_FACTOR` | `2` | The RESUME delivery line cap is this multiple of `CCAGE_RESUME_BUDGET_LINES`. |
+
+### Resume cost estimate and `ccage handoff`
+
+`share/claude-isolation.sh` and `share/ccage-handoff.sh`. A value that is not all digits is ignored and the default is used; these run in your shell, so they never print.
+
+| Variable | Default | Controls |
+|---|---|---|
+| `CCAGE_PEAK_MIN_CACHE_READ` | `1000` | Cache-read tokens a turn must exceed to count towards a session's peak. One variable for the resume prompt and `ccage handoff`. |
+| `CCAGE_ESTIMATE_BAND_PCT` | `25` | Percent either side of the resume-cost estimate shown as the low-high range. |
+| `CCAGE_PREFIX_TOKENS` | `19000` | Tokens of tools and system prompt a cold resume does not rewrite. |
+| `CCAGE_HANDOFF_MAX_AGENTS` | `12` | Subagent rows in the handoff brief. |
+| `CCAGE_HANDOFF_MAX_CMD_CHARS` | `140` | Characters of one command line in the brief's Commands run list. |
+| `CCAGE_HANDOFF_MAX_PROMPT_CHARS` | `600` | Characters of one prompt in the brief. |
+| `CCAGE_HANDOFF_PROMPT_BUDGET` | `9000` | Byte budget of the brief's whole prompts section. |
+| `CCAGE_HANDOFF_MAX_TEXT_BYTES` | `8000` | Byte bound of a free-text block before any word cap. |
+| `CCAGE_HANDOFF_ERROR_CHARS` | `60` | Characters of an errored subagent's last message shown in the brief. |
+| `CCAGE_HANDOFF_BY_CHARS` | `28` | Width of the Files-touched By column before several names collapse to a count. |
+| `CCAGE_HANDOFF_MAX_FILES` | `30` | Rows of the Files-touched table. |
+| `CCAGE_HANDOFF_MAX_COMMANDS` | `40` | Lines of the Commands-run list. |
+| `CCAGE_HANDOFF_LAST_TURN_WORDS` | `600` | Words of the last assistant turn in the brief. |
+
 ## Claude-side env vars we touch
 
 | Var | Direction | When |

@@ -205,6 +205,22 @@ locate_in_proj() {
     done
 }
 
+@test "cost: the band, the prefix and the peak floor come from CCAGE_ESTIMATE_BAND_PCT, CCAGE_PREFIX_TOKENS and CCAGE_PEAK_MIN_CACHE_READ" {
+    # 1M rewritten tokens x $8/M = $8, shown as +-50%; the default prefix of 19k no longer comes off.
+    CCAGE_ESTIMATE_BAND_PCT=50 CCAGE_PREFIX_TOKENS=0 run _ccage_resume_compute_cost 1000000 claude-opus-5-5 cold
+    [ "$output" = "$(printf '4.00\t12.00\t1000000')" ]
+    # minimal.jsonl's biggest cache read is 22000: a floor above it leaves no substantive turn.
+    CCAGE_PEAK_MIN_CACHE_READ=30000 run _ccage_resume_session_summary "$FIXTURES/minimal.jsonl"
+    [[ "$output" == 0$'\t'* ]]
+}
+
+@test "cost: a bad CCAGE_ESTIMATE_BAND_PCT, CCAGE_PREFIX_TOKENS or CCAGE_PEAK_MIN_CACHE_READ keeps the default, silently" {
+    CCAGE_ESTIMATE_BAND_PCT=wide CCAGE_PREFIX_TOKENS=-5 run _ccage_resume_compute_cost 1019000 claude-opus-5-5 cold
+    [ "$output" = "$(printf '6.00\t10.00\t1000000')" ]
+    CCAGE_PEAK_MIN_CACHE_READ=lots run _ccage_resume_session_summary "$FIXTURES/minimal.jsonl"
+    [[ "$output" == 22000$'\t'* ]]
+}
+
 @test "cost: a warm resume is priced as a read of the prefix, a cold one as a rewrite" {
     run _ccage_resume_compute_cost 1000000 claude-opus-5-5 warm
     [ "$output" = "$(printf '0.15\t0.25\t1000000')" ]                 # 1M x $0.20/M

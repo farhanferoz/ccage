@@ -67,6 +67,9 @@ window="${CCAGE_DOC_CHUNK_CHARS:-8500}"
 case "$window" in
     ''|*[!0-9]*) window=8500 ;;
 esac
+# fact: the bounds are the platform's, not a preference: a part is built from whole lines, so a
+# window past 9000 can overshoot the 10,000-char limit on one hook output, and 500 is the least
+# a part can usefully carry.
 { [ "$window" -ge 500 ] && [ "$window" -le 9000 ]; } 2>/dev/null || window=8500
 base="${CLAUDE_PROJECT_DIR:-$PWD}"
 logf="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/session-doc-chunk.log"
@@ -125,7 +128,15 @@ case "$kind" in
         # session start. Resolved HERE, at run time, from the same env var the
         # budget NOTE reads — never baked into the registration, which would
         # freeze a live setting at seed time.
-        [ -n "$maxlines" ] || maxlines=$(( ${CCAGE_RESUME_BUDGET_LINES:-250} * 2 ))
+        # The cap is CCAGE_RESUME_CAP_FACTOR (default 2) times the budget; a value that is not
+        # all digits is ignored and logged, like CCAGE_DOC_CHUNK_CHARS above.
+        cap_factor="${CCAGE_RESUME_CAP_FACTOR:-2}"
+        case "$cap_factor" in
+            ''|*[!0-9]*)
+                _log "status=setting-ignored var=CCAGE_RESUME_CAP_FACTOR value=$cap_factor using=2"
+                cap_factor=2 ;;
+        esac
+        [ -n "$maxlines" ] || maxlines=$(( ${CCAGE_RESUME_BUDGET_LINES:-250} * cap_factor ))
         ;;
     decisions)
         file="$base/DECISIONS.md"
@@ -203,6 +214,8 @@ awk -v k="$k" -v n="$n" -v window="$window" -v maxlines="${maxlines:-0}" -v maxc
         # breaches the cap and still says so.
         capline = maxlen
         if (capline > int(window / 2)) capline = int(window / 2)
+        # fact: 400 chars is the room one part needs for its label, end marker and any warning;
+        # 500 is the smallest window the hook accepts (the validation at the top of this file).
         eff = window - capline - 400
         if (eff < 500) eff = 500
         capacity = n * eff
@@ -277,6 +290,7 @@ awk -v k="$k" -v n="$n" -v window="$window" -v maxlines="${maxlines:-0}" -v maxc
             printf "*** WARNING: %s is %d chars and this cage delivers at most %d (%d parts x %d). The LAST %d chars of the document were NOT delivered this session. Retire spent entries to CHANGELOG.md, or raise CCAGE_DOC_CHUNKS. ***\n",
                    docname, total + dropped, capacity, n, eff, dropped
         }
+        # fact: Claude Code keeps only a 2,000-char preview of a hook output past 10,000 chars.
         if (part_bytes + 400 > 10000) {
             printf "*** WARNING: %s part %d/%d is %d chars, past the 10,000-char limit on what one hook can deliver, because it contains a single line of %d chars that cannot be split. Claude Code will keep only the first 2,000 chars of this part. Wrap that line in %s to fix it. ***\n",
                    docname, k, parts, part_bytes, maxlen - 1, docname

@@ -8,6 +8,17 @@
 #
 # Public entry: _ccage_handoff_main "$@"
 
+# A non-negative integer setting: VALUE when it is all digits, else DEFAULT. Takes the
+# value, not the variable's name, so a garbage CCAGE_HANDOFF_* can never break `ccage handoff`.
+# Declared here as well as in share/claude-isolation.sh, deliberately: this file is sourced
+# without it (tests/test_handoff.bats). KEEP IN SYNC with _ccage_uint there.
+_ccage_handoff_uint() {
+    case "$1" in
+        ''|*[!0-9]*) printf '%s\n' "$2" ;;
+        *)           printf '%s\n' "$1" ;;
+    esac
+}
+
 # ---- pricing (rates per million tokens) -------------------------------------
 # ONE hand-maintained table: input and output. Every cache rate is DERIVED from
 # input, never typed out separately:
@@ -81,6 +92,8 @@ _ccage_handoff_price_output() {
 
 # Cache-rate multipliers, applied to the input rate. Kept as named constants so
 # the ratios appear exactly once.
+# fact: Anthropic's published multiples of the input rate for a 5-minute cache write, a
+# 1-hour cache write and a cache read; a pricing change edits these three lines.
 _CCAGE_CW_5M_MULT=1.25
 _CCAGE_CW_1H_MULT=2.00
 _CCAGE_CR_MULT=0.10
@@ -227,15 +240,17 @@ _ccage_handoff_token_totals() {
 }
 
 # ---- peak cache_read --------------------------------------------------------
-# Max cache_read across all assistant turns where it exceeds 1000 tokens
-# ("substantive" — filters out the metadata turn near session start).
+# Max cache_read across all assistant turns where it exceeds CCAGE_PEAK_MIN_CACHE_READ
+# tokens (default 1000; "substantive" — filters out the metadata turn near session start).
+# Same variable and default as _ccage_resume_session_summary in claude-isolation.sh.
 _ccage_handoff_peak_cache_read() {
     local jsonl="$1"
     local peak
-    peak=$(jq -Rr "$_CCAGE_HANDOFF_JQ_PREAMBLE"'
+    peak=$(jq -Rr --argjson minread "$(_ccage_handoff_uint "${CCAGE_PEAK_MIN_CACHE_READ:-}" 1000)" \
+        "$_CCAGE_HANDOFF_JQ_PREAMBLE"'
         | select(.type == "assistant")
         | .message.usage.cache_read_input_tokens // 0
-        | select(. > 1000)
+        | select(. > $minread)
     ' "$jsonl" 2>/dev/null | sort -rn | head -1)
     printf '%s\n' "${peak:-0}"
 }
@@ -539,18 +554,26 @@ _ccage_handoff_collect() {
 # Size discipline: the brief is the input to a paid turn (/checkpoint
 # --from-session), so the agent list is capped rather than allowed to grow with
 # the fan-out. Target for the whole brief is under 15 KB.
-_CCAGE_HANDOFF_MAX_AGENTS=12
+_CCAGE_HANDOFF_MAX_AGENTS=$(_ccage_handoff_uint "${CCAGE_HANDOFF_MAX_AGENTS:-}" 12)
 # Width cap for a single command line in the "Commands run" listing.
-_CCAGE_HANDOFF_MAX_CMD_CHARS=140
+_CCAGE_HANDOFF_MAX_CMD_CHARS=$(_ccage_handoff_uint "${CCAGE_HANDOFF_MAX_CMD_CHARS:-}" 140)
 # Per-prompt character cap, and a byte budget for the whole prompts section.
 # Every other section is bounded; prompts were not, and on real data they were
 # the only thing that ever blew the 15 KB whole-brief target.
-_CCAGE_HANDOFF_MAX_PROMPT_CHARS=600
-_CCAGE_HANDOFF_PROMPT_BUDGET=9000
+_CCAGE_HANDOFF_MAX_PROMPT_CHARS=$(_ccage_handoff_uint "${CCAGE_HANDOFF_MAX_PROMPT_CHARS:-}" 600)
+_CCAGE_HANDOFF_PROMPT_BUDGET=$(_ccage_handoff_uint "${CCAGE_HANDOFF_PROMPT_BUDGET:-}" 9000)
 # Hard size bound for a free-text block, applied before any word-based cap.
 # Whitespace-free text is one "word" at any length, so the word cap alone let a
 # single blob carry the whole brief past its target.
-_CCAGE_HANDOFF_MAX_TEXT_BYTES=8000
+_CCAGE_HANDOFF_MAX_TEXT_BYTES=$(_ccage_handoff_uint "${CCAGE_HANDOFF_MAX_TEXT_BYTES:-}" 8000)
+# Further caps of the same brief: characters of an errored agent's last text, the width of
+# the "By" column before a crowd collapses to a count, the Files-touched and Commands-run
+# rows, and the words of the last assistant turn.
+_CCAGE_HANDOFF_ERROR_CHARS=$(_ccage_handoff_uint "${CCAGE_HANDOFF_ERROR_CHARS:-}" 60)
+_CCAGE_HANDOFF_BY_CHARS=$(_ccage_handoff_uint "${CCAGE_HANDOFF_BY_CHARS:-}" 28)
+_CCAGE_HANDOFF_MAX_FILES=$(_ccage_handoff_uint "${CCAGE_HANDOFF_MAX_FILES:-}" 30)
+_CCAGE_HANDOFF_MAX_COMMANDS=$(_ccage_handoff_uint "${CCAGE_HANDOFF_MAX_COMMANDS:-}" 40)
+_CCAGE_HANDOFF_LAST_TURN_WORDS=$(_ccage_handoff_uint "${CCAGE_HANDOFF_LAST_TURN_WORDS:-}" 600)
 
 # Shared by every section that interpolates free text into the brief: escape a
 # line-leading Markdown heading so pasted text cannot forge one of the brief's
@@ -659,9 +682,9 @@ _ccage_handoff_subagents_json() {
         # Honest wording: a transcript carries no explicit termination record,
         # so "ok" means the last turn completed normally, not that the agent
         # finished its task.
-        a_ended=$(jq -r '
+        a_ended=$(jq -r --argjson ec "$_CCAGE_HANDOFF_ERROR_CHARS" '
             if .last_is_error
-            then "api error: " + ((.last_text // "") | split("\n")[0] | .[0:60])
+            then "api error: " + ((.last_text // "") | split("\n")[0] | .[0:$ec])
             else "ok" end' <<<"$agent_data")
 
         # --slurpfile on a missing sidecar would abort jq; /dev/null slurps to
@@ -1045,7 +1068,7 @@ _ccage_handoff_compose_brief() {
     # thread and every subagent, with `By` naming who touched the path.
     printf '\n## Files touched\n\n'
     local files_table
-    files_table=$(jq -r --argjson subagents "$subagents" "$_CCAGE_HANDOFF_JQ_CELL"'
+    files_table=$(jq -r --argjson subagents "$subagents" --argjson by_chars "$_CCAGE_HANDOFF_BY_CHARS" "$_CCAGE_HANDOFF_JQ_CELL"'
         ([{by: "main", files: .files}] + [$subagents[] | {by: .name, files: .files}])
         | map(.by as $b | .files | to_entries
               | map({path: .key, by: $b, r: .value.Read, e: .value.Edit, w: .value.Write}))
@@ -1058,7 +1081,7 @@ _ccage_handoff_compose_brief() {
             # crowd collapses to a count so the column cannot run away.
             by:    ((map(.by) | unique) as $names
                     | if ($names | length) == 1 then $names[0]
-                      elif ($names | join("+") | length) <= 28 then ($names | join("+"))
+                      elif ($names | join("+") | length) <= $by_chars then ($names | join("+"))
                       else "\($names | length) sources" end)
           })
         | sort_by(-(.r + .e + .w))
@@ -1067,7 +1090,7 @@ _ccage_handoff_compose_brief() {
     if [ -n "$files_table" ]; then
         printf '| Path | Read | Edit | Write | By |\n'
         printf '|---|---:|---:|---:|---|\n'
-        printf '%s\n' "$files_table" | head -30 | awk -F'\t' '{ printf "| %s | %d | %d | %d | %s |\n", $1, $2, $3, $4, $5 }'
+        printf '%s\n' "$files_table" | head -n "$_CCAGE_HANDOFF_MAX_FILES" | awk -F'\t' '{ printf "| %s | %d | %d | %d | %s |\n", $1, $2, $3, $4, $5 }'
     else
         printf '_(no files touched via Read/Edit/Write in this session)_\n'
     fi
@@ -1095,7 +1118,7 @@ _ccage_handoff_compose_brief() {
         }
     ' | awk '!seen[$0]++')
     if [ -n "$commands" ]; then
-        printf '%s\n' "$commands" | head -40 | awk '{ print "- `" $0 "`" }'
+        printf '%s\n' "$commands" | head -n "$_CCAGE_HANDOFF_MAX_COMMANDS" | awk '{ print "- `" $0 "`" }'
     else
         printf '_(no Bash commands recorded)_\n'
     fi
@@ -1111,7 +1134,7 @@ _ccage_handoff_compose_brief() {
         # and it owns the BYTE bound as well as the word one — gating the call
         # on a word count here meant a whitespace-free blob (one "word" at any
         # size) bypassed both, and a 50 MB last turn composed a 52 MB brief.
-        _ccage_handoff_truncate_words 600 "$last_text"
+        _ccage_handoff_truncate_words "$_CCAGE_HANDOFF_LAST_TURN_WORDS" "$last_text"
     else
         printf '_(no assistant text content)_\n'
     fi

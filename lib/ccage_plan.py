@@ -36,11 +36,17 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+# Each constant below is the DEFAULT of a setting `_setting` reads from the environment when it is
+# used: CCAGE_PLAN_<NAME> (docs/FEATURES.md lists them), so a guard call and a review each see the
+# value of their own run.
 # A check may run up to 4 minutes (owner 2026-11-07: "cannot run more than 3 or 4 minutes"), held
 # by its own `timeout 240`; the guard leaves room for that and a few seconds of tests before it.
 CHECK_TIMEOUT_S = 270
 TAIL_LINES = 20
 MIN_QUOTE_CHARS = 20
+GIT_TIMEOUT_S = 10         # `git show` of the committed plan, `git rev-parse` of its root
+DIFF_TIMEOUT_S = 60        # `git diff` gathered for a review
+REVIEW_SLACK_S = 60        # the review subprocess may outlive agentcall's own timeout by this
 HEADING_PROGRESS = re.compile(r"^##\s+Progress\s*$", re.MULTILINE)
 ITEM = re.compile(r"^\s*[-*]\s+\[([ xX])\]\s+(.*?)\s*$")
 DONE_WHEN = re.compile(r"\s+—\s+done when:\s+`(.+)`\s*$")
@@ -169,7 +175,8 @@ def committed_text(plan: Path) -> str | None:
     """The plan as last committed (git HEAD), or None when it is not in git or not committed."""
     try:
         out = subprocess.run(["git", "-C", str(plan.parent), "show", f"HEAD:./{plan.name}"],
-                             capture_output=True, text=True, errors="replace", timeout=10, check=False)
+                             capture_output=True, text=True, errors="replace",
+                             timeout=_setting("CCAGE_PLAN_GIT_TIMEOUT_S", GIT_TIMEOUT_S), check=False)
     except (subprocess.SubprocessError, OSError):
         return None
     return out.stdout if out.returncode == 0 else None
@@ -205,15 +212,19 @@ def git_root(path: Path) -> Path:
         start = start.parent
     try:
         out = subprocess.run(["git", "-C", str(start), "rev-parse", "--show-toplevel"],
-                             capture_output=True, text=True, timeout=10, check=True)
+                             capture_output=True, text=True, timeout=_setting("CCAGE_PLAN_GIT_TIMEOUT_S", GIT_TIMEOUT_S),
+                             check=True)
         return Path(out.stdout.strip())
     except (subprocess.SubprocessError, OSError):
         return start
 
 
-def run_check(cmd: str, cwd: Path, timeout: float = CHECK_TIMEOUT_S) -> tuple[bool, str]:
-    """Run a done-when command; (passed, last 20 lines of its output). It runs in its own
-    process group, so a timeout kills the whole pipeline, not just bash."""
+def run_check(cmd: str, cwd: Path, timeout: float | None = None) -> tuple[bool, str]:
+    """Run a done-when command; (passed, the last CCAGE_PLAN_TAIL_LINES lines of its output). It
+    runs in its own process group, so a timeout kills the whole pipeline, not just bash.
+    `timeout` defaults to CCAGE_PLAN_CHECK_TIMEOUT_S."""
+    if timeout is None:
+        timeout = _setting("CCAGE_PLAN_CHECK_TIMEOUT_S", CHECK_TIMEOUT_S)
     try:
         p = subprocess.Popen(["bash", "-c", cmd], cwd=cwd, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True,
@@ -229,7 +240,8 @@ def run_check(cmd: str, cwd: Path, timeout: float = CHECK_TIMEOUT_S) -> tuple[bo
             pass
         p.wait()
         return False, f"timed out after {timeout:g} s"
-    return p.returncode == 0, "\n".join(out.splitlines()[-TAIL_LINES:])
+    tail_lines = int(_setting("CCAGE_PLAN_TAIL_LINES", TAIL_LINES))
+    return p.returncode == 0, "\n".join(out.splitlines()[-tail_lines:])
 
 
 # ---- guard ----------------------------------------------------------------
@@ -328,7 +340,9 @@ def violations(old: str, new: str, plan: Path, transcript: Path | None, folded: 
             f"`{after[item_id].done_when[:200]}`")
     out: list[str] = []
     root = git_root(plan)
-    deadline = time.monotonic() + float(os.environ.get("CCAGE_PLAN_GUARD_BUDGET_S", GUARD_BUDGET_S))
+    deadline = time.monotonic() + _setting("CCAGE_PLAN_GUARD_BUDGET_S", GUARD_BUDGET_S)
+    check_timeout = _setting("CCAGE_PLAN_CHECK_TIMEOUT_S", CHECK_TIMEOUT_S)
+    tail_lines = int(_setting("CCAGE_PLAN_TAIL_LINES", TAIL_LINES))
     for item_id, item in after.items():
         was = before.get(item_id)
         if not item.checked or (was and was.checked):
@@ -346,10 +360,10 @@ def violations(old: str, new: str, plan: Path, transcript: Path | None, folded: 
             out.append(f"TICK {item_id}: not checked: time budget of one guard call is spent. "
                        "Tick fewer items per edit.")
             continue
-        passed, tail = run_check(cmd, root, min(CHECK_TIMEOUT_S, left))
+        passed, tail = run_check(cmd, root, min(check_timeout, left))
         if not passed:
             out.append(f"TICK {item_id}: its check failed, so it stays open. Check: {cmd}\n"
-                       f"last {TAIL_LINES} lines:\n{tail}")
+                       f"last {tail_lines} lines:\n{tail}")
     changed = [i for i, was in before.items()
                if i not in moved and (i not in after or signature(after[i].rest) != signature(was.rest))]
     if changed:
@@ -364,13 +378,14 @@ def violations(old: str, new: str, plan: Path, transcript: Path | None, folded: 
                          "command, unchanged, is the check the item describes in the plan as last "
                          "committed (right after its \"done when:\" or a colon after it, outside its "
                          "evidence lines); this one is not, so it is a new check.")
-            quotes = [q for q in approved_quotes(new, item_id) if len(q) >= MIN_QUOTE_CHARS]
+            min_quote = int(_setting("CCAGE_PLAN_MIN_QUOTE_CHARS", MIN_QUOTE_CHARS))
+            quotes = [q for q in approved_quotes(new, item_id) if len(q) >= min_quote]
             if heard is None:
                 out.append(f"{item_id} {what}: the session transcript is unavailable, so the "
                            f"owner's approval cannot be checked.{hint}")
             elif not any(q in t for q in quotes for t in heard):
                 out.append(f"{item_id} {what} without the owner's words. Ask the owner; then put "
-                           f'a line `owner approved: "<their words, 20+ characters>"` naming {item_id} '
+                           f'a line `owner approved: "<their words, {min_quote}+ characters>"` naming {item_id} '
                            f"in the plan, their message verbatim inside one pair of double quotes.{hint}")
     return out
 
@@ -383,6 +398,23 @@ def log(msg: str) -> None:
             f.write(f"{dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')} {msg}\n")
     except Exception:  # noqa: BLE001, S110 -- a lost log line is better than a lost refusal
         pass
+
+
+def _setting(name: str, default: float) -> float:
+    """The number in environment variable `name`, else `default`. A value that is not a non-negative
+    number is ignored, with one line in the guard log naming the variable: a guard must never fail
+    a session over a setting."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        val = float(raw)
+    except ValueError:
+        val = -1.0
+    if not 0 <= val < float("inf"):   # negative, infinite or NaN; every setting here is a duration or a size
+        log(f"IGNORED-setting {name}={raw!r}: not a non-negative number; using {default}")
+        return default
+    return val
 
 
 def guard(stdin_text: str) -> int:
@@ -460,23 +492,25 @@ def item_section(text: str, item_id: str) -> str:
                 if n and len(n.group(1)) <= len(m.group(1)):
                     break
                 body.append(nxt)
-            return "\n".join([line, *body])[:SECTION_CAP_CHARS]
+            return "\n".join([line, *body])[:int(_setting("CCAGE_PLAN_SECTION_CAP_CHARS", SECTION_CAP_CHARS))]
     return ""
 
 
 def gather_evidence(root: Path, diff_range: str | None, files: list[str]) -> str:
     parts = []
+    cap = int(_setting("CCAGE_PLAN_DIFF_CAP_CHARS", DIFF_CAP_CHARS))
     if diff_range or not files:
         r = subprocess.run(["git", "-C", str(root), "diff", diff_range or "HEAD"],
-                           capture_output=True, text=True, timeout=60, check=False)
+                           capture_output=True, text=True,
+                           timeout=_setting("CCAGE_PLAN_DIFF_TIMEOUT_S", DIFF_TIMEOUT_S), check=False)
         if r.returncode != 0:
             raise SystemExit(f"git diff {diff_range or 'HEAD'} failed: {r.stderr.strip()}")
         d = r.stdout
-        note = f"\n[TRUNCATED at {DIFF_CAP_CHARS} characters]" if len(d) > DIFF_CAP_CHARS else ""
-        parts.append(f"## Diff ({diff_range or 'HEAD, working tree'})\n```diff\n{d[:DIFF_CAP_CHARS]}{note}\n```")
+        note = f"\n[TRUNCATED at {cap} characters]" if len(d) > cap else ""
+        parts.append(f"## Diff ({diff_range or 'HEAD, working tree'})\n```diff\n{d[:cap]}{note}\n```")
     for f in files:
         p = Path(f) if Path(f).is_absolute() else root / f
-        parts.append(f"## File {f}\n```\n{p.read_text(errors='replace')[:DIFF_CAP_CHARS]}\n```")
+        parts.append(f"## File {f}\n```\n{p.read_text(errors='replace')[:cap]}\n```")
     return "\n\n".join(parts)
 
 
@@ -525,10 +559,12 @@ def call_agentcall(prompt: str, system: str, model: str, effort: str) -> dict:
     prints only a usage line, not the provenance. Run in a subprocess so ccage itself keeps no
     dependency on agentcall being importable.
     """
+    review_timeout = _setting("CCAGE_PLAN_REVIEW_TIMEOUT_S", REVIEW_TIMEOUT_S)
     req = {"prompt": prompt, "system": system, "model": model, "effort": effort,
-           "schema": SCHEMA, "timeout": REVIEW_TIMEOUT_S}
+           "schema": SCHEMA, "timeout": review_timeout}
     r = subprocess.run([agentcall_python(), "-c", _RUNNER], input=json.dumps(req),
-                       capture_output=True, text=True, timeout=REVIEW_TIMEOUT_S + 60, check=False)
+                       capture_output=True, text=True, check=False,
+                       timeout=review_timeout + _setting("CCAGE_PLAN_REVIEW_SLACK_S", REVIEW_SLACK_S))
     if r.returncode != 0:
         raise SystemExit(f"agentcall failed:\n{r.stderr.strip()[-2000:]}")
     return json.loads(r.stdout.strip().splitlines()[-1])

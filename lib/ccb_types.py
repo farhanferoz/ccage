@@ -67,6 +67,12 @@ class CCBConfig:
     grace_min: int = 10
     parent_stale_min: int = 15
     max_vouches: int = 2
+    debounce_ticks: int = 2         # consecutive breach polls before the first tier step
+    extend_hint_min: int = 60       # minutes the nudge tells the model to write in its CCB-VOUCH marker
+    flock_retries: int = 3          # tries to lock RESUME.md before an alert is skipped this tick
+    flock_retry_delay_ms: int = 200
+    notify_timeout_s: int = 10      # the notify command is killed after this
+    tokenol_timeout_s: int = 3      # tokenol cost lookup is abandoned after this
     notify_cmd: str | None = None
     tokenol_url: str = "http://localhost:8787"
 
@@ -85,6 +91,9 @@ class CCBConfig:
             ("t_soft_min", "CCB_T_SOFT_MIN"), ("t_stale_min", "CCB_T_STALE_MIN"),
             ("t_hard_min", "CCB_T_HARD_MIN"), ("grace_min", "CCB_GRACE_MIN"),
             ("parent_stale_min", "CCB_PARENT_STALE_MIN"), ("max_vouches", "CCB_MAX_VOUCHES"),
+            ("debounce_ticks", "CCB_DEBOUNCE_TICKS"), ("extend_hint_min", "CCB_EXTEND_HINT_MIN"), ("flock_retries", "CCB_FLOCK_RETRIES"),
+            ("flock_retry_delay_ms", "CCB_FLOCK_RETRY_DELAY_MS"),
+            ("notify_timeout_s", "CCB_NOTIFY_TIMEOUT_S"), ("tokenol_timeout_s", "CCB_TOKENOL_TIMEOUT_S"),
         ]:
             if e.get(var, "").isdigit():
                 setattr(cfg, attr, int(e[var]))

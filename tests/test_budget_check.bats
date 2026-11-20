@@ -46,6 +46,20 @@ blocks() {  # write $1 "## Session" blocks to file $2
     [[ "$output" == *"blocking error"* ]]
 }
 
+@test "the block budget comes from CCAGE_RESUME_BUDGET_BLOCKS" {
+    local r="$BATS_TEST_TMPDIR/RESUME.md"; blocks 4 "$r"
+    CCAGE_RESUME_BUDGET_BLOCKS=5 run emit "$r"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "a bad CCAGE_RESUME_BUDGET_BLOCKS keeps the default of 3, and the log names it" {
+    local r="$BATS_TEST_TMPDIR/RESUME.md"; blocks 4 "$r"
+    CCAGE_RESUME_BUDGET_BLOCKS=lots run emit "$r"
+    [ "$status" -eq 2 ]
+    grep -q "SETTING-IGNORED.*CCAGE_RESUME_BUDGET_BLOCKS=lots" "$CLAUDE_CONFIG_DIR/resume_budget_check.log"
+}
+
 @test "observe mode keeps the old advisory JSON contract" {
     local r="$BATS_TEST_TMPDIR/RESUME.md"; blocks 5 "$r"
     CCAGE_RESUME_BUDGET_MODE=observe run emit "$r"

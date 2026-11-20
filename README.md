@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/farhanferoz/ccage/actions/workflows/ci.yml/badge.svg)](https://github.com/farhanferoz/ccage/actions/workflows/ci.yml)
 
-Per-project isolation for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Every working directory gets its own config dir, so two sessions in two repos stop fighting over one prompt cache, one credential file, and one shell history.
+Per-project isolation for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Every working directory gets its own config dir, so two sessions in two repos stop sharing one settings file, one credential file, and one shell history.
 
 > Status: early. API and defaults may still change.
 
@@ -10,10 +10,12 @@ Per-project isolation for [Claude Code](https://docs.anthropic.com/en/docs/claud
 
 Claude Code stores session history, settings, and OAuth tokens under a single config dir (`~/.claude` by default). If you run two sessions in parallel — one in `~/dev/api`, one in `~/dev/web` — they share that dir. In practice that means:
 
-- Prompt-cache entries from one project evict the other's, so cache hit rate collapses.
+- A setting saved by one session reaches the others and changes the start of their next request, so that request misses the prompt cache and its whole context is billed again at full price. Sessions also overwrite each other's settings when they exit.
 - Credential refresh races: if both sessions refresh an OAuth token at the same time, one loses and silently drops to the login screen.
 - Shell history, MCP registrations, and settings blend across unrelated projects.
 - A long-running agent in one repo corrupts the conversation state of another.
+
+> **Update, 2026-11-20 (Claude Code 2.1.329): the settings problems in the first point look fixed upstream.** Claude Code 2.1.323 stopped a running session undoing a settings edit made elsewhere. In a test, a running session had its settings file changed between messages, first an added permission and then an added environment variable. It picked up each change, as the new permission let it run a command, and kept its cache: 78 and 37 tokens newly cached, against about 27,000 read from the cache. Not tested: changing the model or effort level (Claude Code's changelog lists effort changes as cache-safe only on Claude Fable 5.1), and the other points in this list.
 
 `CLAUDE_CONFIG_DIR` fixes all of this — but managing it by hand for every `cd` is the kind of thing you'll forget exactly once, on the session that mattered.
 

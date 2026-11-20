@@ -43,7 +43,7 @@ class AgentMeta:
 _ID_DISALLOWED = re.compile(r"[^A-Za-z0-9._-]")
 
 
-def _sanitize_id(raw: str, limit: int = 80) -> str:
+def _sanitize_id(raw: str, limit: int = 80) -> str:   # limit: security bound on an untrusted id, kept in code
     """teammate_id is UNTRUSTED — it comes from a subagent's .meta.json, which can
     carry model-/tool-generated content — and flows into two sinks: RESUME.md
     (auto-injected into the next session's context by the SessionStart hook) and
@@ -227,7 +227,7 @@ def _task_dir(config_root: Path, session_id: str, team_name: str | None = None) 
     if team_name:
         cands.append(config_root / "tasks" / team_name)
     cands += [config_root / "tasks" / session_id,
-              config_root / "tasks" / f"session-{session_id[:8]}"]
+              config_root / "tasks" / f"session-{session_id[:8]}"]   # fact: Claude Code names this dir by the first 8 characters of the session id
     for cand in cands:
         if cand.is_dir():
             return cand
@@ -266,7 +266,7 @@ def session_cost_usd(session_id: str, tokenol_base_url: str) -> float | None:
     """
     url = f"{tokenol_base_url}/api/session/{session_id}"
     try:
-        with urllib.request.urlopen(url, timeout=3) as resp:
+        with urllib.request.urlopen(url, timeout=CCBConfig.from_env().tokenol_timeout_s) as resp:
             data = json.loads(resp.read())
         if not isinstance(data, dict):
             return None
@@ -292,7 +292,7 @@ class Action:
     agent: AgentRecord
 
 
-_DEBOUNCE_TICKS = 2  # consecutive breach polls required before the first tier step (Section 1)
+# Consecutive breach polls required before the first tier step (Section 1) are CCBConfig.debounce_ticks.
 
 
 def _in_breach(o: Observation, cfg: CCBConfig, extension_min: int) -> bool:
@@ -366,7 +366,7 @@ def evaluate(rec: AgentRecord, o: Observation, cfg: CCBConfig) -> tuple[AgentRec
             rec.phase, rec.breach_ticks, rec.alerted = AgentPhase.RUNNING, 0, False
             return rec, actions
         rec.breach_ticks += 1
-        if rec.breach_ticks >= _DEBOUNCE_TICKS:
+        if rec.breach_ticks >= cfg.debounce_ticks:
             if not rec.alerted:               # one alert per episode (review #6)
                 actions.append(Action(ActionKind.ALERT, rec))
                 rec.alerted = True
@@ -433,8 +433,6 @@ def load_state(path: Path) -> WatchState:
 
 
 _RESUME_ALERT_HEADING = "### Stuck-subagent alerts"
-_FLOCK_RETRIES = 3
-_FLOCK_RETRY_DELAY_S = 0.2
 
 
 def append_resume_alert(path: Path, line: str) -> None:
@@ -444,15 +442,17 @@ def append_resume_alert(path: Path, line: str) -> None:
     corrupted RESUME: on repeated lock failure, skip this tick silently.
     """
     now_iso = datetime.now(timezone.utc).isoformat()
+    cfg = CCBConfig.from_env()
+    tries = max(1, cfg.flock_retries)   # fact: at least one attempt, never an unlocked write
     with path.open("a+") as f:
-        for attempt in range(_FLOCK_RETRIES):
+        for attempt in range(tries):
             try:
                 fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except OSError:
-                if attempt == _FLOCK_RETRIES - 1:
+                if attempt == tries - 1:
                     return  # skip this tick rather than write unsynchronized
-                time.sleep(_FLOCK_RETRY_DELAY_S)
+                time.sleep(cfg.flock_retry_delay_ms / 1000)
         try:
             f.seek(0)
             text = f.read()
@@ -473,7 +473,7 @@ def notify(cfg: CCBConfig, msg: str) -> None:
         return
     try:
         subprocess.run(cfg.notify_cmd, shell=True, input=msg.encode(),
-                       timeout=10, capture_output=True)
+                       timeout=cfg.notify_timeout_s, capture_output=True)
     except Exception:
         pass
 
@@ -592,11 +592,10 @@ def summarize_ledger(path: Path) -> dict:
 
 # --- Task 13: Tier A — the nudge message --------------------------------------
 # extend_hint_min is the number the model is told to write in its CCB-VOUCH
-# marker (a fixed suggestion, default 60); deadline_min (= cfg.grace_min) is how
+# marker (a fixed suggestion, CCB_EXTEND_HINT_MIN, default 60); deadline_min (= cfg.grace_min) is how
 # long it has before the breaker escalates on its own. They are DIFFERENT
 # numbers (plan Task 13 Step 3): the first extends, the second is the config
 # deadline — conflating them was the plan's own noted bug.
-_DEFAULT_EXTEND_HINT_MIN = 60
 
 
 def nudge_message(rec: AgentRecord, elapsed_min: float, stale_min: float,
@@ -829,10 +828,10 @@ def run_tick(
             elif act.kind is ActionKind.NUDGE:
                 # Tier A (Task 13): inject the vouch/stop directive into the
                 # orchestrator's pty. deadline = cfg.grace_min (config), extend
-                # hint = the fixed 60-min suggestion — two different numbers.
+                # hint = the fixed suggestion cfg.extend_hint_min — two different numbers.
                 text = nudge_message(
                     rec, elapsed_min, stale_min, _cost(), _open_tasks(meta.team_name),
-                    extend_hint_min=_DEFAULT_EXTEND_HINT_MIN, deadline_min=cfg.grace_min)
+                    extend_hint_min=cfg.extend_hint_min, deadline_min=cfg.grace_min)
                 if inject(text):
                     summary = ("nudged: teammate %s at %.0fmin (stale %.0fmin), grace %d min"
                                % (meta.teammate_id, elapsed_min, stale_min, cfg.grace_min))

@@ -103,6 +103,38 @@ def test_config_validate_disables_out_of_range_floor(monkeypatch):
     assert any("weekly floor" in w and "disabling" in w for w in warns)
 
 
+# --- timings and caps read from CCAGE_AUTOCK_<NAME> at import ----------------
+
+def test_module_constants_read_their_env_var(monkeypatch):
+    """A window, margin or timeout is chosen from the environment, defaults unchanged: the
+    default module has today's values, one loaded under the variables has the new ones, and
+    INJECTION_TOLERANCE_S is the variable stop_continuation_guard.sh reads too."""
+    for name in ("WEEKLY_STALE_S", "HARD_MARGIN", "MAX_RENUDGE", "TAIL_MAX_BYTES",
+                 "INJECTION_TOLERANCE_S"):
+        monkeypatch.delenv("CCAGE_AUTOCK_" + name, raising=False)
+    default = load_ccage_auto("ccage_auto_env_default")
+    assert (default.WEEKLY_STALE_S, default.HARD_MARGIN, default.MAX_RENUDGE,
+            default.TAIL_MAX_BYTES, default.INJECTION_TOLERANCE_S) == (1800.0, 20.0, 1, 524288, 30)
+    monkeypatch.setenv("CCAGE_AUTOCK_WEEKLY_STALE_S", "60")
+    monkeypatch.setenv("CCAGE_AUTOCK_HARD_MARGIN", "12.5")
+    monkeypatch.setenv("CCAGE_AUTOCK_MAX_RENUDGE", "3")
+    monkeypatch.setenv("CCAGE_AUTOCK_TAIL_MAX_BYTES", "1000")
+    monkeypatch.setenv("CCAGE_AUTOCK_INJECTION_TOLERANCE_S", "7")
+    tuned = load_ccage_auto("ccage_auto_env_tuned")
+    assert (tuned.WEEKLY_STALE_S, tuned.HARD_MARGIN, tuned.MAX_RENUDGE,
+            tuned.TAIL_MAX_BYTES, tuned.INJECTION_TOLERANCE_S) == (60.0, 12.5, 3, 1000, 7)
+    # The new value reaches behaviour, not only the constant: hard is soft + HARD_MARGIN.
+    assert tuned.clamp_thresholds(40.0, None)[1] == 52.5
+
+
+def test_module_constants_ignore_a_bad_value(monkeypatch):
+    """A value that is not a number never stops ccage-auto: the default is used."""
+    monkeypatch.setenv("CCAGE_AUTOCK_WEEKLY_STALE_S", "soon")
+    monkeypatch.setenv("CCAGE_AUTOCK_MAX_RENUDGE", "many")
+    bad = load_ccage_auto("ccage_auto_env_bad")
+    assert (bad.WEEKLY_STALE_S, bad.MAX_RENUDGE) == (1800.0, 1)
+
+
 # --- Watcher fixture ---------------------------------------------------------
 
 @pytest.fixture

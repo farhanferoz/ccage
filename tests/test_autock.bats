@@ -1955,6 +1955,33 @@ path_sans_ccage_watch() {
     [ -z "$output" ]
 }
 
+@test "stop-guard: the liveness window comes from CCAGE_STOPGUARD_LIVE_WINDOW_S" {
+    # The same 10-minute-old transcript the test above calls stale is live under a longer window.
+    mkdir -p "$SDIR/f2/subagents"
+    touch "$SDIR/f2/subagents/agent-w1.jsonl"
+    python3 -c "import os,sys,time; os.utime(sys.argv[1], (time.time()-600,)*2)" \
+        "$SDIR/f2/subagents/agent-w1.jsonl"
+    export CCAGE_STOPGUARD_LIVE_WINDOW_S=3600
+    stopg "{\"session_id\":\"f2\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Everything is finished.\"}"
+    [[ "$output" == *"SERIALISATION"* ]]
+}
+
+@test "stop-guard: a bad CCAGE_STOPGUARD_* value is ignored, and the log names the variable" {
+    # 60 s old is live under the default 180 s window; a fallback to a negative value would
+    # make it stale, so the guard still firing is the fallback to the default.
+    mkdir -p "$SDIR/f3/subagents"
+    touch "$SDIR/f3/subagents/agent-w1.jsonl"
+    python3 -c "import os,sys,time; os.utime(sys.argv[1], (time.time()-60,)*2)" \
+        "$SDIR/f3/subagents/agent-w1.jsonl"
+    # `inf` parses as a number but has no integer value; it must fall back too, not crash.
+    for bad in forever inf; do
+        export CCAGE_STOPGUARD_LIVE_WINDOW_S=$bad
+        stopg "{\"session_id\":\"f3\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"Everything is finished.\"}"
+        [[ "$output" == *"SERIALISATION"* ]]
+        grep -q "SETTING-IGNORED CCAGE_STOPGUARD_LIVE_WINDOW_S='$bad'" "$CAGE/stop_continuation_guard.log"
+    done
+}
+
 @test "stop-guard: PLAN_ITEMS_OPEN — claims done while the plan has unticked boxes" {
     printf '# R\n\n### Plan\n- `%s/p.md` governs\n' "$REPO" > "$REPO/RESUME.md"
     printf '# P\n- [x] one\n- [ ] two\n- [ ] three\n' > "$REPO/p.md"
@@ -3132,12 +3159,12 @@ PY
 @test "the injection tolerance is spelled once, not once per file" {
     # A second spelling of one rule is how the slug regex reached five copies and
     # turned 28 macOS tests red in 0.15.0. Both readers subtract the same marker,
-    # so they must agree on the window.
-    local a b
-    a="$(grep -oE '^INJECTION_TOLERANCE_S = [0-9]+' "$AUTO" | grep -oE '[0-9]+')"
-    b="$(grep -oE '^INJECTION_TOLERANCE_S = [0-9]+' \
-        "$BATS_TEST_DIRNAME/../share/hooks/stop_continuation_guard.sh" \
-        | grep -oE '[0-9]+')"
+    # so they must read the SAME variable and agree on its default.
+    local a b hook="$BATS_TEST_DIRNAME/../share/hooks/stop_continuation_guard.sh"
+    a="$(grep -E '^INJECTION_TOLERANCE_S = ' "$AUTO" \
+        | grep -oE 'CCAGE_AUTOCK_INJECTION_TOLERANCE_S"\), [0-9]+' | grep -oE '[0-9]+$')"
+    b="$(grep -E '^INJECTION_TOLERANCE_S = ' "$hook" \
+        | grep -oE 'CCAGE_AUTOCK_INJECTION_TOLERANCE_S", [0-9]+' | grep -oE '[0-9]+$')"
     [ -n "$a" ]
     [ -n "$b" ]
     [ "$a" = "$b" ]
