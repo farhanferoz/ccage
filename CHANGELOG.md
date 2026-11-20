@@ -2,7 +2,9 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.24.0] — 2026-11-20
+
+Minor: every timing, window and cap is a setting with today's value as its default, a tick's check gets four and a half minutes, and the README says the shared-settings cache problem looks fixed upstream.
 
 ### Added
 
