@@ -80,3 +80,29 @@ fire() {
     run bash -c 'cd "$1" && "$2" </dev/null' _ "$P" "$BATS_TEST_DIRNAME/../share/hooks/resume_autoload.sh"
     [[ "$output" != *"PLAN STALE"* ]]
 }
+
+@test "E: a ruling that supersedes another names the open plan items still citing the old one, once" {
+    local d385; d385="$(grep -m1 '^- \*\*D385\*\*' "$P/DECISIONS.md")"
+    run -0 fire "$P/DECISIONS.md" "$d385"
+    local note; note="$(printf '%s' "$output" | jq -r '.systemMessage')"
+    [[ "$note" == *"4. in plan_paper_runs_after_state_following_trial_2026-11-17.md cites D320, which D385 supersedes or amends"* ]]
+    [[ "$note" == *"W1 in work_list_2026-11-19.md cites D368, which D385 supersedes"* ]]
+    # not a block, and the baseline note of a first write is still said
+    [[ "$note" == *"DECISIONS baseline recorded"* ]]
+    # the same pair is named once
+    run -0 fire "$P/DECISIONS.md" "$d385"
+    [ -z "$output" ]
+    grep -q "NOTE-planrulings" "$LOG"
+    grep -q "ALLOW-planrulings" "$LOG"
+}
+
+@test "E: an entry that supersedes nothing, and an item that already cites the new ruling, are silent" {
+    local d385; d385="$(grep -m1 '^- \*\*D385\*\*' "$P/DECISIONS.md")"
+    # an edit that adds an unrelated entry says nothing about D385, whose citations are still open
+    run -0 fire "$P/DECISIONS.md" "- **D500** (2026-11-22, owner 'y') A ruling that replaces nothing: items cite D320 freely."
+    [[ "$output" != *"cites D3"* ]]
+    sed -i 's/^\(- \[ \] 4\. .*\)$/\1 (open 2026-11-21: Prodigy replaced, D385)/' "$P/docs/plan_paper_runs_after_state_following_trial_2026-11-17.md"
+    sed -i 's/^\(- \[ \] W1 .*\)$/\1 (open 2026-11-21: D385 replaced the optimizer)/' "$P/docs/work_list_2026-11-19.md"
+    run -0 fire "$P/DECISIONS.md" "$d385"
+    [[ "$output" != *"cites D3"* ]]
+}

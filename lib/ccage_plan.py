@@ -97,6 +97,8 @@ NEGATION = re.compile(r"\bnot\s*$", re.IGNORECASE)
 TAG = re.compile(r"[A-Za-z]{1,4}\d{1,3}[a-z]?")       # an item ID people write in prose: W10, P3, M1, W05a
 STALE_DAYS = 14            # a plan untouched this long while the project moved on is reported stale
 REPORT_MAX_LINES = 8       # lines `plan-report --stale` prints
+RULING_MAX_LINES = 5       # open items one new ruling's note names
+MIN_TOUCH_CHARS = 12       # an added line shorter than this ("- ", "---") says nothing about which entry it belongs to
 CLAIM_WINDOW_CHARS = 80    # a verb counts for the item ID this close before it, on the same line
 CLAIM_MAX_ITEMS = 3        # items a claim refusal names (it stays a few lines)
 CLAIMS_STATE_KEEP = 2000   # claim keys remembered, so a claim is refused once
@@ -929,11 +931,11 @@ RESUME_NOT_STARTED = re.compile(r"\bnot started\b", re.IGNORECASE)
 PATH_LIKE = re.compile(r"[\w.~-]*/[\w./~-]*\.[A-Za-z0-9]{1,5}|~/[\w./~-]+|\./[\w./~-]+")
 
 
-def supersession_links(decisions_text: str) -> dict[str, set[str]]:
-    """Which decisions each entry of DECISIONS.md supersedes or amends, from its own words:
-    {"D385": {"D320", "D368"}}. An entry is not said to supersede itself."""
+def supersession_links(entries: dict[str, str]) -> dict[str, set[str]]:
+    """Which decisions each entry of DECISIONS.md (decision_entries) supersedes or amends, from its
+    own words: {"D385": {"D320", "D368"}}. An entry is not said to supersede itself."""
     links: dict[str, set[str]] = {}
-    for did, entry in decision_entries(decisions_text).items():
+    for did, entry in entries.items():
         found = {d for m in SUPERSEDES.finditer(entry) for d in DECISION_TOKEN.findall(m.group(1))} - {did}
         if found:
             links[did] = found
@@ -953,6 +955,11 @@ def stale_citations(items: list[PlanItem], links: dict[str, set[str]]) -> list[t
             if later not in cited:
                 found += [(item, d, later) for d in sorted(older & cited)]
     return found
+
+
+def citation_line(item: PlanItem, older: str, later: str) -> str:
+    return (f"{item.label} in {short_doc(item.doc)} cites {older}, which {later} supersedes or amends: "
+            f"cite {later} in the item, or tick it SUPERSEDED by {later} with the owner's words from that entry.")
 
 
 def short_doc(doc: Path) -> str:
@@ -999,9 +1006,8 @@ def stale_findings(project: Project, run: bool) -> list[str]:
                        "tick it if that is the deliverable.")
     if skipped:
         out.append(f"{skipped} checks were not run: the time budget (CCAGE_PLAN_GUARD_BUDGET_S) was spent.")
-    for it, older, later in stale_citations(items, supersession_links(read_text(project.decisions))):
-        out.append(f"{it.label} in {short_doc(it.doc)} cites {older}, which {later} supersedes or amends; "
-                   f"cite {later} in the item, or tick it SUPERSEDED by {later} with the owner's words from that entry.")
+    for it, older, later in stale_citations(items, supersession_links(decision_entries(read_text(project.decisions)))):
+        out.append(citation_line(it, older, later))
     for doc in docs:
         mine = [i for i in items if i.doc == doc]
         n_open, n_done = sum(i.open for i in mine), sum(not i.open for i in mine)
@@ -1028,6 +1034,60 @@ def stale_findings(project: Project, run: bool) -> list[str]:
             out.append(f"{short_doc(doc)} has not changed for {age:.0f} days while the project moved on; "
                        f"its {n_open} open items may be stale.")
     return out
+
+
+def touched_links(decisions_text: str, payload: dict) -> dict[str, set[str]]:
+    """The supersession links of the entries an edit touched: all of them for a Write, else the
+    entries (of the file as it is after the edit) that hold a line the edit added. An edit may add
+    "supersedes D320" to an existing entry, so the added text alone does not say which entry."""
+    entries = decision_entries(decisions_text)
+    links = supersession_links(entries)
+    if payload.get("tool_name") == "Write":
+        return links
+    lines = {ln.strip() for ln in added_text(payload).translate(CURLY).splitlines() if len(ln.strip()) >= MIN_TOUCH_CHARS}
+    return {did: older for did, older in links.items() if any(ln in entries[did] for ln in lines)}
+
+
+def check_rulings(stdin_text: str) -> int:
+    """PostToolUse body for an edit of DECISIONS.md (called by resume_budget_check.sh): for every
+    supersession or amendment the lines the edit added make (an entry saying "supersedes D320"), name
+    the open items of the listed plans that cite the older decision without the newer, at most
+    CCAGE_PLAN_RULING_MAX_LINES lines on stdout. Each (ruling, item) pair is named once. Advisory:
+    always exits 0, so a hook can only note it; silent when there is nothing to say."""
+    try:
+        payload = json.loads(stdin_text)
+        decisions = Path((payload.get("tool_input") or {}).get("file_path") or "")
+        # An edit (not a Write of the whole file) that adds no "supersedes Dnnn" has nothing to name,
+        # and parsing a ruling register of a megabyte is the cost: look at the added text first.
+        links = {}
+        if payload.get("tool_name") == "Write" or SUPERSEDES.search(added_text(payload)):
+            links = touched_links(read_text(decisions), payload)
+        if not links:
+            log(f"RULINGS-ALLOW {decisions}: the edit added no supersession or amendment")
+            return 0
+        project = project_at(decisions.parent)
+        state = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / ".plan_rulings_state"
+        seen = _claims_state(state)
+        fresh = []
+        for item, older, later in stale_citations(plan_items(project), links):
+            key = hashlib.sha1(f"{decisions}\t{later}\t{older}\t{item.doc}\t{item.item.id}".encode()).hexdigest()[:16]
+            if key not in seen:
+                fresh.append((key, citation_line(item, older, later)))
+        if not fresh:
+            log(f"RULINGS-ALLOW {decisions}: {sum(map(len, links.values()))} supersession(s), no open item cites an older decision unmatched")
+            return 0
+        keep = int(_setting("CCAGE_PLAN_CLAIMS_STATE_KEEP", CLAIMS_STATE_KEEP))
+        state.write_text("\n".join([*seen, *(k for k, _ in fresh)][-keep:]) + "\n")
+        shown = int(_setting("CCAGE_PLAN_RULING_MAX_LINES", RULING_MAX_LINES))
+        lines = [line for _, line in fresh]
+        if len(lines) > shown:
+            lines = [*lines[:max(shown - 1, 0)], f"(+{len(lines) - max(shown - 1, 0)} more)"]
+        log(f"RULINGS-NOTE {decisions}: {len(fresh)} open item(s) cite a decision this edit supersedes or amends")
+        print("\n".join(lines))
+        return 0
+    except Exception as exc:  # noqa: BLE001 -- a broken check must not wedge a ruling's entry
+        log(f"RULINGS-ERROR-allow {type(exc).__name__}: {exc}")
+        return 0
 
 
 def plan_section(resume_text: str) -> list[str]:
@@ -1210,6 +1270,7 @@ def main(argv: list[str]) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("guard")
     sub.add_parser("claims")
+    sub.add_parser("rulings")
     pr = sub.add_parser("plan-report")
     pr.add_argument("plan", nargs="?")
     pr.add_argument("--no-run", action="store_true")
@@ -1229,6 +1290,8 @@ def main(argv: list[str]) -> int:
         return guard(sys.stdin.read())
     if args.cmd == "claims":
         return check_claims(sys.stdin.read())
+    if args.cmd == "rulings":
+        return check_rulings(sys.stdin.read())
     if args.cmd == "plan-report":
         if args.stale:
             return stale_report(Path(args.project).resolve(), not args.no_run)

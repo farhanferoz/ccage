@@ -538,6 +538,34 @@ if [ "$kind" = resume ] && command -v python3 >/dev/null 2>&1; then
     fi
 fi
 
+# ---- a new ruling that supersedes or amends another: name the plan items still citing the old one ----
+# MEASURED 2026-11-21: D385 replaced Prodigy by the learning-rate rule while two open items still cited
+# Prodigy and its ruling D320; D341 closed an item that stayed unticked four days. A ruling is entered in
+# DECISIONS and nothing asked which open plan items it closes or rewrites. ccage_plan.py `rulings` reads
+# the supersessions the edit made ("supersedes D320", "amends D360") and names the open items of the
+# listed plans that cite the older decision without the newer, at most 5 lines, each pair once.
+# Explicit citation only: ranking rulings by shared words named a "best" ruling for every item.
+# Advisory (a note, never a block): the edit that settles an item needs the owner's words.
+rulings_note=""
+if [ "$kind" = decisions ] && command -v python3 >/dev/null 2>&1; then
+    rulings_py=""
+    for cand in "$(dirname "${BASH_SOURCE[0]}")/ccage_plan.py" "$(dirname "${BASH_SOURCE[0]}")/../../lib/ccage_plan.py"; do
+        [ -f "$cand" ] && { rulings_py="$cand"; break; }
+    done
+    if [ -n "$rulings_py" ]; then
+        rulings_note="$(printf '%s' "$input" | python3 "$rulings_py" rulings 2>/dev/null)"
+        if [ -n "$rulings_note" ]; then
+            _log "NOTE-planrulings" "$(printf '%s' "$rulings_note" | head -1 | cut -c1-120)"
+            rulings_note="A ruling in this edit supersedes or amends an earlier one that open plan items still cite:
+$rulings_note"
+        else
+            _log "ALLOW-planrulings" "nothing to name"
+        fi
+    else
+        _log "SKIP-planrulings" "ccage_plan.py not found beside the hook"
+    fi
+fi
+
 # ---- first write for this file: say so, do not go quiet ---------------------
 # The shrink check above needs a previous count, so on a fresh cage — no state
 # file — it cannot fire at all, and the FIRST checkpoint could drop every item
@@ -547,7 +575,9 @@ fi
 # guard looked and was happy".
 if [ -z "$prev_next" ] && [ "${next_n:-0}" -gt 0 ]; then
     if [ "$kind" = decisions ]; then
-        emit_note "DECISIONS baseline recorded: ${next_n} in-force entries ($next_labels). No previous count existed in this cage, so nothing could be compared this time — a later write that drops one without archiving it will be blocked."
+        emit_note "${rulings_note:+$rulings_note
+}DECISIONS baseline recorded: ${next_n} in-force entries ($next_labels). No previous count existed in this cage, so nothing could be compared this time — a later write that drops one without archiving it will be blocked."
+        rulings_note=""
     else
         emit_note "RESUME baseline recorded: ${next_n} items in '### Next' ($next_labels). No previous count existed in this cage, so nothing could be compared this time — a later write that drops any of them will be blocked."
     fi
@@ -555,6 +585,7 @@ fi
 
 if [ "$over" != 1 ]; then
     _log "ALLOW-underbudget" "$kind ${bytes}B, ${next_n:-0} items"
+    [ -n "$rulings_note" ] && emit_note "$rulings_note"
     exit 0
 fi
 
