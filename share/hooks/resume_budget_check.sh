@@ -506,6 +506,38 @@ MSG
     exit 2
 fi
 
+# ---- RESUME must not call a plan item finished that the plan still shows open ---
+# MEASURED 2026-11-21: "W10: DONE (worker), MERGED + PUSHED af969669" sat in RESUME while the
+# work list still showed W10 unticked; the session that learns an item is done writes it HERE
+# and nothing couples it to the box the status line counts. ccage_plan.py `claims` reads the lines
+# this edit added and names the open plan items they call DONE, MERGED, PUSHED, SUPERSEDED or
+# COMPLETE, with the one edit that settles each (plan_staleness: part C). Blocked once per line
+# (its key is recorded first), so the same text passes afterwards. Observe mode only notes.
+if [ "$kind" = resume ] && command -v python3 >/dev/null 2>&1; then
+    claims_py=""
+    for cand in "$(dirname "${BASH_SOURCE[0]}")/ccage_plan.py" "$(dirname "${BASH_SOURCE[0]}")/../../lib/ccage_plan.py"; do
+        [ -f "$cand" ] && { claims_py="$cand"; break; }
+    done
+    if [ -n "$claims_py" ]; then
+        claims_out="$(printf '%s' "$input" | CLAUDE_PROJECT_DIR="$(dirname -- "$fp")" python3 "$claims_py" claims 2>/dev/null)"
+        claims_rc=$?
+        if [ "$claims_rc" -eq 2 ]; then
+            if [ "${CCAGE_RESUME_BUDGET_MODE:-}" = "observe" ]; then
+                _log "ALLOW-planclaims-observe" "$(printf '%s' "$claims_out" | sed -n 2p | cut -c1-120)"
+                emit_note "$claims_out"
+            else
+                _log "DENY-planclaims" "$(printf '%s' "$claims_out" | sed -n 2p | cut -c1-120)"
+                printf '%s\n' "$claims_out" >&2
+                exit 2
+            fi
+        else
+            _log "ALLOW-planclaims" "rc=$claims_rc"
+        fi
+    else
+        _log "SKIP-planclaims" "ccage_plan.py not found beside the hook"
+    fi
+fi
+
 # ---- first write for this file: say so, do not go quiet ---------------------
 # The shrink check above needs a previous count, so on a fresh cage — no state
 # file — it cannot fire at all, and the FIRST checkpoint could drop every item

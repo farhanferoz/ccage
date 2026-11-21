@@ -38,7 +38,9 @@ interpreter that has it installed (see `call_agentcall`).
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -88,6 +90,14 @@ PATH_STRIP = "'\"()[],;:."          # punctuation that clings to a path written 
 # Words that make a number a job number in evidence ("slurm 8697908", "Turing 381"); a fact of how
 # this project's evidence is written, so it is a setting (CCAGE_PLAN_JOB_WORDS).
 JOB_WORDS = "job|jobs|slurm|sbatch|isambard|turing|run"
+# Verbs RESUME uses, in capitals, to say a plan item is finished (the plan-staleness fix, part C):
+# a fact of how the owner's hand-over text is written. Lower case is ordinary prose ("when done").
+CLAIM_VERB = re.compile(r"\b(?:DONE|MERGED|PUSHED|SUPERSEDED|COMPLETE|COMPLETED)\b")
+NEGATION = re.compile(r"\bnot\s*$", re.IGNORECASE)
+TAG = re.compile(r"[A-Za-z]{1,4}\d{1,3}[a-z]?")       # an item ID people write in prose: W10, P3, M1, W05a
+CLAIM_WINDOW_CHARS = 80    # a verb counts for the item ID this close before it, on the same line
+CLAIM_MAX_ITEMS = 3        # items a claim refusal names (it stays a few lines)
+CLAIMS_STATE_KEEP = 2000   # claim keys remembered, so a claim is refused once
 # A PreToolUse command hook that outlives its timeout (600 s default) does not block the
 # call, so a guard call stops running checks after this many seconds and denies the rest.
 GUARD_BUDGET_S = 480
@@ -746,6 +756,159 @@ def plan_report(plan: Path, run: bool) -> int:
     return 1 if regressed else 0
 
 
+# ---- claims: what RESUME says about plan items --------------------------------
+
+@dataclass(frozen=True)
+class PlanItem:
+    """One checkbox item of a plan document RESUME lists."""
+    doc: Path
+    item: Item
+
+    @property
+    def tag(self) -> str:
+        """The item's ID as people write it in prose ("W10." -> "W10"), or "" when it has none
+        (a number, or a title)."""
+        word = self.item.id.strip("*`()[].:;,")
+        return word if TAG.fullmatch(word) else ""
+
+    @property
+    def text(self) -> str:
+        return "\n".join([self.item.rest, self.item.lines])
+
+    @property
+    def open(self) -> bool:
+        return not self.item.checked
+
+    @property
+    def addressed(self) -> bool:
+        """An open item that carries an `(open <date>: ...)` annotation: someone has said what remains."""
+        return self.open and bool(OPEN_NOTE.search(self.text))
+
+
+def plan_items(project: Project) -> list[PlanItem]:
+    """Every checkbox item of every document RESUME's `### Plan` lists. A document with a Progress
+    section is read as the guard reads it (that section only); any other, whole."""
+    out: list[PlanItem] = []
+    for doc in listed_plans(project):
+        text = read_text(doc)
+        out += [PlanItem(doc, item) for item in parse_progress(text, whole=not has_progress(text)).values()]
+    return out
+
+
+@dataclass(frozen=True)
+class Claim:
+    """A line of RESUME that says an item is finished while the plan still shows it open."""
+    item: PlanItem
+    line: str
+
+
+def added_text(payload: dict) -> str:
+    """The text a Write, Edit or MultiEdit put into its file, as the PostToolUse payload carries it."""
+    tin = payload.get("tool_input") or {}
+    if payload.get("tool_name") == "Write":
+        return str(tin.get("content") or "")
+    edits = tin.get("edits") if payload.get("tool_name") == "MultiEdit" else [tin]
+    return "\n".join(str(e.get("new_string") or "") for e in edits or [] if isinstance(e, dict))
+
+
+def claims_in(added: str, items: list[PlanItem], window: int) -> tuple[list[Claim], list[str]]:
+    """The claims `added` makes about open, unannotated items, and the item IDs it names that are
+    open in more than one listed document with no document name on the line to tell them apart
+    (not claims: logged), or that a document listed earlier has finished. A claim is an item's ID followed, within `window` characters on the same
+    line and before another ID, by a CLAIM_VERB that is not negated ("NOT DONE")."""
+    pending = [i for i in items if i.open and not i.addressed and i.tag]
+    tags = {i.tag for i in pending}
+    rank = {doc: n for n, doc in enumerate(dict.fromkeys(i.doc for i in items))}     # listing order
+    claims: list[Claim] = []
+    ambiguous: list[str] = []
+    for line in added.splitlines():
+        if not CLAIM_VERB.search(line):
+            continue
+        marks = [(m.start(), m.end(), m.group(0)) for m in re.finditer(r"(?<![\w-])[A-Za-z]{1,4}\d{1,3}[a-z]?(?![\w-])", line)]
+        for n, (_, end, tag) in enumerate(marks):
+            if tag not in tags:
+                continue
+            stop = min(end + window, marks[n + 1][0] if n + 1 < len(marks) else len(line))
+            verbs = [m for m in CLAIM_VERB.finditer(line, end, stop) if not NEGATION.search(line[:m.start()])]
+            if not verbs:
+                continue
+            same = [i for i in pending if i.tag == tag]
+            named = [i for i in same if i.doc.stem in line]
+            pick = named or same
+            # A line that names no document is about the document listed first that has the ID
+            # (the live list comes first, by RESUME's convention): an ID that a document listed
+            # EARLIER has finished is that one's, not the open item's.
+            finished_before = not named and len(pick) == 1 and any(
+                j.tag == tag and j.item.checked and rank[j.doc] < rank[pick[0].doc] for j in items)
+            if len(pick) == 1 and not finished_before:
+                claims.append(Claim(pick[0], line.strip()))
+            else:
+                ambiguous.append(tag)
+    return claims, ambiguous
+
+
+def claims_refusal(claims: list[Claim], root: Path) -> str:
+    shown = int(_setting("CCAGE_PLAN_CLAIM_MAX_ITEMS", CLAIM_MAX_ITEMS))
+    rows = []
+    for c in claims[:shown]:
+        try:
+            doc = c.item.doc.relative_to(root)
+        except ValueError:
+            doc = c.item.doc
+        rows.append(f'  {c.item.tag} in {doc}: RESUME says "{c.line[:110]}", the plan still shows it open.')
+    more = f"\n  (+{len(claims) - shown} more)" if len(claims) > shown else ""
+    return ("RESUME says a plan item is finished that the plan still shows open. Blocked once, deliberately.\n"
+            + "\n".join(rows) + more
+            + "\nIn the plan, tick the item with `DONE <date>: <evidence>` (a commit, an existing path, a decision "
+              "id or a job number), or, when only part is done, annotate it `(open <date>: <what remains>; "
+              "blocked on X | not started)`. The plan is the record the status line counts; RESUME needs no rewrite.")
+
+
+def _claims_state(path: Path) -> list[str]:
+    try:
+        return path.read_text().split()
+    except OSError:
+        return []
+
+
+def check_claims(stdin_text: str) -> int:
+    """PostToolUse body for an edit of RESUME (called by resume_budget_check.sh): 0 when the lines
+    the edit added make no claim the plan contradicts, else 2 with the refusal on stdout. A claim
+    is refused once: its key is recorded before the refusal, so the same line passes afterwards."""
+    try:
+        payload = json.loads(stdin_text)
+        resume = Path((payload.get("tool_input") or {}).get("file_path") or "")
+        added = added_text(payload)
+        if not CLAIM_VERB.search(added):
+            log(f"CLAIMS-ALLOW {resume}: the edit added no finished-verb")
+            return 0
+        project = dataclasses.replace(project_of(resume), resume=resume)    # the file edited is the RESUME
+        items = plan_items(project)
+        claims, ambiguous = claims_in(added, items, int(_setting("CCAGE_PLAN_CLAIM_WINDOW_CHARS", CLAIM_WINDOW_CHARS)))
+        for tag in sorted(set(ambiguous)):
+            log(f"CLAIMS-AMBIGUOUS {resume}: {tag} is open in several listed documents and the line names none; not judged")
+        state = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / ".plan_claims_state"
+        seen = _claims_state(state)
+        fresh = []
+        for c in claims:
+            key = hashlib.sha1(f"{resume}\t{c.item.doc}\t{c.item.item.id}\t{c.line}".encode()).hexdigest()[:16]
+            if key in seen:
+                log(f"CLAIMS-SEEN {resume}: {c.item.tag} in {c.item.doc.name} was refused before")
+            else:
+                fresh.append((key, c))
+        if not fresh:
+            log(f"CLAIMS-ALLOW {resume}: {len(items)} items read, {len(claims)} claims, none new")
+            return 0
+        keep = int(_setting("CCAGE_PLAN_CLAIMS_STATE_KEEP", CLAIMS_STATE_KEEP))
+        state.write_text("\n".join([*seen, *(k for k, _ in fresh)][-keep:]) + "\n")
+        log(f"CLAIMS-DENY {resume}: " + " | ".join(f"{c.item.tag} in {c.item.doc.name}" for _, c in fresh))
+        print(claims_refusal([c for _, c in fresh], project.root))
+        return 2
+    except Exception as exc:  # noqa: BLE001 -- a broken check must not wedge a checkpoint
+        log(f"CLAIMS-ERROR-allow {type(exc).__name__}: {exc}")
+        return 0
+
+
 # ---- review ---------------------------------------------------------------
 
 def item_section(text: str, item_id: str) -> str:
@@ -885,6 +1048,7 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="ccage")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("guard")
+    sub.add_parser("claims")
     pr = sub.add_parser("plan-report")
     pr.add_argument("plan")
     pr.add_argument("--no-run", action="store_true")
@@ -898,6 +1062,8 @@ def main(argv: list[str]) -> int:
     args = ap.parse_args(argv)
     if args.cmd == "guard":
         return guard(sys.stdin.read())
+    if args.cmd == "claims":
+        return check_claims(sys.stdin.read())
     if args.cmd == "plan-report":
         return plan_report(Path(args.plan), not args.no_run)
     # 1 means NEEDS_WORK; a review that could not be made exits 2.
