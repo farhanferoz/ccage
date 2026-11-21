@@ -5,13 +5,16 @@ the payload shape and the exit code are all under test.
 """
 import argparse
 import json
+import shutil
 import subprocess
 from pathlib import Path
+
 
 from lib import ccage_plan
 
 ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "share" / "hooks" / "plan_contract_guard.sh"
+FIXTURE = ROOT / "tests" / "fixtures" / "plan_staleness"
 QUOTE = "drop T2, the exchange feed is out of scope"
 APPROVAL = f'  owner approved: "{QUOTE}" (T2)\n'
 
@@ -226,3 +229,101 @@ def test_ticks_beyond_the_time_budget_are_denied_unchecked(tmp_path):
     passed, tail = ccage_plan.run_check("sleep 37.25 | cat", tmp_path, timeout=0.5)
     assert not passed and "timed out" in tail
     assert subprocess.run(["pgrep", "-f", "sleep 37.25"], capture_output=True, check=False).returncode == 1
+
+
+# ---- plans RESUME lists, and the annotation grammar (plan-staleness fix, part D) ----------------
+# Fixture: the ten plan documents listed in RESUME on 21 Nov 2026, as they were before they were
+# reconciled (tests/fixtures/plan_staleness). Only one of them has a `## Progress` heading.
+
+CI_PLAN = "plan_ci_green_and_test_pruning_2026-11-19.md"
+PRIORS = "design_rollout_priors_2026-11-16.md"
+P2 = "P2 Owner sees the audit's totals"
+M1 = "M1 design the mean prior's build"
+
+
+def project(tmp_path):
+    """The fixture project in tmp_path/proj as a git repository; returns (path, short hash of its commit)."""
+    proj = tmp_path / "proj"
+    shutil.copytree(FIXTURE, proj)
+    for git in (["init", "-q"], ["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "fixture"]):
+        subprocess.run(["git", "-C", str(proj), *git], check=True)
+    head = subprocess.run(["git", "-C", str(proj), "rev-parse", "--short=9", "HEAD"], capture_output=True,
+                          text=True, check=True).stdout.strip()
+    return proj, head
+
+
+def tick(tmp_path, proj, doc, marker, note=""):
+    """Tick the item holding `marker` in a fixture document, appending `note`; (exit code, stderr)."""
+    line = next(ln for ln in (proj / "docs" / doc).read_text().splitlines() if marker in ln)
+    new = line.replace("- [ ]", "- [x]", 1) + (f" {note}" if note else "")
+    return guard(tmp_path, None, None, rel=f"proj/docs/{doc}", edit=(line, new),
+                 env={"CLAUDE_PROJECT_DIR": str(proj)})
+
+
+def test_a_listed_plan_without_a_progress_heading_is_guarded(tmp_path):
+    proj, _ = project(tmp_path)
+    # listed under RESUME's ### Plan, no `## Progress`: a tick with no check and no evidence is refused
+    code, err = tick(tmp_path, proj, CI_PLAN, P2)
+    assert code == 2 and "TICK P2" in err and "no done-when" in err and "DONE <date>: <evidence>" in err
+    assert "ALLOW" not in (tmp_path / "plan_contract_guard.log").read_text()
+    # a drop needs the owner's words, as in a Progress section
+    old = (proj / "docs" / CI_PLAN).read_text()
+    code, err = guard(tmp_path, None, None, rel=f"proj/docs/{CI_PLAN}", env={"CLAUDE_PROJECT_DIR": str(proj)},
+                      edit=(next(ln for ln in old.splitlines() if P2 in ln) + "\n", ""))
+    assert code == 2 and "P2 dropped" in err
+    # the same text in a document RESUME does not list is left alone, and the log says why
+    (proj / "docs" / "unlisted.md").write_text(old)
+    assert guard(tmp_path, None, None, rel="proj/docs/unlisted.md", env={"CLAUDE_PROJECT_DIR": str(proj)},
+                 edit=(next(ln for ln in old.splitlines() if P2 in ln), "- [x] P2 done"))[0] == 0
+    assert "SKIP" in (tmp_path / "plan_contract_guard.log").read_text()
+
+
+def test_a_done_annotation_needs_evidence_that_can_be_verified(tmp_path):
+    proj, head = project(tmp_path)
+    for evidence in (f"merged {head}", "see docs/work_list_2026-11-19.md", "D385 settles it", "slurm 8697908 ran it"):
+        code, err = tick(tmp_path, proj, CI_PLAN, P2, f"DONE 2026-11-21: {evidence}")
+        assert code == 0, (evidence, err)
+    assert "TICK-EVIDENCE" in (tmp_path / "plan_contract_guard.log").read_text()
+    # invented: a hash no commit has, a path that is absent, an unknown decision, a job nobody recorded, prose only
+    for evidence in ("merged deadbeef1", "see docs/nope.md", "D999 settles it", "slurm 1234567 ran it",
+                     "finished yesterday"):
+        code, err = tick(tmp_path, proj, CI_PLAN, P2, f"DONE 2026-11-21: {evidence}")
+        assert code == 2 and "DONE annotation without evidence that can be verified" in err, evidence
+    # the words that make a number a job number are a setting; a malformed one is ignored and logged
+    def slurm(env):
+        line = next(ln for ln in (proj / "docs" / CI_PLAN).read_text().splitlines() if P2 in ln)
+        return guard(tmp_path, None, None, rel=f"proj/docs/{CI_PLAN}", edit=(line, line.replace("- [ ]", "- [x]") + " DONE 2026-11-21: slurm 8697908 ran it"),
+                     env={"CLAUDE_PROJECT_DIR": str(proj), **env})[0]
+    assert slurm({"CCAGE_PLAN_JOB_WORDS": "job"}) == 2
+    assert slurm({"CCAGE_PLAN_JOB_WORDS": "slurm"}) == 0
+    assert slurm({"CCAGE_PLAN_JOB_WORDS": "a b(("}) == 0
+    assert "IGNORED-setting CCAGE_PLAN_JOB_WORDS" in (tmp_path / "plan_contract_guard.log").read_text()
+
+
+def test_a_superseded_annotation_needs_the_owners_words_from_that_decision(tmp_path):
+    proj, _ = project(tmp_path)
+    said = "THE TRAINING-SIDE FIX (D335's mean prior) IS CLOSED"
+    assert tick(tmp_path, proj, PRIORS, M1, f"SUPERSEDED by D341 (2026-11-17): '{said}'")[0] == 0
+    for note, why in (("SUPERSEDED by D341 (2026-11-17): 'THE FIX WAS NEVER NEEDED, SAYS THE OWNER'", "verbatim"),
+                      (f"SUPERSEDED by D999 (2026-11-17): '{said}'", "no entry D999"),
+                      ("SUPERSEDED by D341 (2026-11-17): 'agreed'", "20+ characters")):
+        code, err = tick(tmp_path, proj, PRIORS, M1, note)
+        assert code == 2 and "TICK M1" in err and why in err, (note, err)
+
+
+def test_an_annotation_is_not_a_change_of_the_item(tmp_path):
+    proj, head = project(tmp_path)
+    # backticks and dashes inside an annotation are not a new write set or title: no approval needed
+    note = "(open 2026-11-21: `a.py` still to do — blocked on the owner)"
+    line = next(ln for ln in (proj / "docs" / CI_PLAN).read_text().splitlines() if P2 in ln)
+    code, err = guard(tmp_path, None, None, rel=f"proj/docs/{CI_PLAN}", env={"CLAUDE_PROJECT_DIR": str(proj)},
+                      edit=(line, f"{line} {note}"))
+    assert code == 0, err
+    # a failing check still refuses the tick, whatever the evidence says
+    doc = proj / "docs" / "checked.md"
+    doc.write_text("- [ ] C1 Run it — done when: `false`\n")
+    resume = proj / "RESUME.md"
+    resume.write_text(resume.read_text().replace("### Reference docs", "- `docs/checked.md`\n\n### Reference docs"))
+    code, err = guard(tmp_path, None, None, rel="proj/docs/checked.md", env={"CLAUDE_PROJECT_DIR": str(proj)},
+                      edit=("- [ ] C1 Run it — done when: `false`", f"- [x] C1 Run it DONE 2026-11-21: merged {head} — done when: `false`"))
+    assert code == 2 and "its check failed" in err
