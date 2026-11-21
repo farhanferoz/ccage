@@ -82,18 +82,72 @@ plan_ticked_missing() {
         done
 }
 
-# plan_live_files BASE
-#   Every git-tracked markdown plan under BASE that still holds an open `- [ ]` box, one path
-#   per line (BASE/relative). A plan is a file in a plan/, plans/ or planning/ folder, or whose
-#   name has the word "plan", "plans" or "planning" (coverage-plan-2026.md, X_PLAN.md; not
-#   explanation.md or plant-care.md). Files under archive/ or records/ folders are left out:
-#   that is where superseded plans go (the programme-plan skill). Prints nothing outside git.
-plan_live_files() {
-    local base="$1"
-    # one grep over every candidate, not one per file; quotePath off keeps non-ASCII names plain
-    (cd "$base" 2>/dev/null && git -c core.quotePath=false ls-files -- '*.md' 2>/dev/null \
-        | grep -iE '(^|/)plan(s|ning)?/|(^|[/_.-])plan(s|ning)?([^/[:alpha:]][^/]*)?\.md$' \
+# _plan_keep_live
+#   Filter: reads relative .md paths on stdin, prints the ones that are plans (name rule in
+#   plan_live_files) outside archive/ and records/ folders and hold an open box. One grep over
+#   every candidate, not one per file. Run from the directory the paths are relative to.
+_plan_keep_live() {
+    grep -iE '(^|/)plan(s|ning)?/|(^|[/_.-])plan(s|ning)?([^/[:alpha:]][^/]*)?\.md$' \
         | grep -viE '(^|/)(archive|archived|records?)/' \
-        | xargs -r -d '\n' grep -lE '^[[:space:]]*[-*][[:space:]]+\[[[:space:]]\]' -- 2>/dev/null) \
-        | while IFS= read -r rel; do printf '%s/%s\n' "$base" "$rel"; done
+        | xargs -r -d '\n' grep -lE '^[[:space:]]*[-*][[:space:]]+\[[[:space:]]\]' -- 2>/dev/null
+}
+
+# plan_live_files BASE
+#   Every markdown plan under BASE that still holds an open `- [ ]` box, one path per line
+#   (BASE/relative). A plan is a file in a plan/, plans/ or planning/ folder, or whose name has
+#   the word "plan", "plans" or "planning" (coverage-plan-2026.md, X_PLAN.md; not explanation.md
+#   or plant-care.md). Files under archive/ or records/ folders are left out: that is where
+#   superseded plans go (the programme-plan skill). The git-tracked files are read first; when
+#   they hold no live plan, the files on disk are (find, pruned of CCAGE_PLAN_FIND_PRUNE folders,
+#   at most CCAGE_PLAN_FIND_MAXDEPTH deep, for at most CCAGE_PLAN_FIND_TIMEOUT_S seconds), because
+#   a project that keeps its plans out of git (notes/ in .git/info/exclude) is otherwise seen as
+#   having none. Measured 2026-11-21: git-tracked 0 live plans here, on disk 15.
+plan_live_files() {
+    local base="$1" prune depth secs live rel d
+    prune="${CCAGE_PLAN_FIND_PRUNE:-.git .venv venv node_modules __pycache__ site-packages .tox outputs}"
+    depth="${CCAGE_PLAN_FIND_MAXDEPTH:-8}"
+    secs="${CCAGE_PLAN_FIND_TIMEOUT_S:-2}"
+    # quotePath off keeps non-ASCII names plain
+    live="$(cd "$base" 2>/dev/null && git -c core.quotePath=false ls-files -- '*.md' 2>/dev/null | _plan_keep_live)"
+    if [ -z "$live" ] && [ -d "$base" ]; then
+        local prune_args=()
+        for d in $prune; do prune_args+=(-name "$d" -prune -o); done
+        local runner=()
+        command -v timeout >/dev/null 2>&1 && runner=(timeout "$secs")
+        live="$(cd "$base" && ${runner[@]+"${runner[@]}"} find . -maxdepth "$depth" ${prune_args[@]+"${prune_args[@]}"} -type f -name '*.md' -print 2>/dev/null \
+            | sed 's|^\./||' | _plan_keep_live)"
+    fi
+    printf '%s\n' "$live" | while IFS= read -r rel; do
+        [ -n "$rel" ] && printf '%s/%s\n' "$base" "$rel"
+    done
+}
+
+# plan_status_counts RESUME BASE
+#   Prints "OPEN TOTAL DOCS FINISHED" over EVERY document RESUME's `### Plan` names (no cap: the
+#   cap on the read-first directive is not a cap on counting): open boxes, all boxes, documents
+#   found on disk, and documents that are finished (no open box, at least one box).
+plan_status_counts() {
+    local resume="$1" base="$2" doc o d open_t=0 done_t=0 docs=0 finished=0
+    while IFS= read -r doc; do
+        [ -n "$doc" ] || continue
+        read -r o d _ <<<"$(plan_box_counts "$doc")"
+        open_t=$((open_t + o)); done_t=$((done_t + d)); docs=$((docs + 1))
+        [ "$o" -eq 0 ] && [ "$d" -gt 0 ] && finished=$((finished + 1))
+    done <<<"$(plan_doc_paths "$resume" "$base")"
+    printf '%s %s %s %s\n' "$open_t" "$((open_t + done_t))" "$docs" "$finished"
+}
+
+# plan_status_segment RESUME BASE
+#   The status line's plan segment, open items first: "plan 42 open / 102 (10 docs, 2 finished)".
+#   "plan: no checkboxes to count" when documents are listed but none carries a box; nothing when
+#   no listed document exists. (Open first, as session start reads "N of M items OPEN"; the older
+#   segment showed DONE/TOTAL over the first five documents and was read as the open count.)
+plan_status_segment() {
+    local open_t total docs finished
+    read -r open_t total docs finished <<<"$(plan_status_counts "$1" "$2")"
+    if [ "$total" -gt 0 ]; then
+        printf 'plan %s open / %s (%s docs, %s finished)\n' "$open_t" "$total" "$docs" "$finished"
+    elif [ "$docs" -gt 0 ]; then
+        printf 'plan: no checkboxes to count\n'
+    fi
 }

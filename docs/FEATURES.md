@@ -923,7 +923,10 @@ Every duration, window, cap and count the tools use is a variable with today's v
 | `CCAGE_RESUME_BUDGET_BLOCKS` | `3` | `## Session` blocks RESUME may hold before the budget hook, the auto-read NOTE and `ccage doctor` flag it. One variable for all three. |
 | `CCAGE_MEMORY_FLAT_INDEX_FILES` | `8` | Memory files past which an index with no `## ` headers is called flat. Read by the auto-read hook and `ccage doctor`. |
 | `CCAGE_PLAN_SPREAD_MIN` | `3` | Live plan files from which the session start prints the PLAN SPREAD line. |
-| `CCAGE_AUTOLOAD_MAX_PLANS` | `5` | Plan files named in the plan note the auto-read hook delivers. |
+| `CCAGE_AUTOLOAD_MAX_PLANS` | `5` | Plan files named in the read-first plan note the auto-read hook delivers. The count line (`PLAN COUNT`) and the status line's segment cover every listed document regardless. |
+| `CCAGE_PLAN_FIND_PRUNE` | `.git .venv venv node_modules __pycache__ site-packages .tox outputs` | Folder names the on-disk plan search skips. The search runs only when git holds no live plan (a project whose plans live in an untracked `notes/`). |
+| `CCAGE_PLAN_FIND_MAXDEPTH` | `8` | Directory depth of that search. |
+| `CCAGE_PLAN_FIND_TIMEOUT_S` | `2` | Seconds that search may run. |
 | `CCAGE_AUTOLOAD_STDIN_TIMEOUT_S` | `2` | Seconds the auto-read hook waits for its stdin JSON. |
 | `CCAGE_AUTOLOAD_REAP_TIMEOUT_S` | `10` | Seconds the auto-read hook lets `ccage-watch reap` run. |
 | `CCAGE_AUTOLOAD_WATCHER_START_TOLERANCE_S` | `2` | Seconds the recorded start of a live `ccage-auto` pid may differ from its real start. |

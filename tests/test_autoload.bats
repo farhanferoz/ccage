@@ -402,7 +402,7 @@ memdir() {
     # so a bare substring match passes even when the doc was dropped. Only the
     # NOTE block carries the absolute form.
     [[ "$output" == *"  - $REPO/plans/zz-governing.md"* ]]  # survived the cap, first slot
-    [[ "$output" == *"NOT shown or counted: ee.md"* ]]      # the drop is announced, by name
+    [[ "$output" == *"counted in PLAN COUNT below: ee.md"* ]]      # the drop is announced, by name
 }
 
 @test "plan pointer: missing refs do not consume cap slots" {
@@ -425,7 +425,7 @@ memdir() {
     printf '### Plan\n- plans/a.md\n- plans/b.md\n' > "$REPO/RESUME.md"
     run run_hook
     [ "$status" -eq 0 ]
-    [[ "$output" != *"NOT shown"* ]]
+    [[ "$output" != *"cap: first"* ]]
 }
 
 # ===== watcher-alive guard on the startup/resume clear (Task 6, failure ====

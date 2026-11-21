@@ -2,6 +2,13 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Plan counts say how much is open, over every listed document.** `plan_status_segment` (in `hooks/lib/plan_docs.sh`, for the status line) prints `plan 53 open / 102 (10 docs, 1 finished)`: open first, over every document RESUME's `### Plan` names. The old segment printed done over total (`33/62 steps`) for the first five documents only, and the owner read it as the open count; the ten documents held 53 open of 102. Session start prints the same totals as one `PLAN COUNT` line; the cap of five still limits the read-first list only (`CCAGE_AUTOLOAD_MAX_PLANS`). `statusline-command.sh` lives outside this repository: it needs its plan segment replaced by one call to `plan_status_segment`.
+- **Plan spread sees plans kept out of git.** When git holds no live plan, `plan_live_files` searches the files on disk (`CCAGE_PLAN_FIND_PRUNE`, `CCAGE_PLAN_FIND_MAXDEPTH`, `CCAGE_PLAN_FIND_TIMEOUT_S`). Measured 2026-11-21 in a project with `notes/` in `.git/info/exclude`: git held 0 live plans, the disk 15.
+
 ## [0.24.0] — 2026-11-20
 
 Minor: every timing, window and cap is a setting with today's value as its default, a tick's check gets four and a half minutes, and the README says the shared-settings cache problem looks fixed upstream.

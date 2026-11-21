@@ -313,7 +313,7 @@ if [ -f "$resume" ]; then
         fi
     done
     if [ -n "$plan_dropped" ]; then
-        plan_note="${plan_note}  (cap: first 5 in listing order; NOT shown or counted:${plan_dropped})
+        plan_note="${plan_note}  (cap: first ${max_plans} in listing order are shown here; also listed, counted in PLAN COUNT below:${plan_dropped})
 "
     fi
     if [ -n "$plan_note" ]; then
@@ -373,6 +373,14 @@ EOF
             printf '\nPLAN STATE (facts, checkable — not an instruction):\n%s' "$readiness"
             printf 'An item whose write set is unstated cannot be dispatched safely; state it or\n'
             printf 'ask, rather than guessing. Counts come from checkboxes only.\n'
+        fi
+        # The totals over EVERY listed document, open first (the lines above stop at the cap).
+        # Measured 2026-11-21: the status line counted the first five of ten documents and its
+        # done-over-total figure (33/62) was read as the open count; the ten held 53 open of 102.
+        read -r open_all total_all docs_all finished_all <<<"$(plan_status_counts "$resume" "$base")"
+        if [ "${total_all:-0}" -gt 0 ]; then
+            printf 'PLAN COUNT (fact): %s open of %s boxes in all %s listed documents; %s finished (no open box, still listed).\n' \
+                "$open_all" "$total_all" "$docs_all" "$finished_all"
         fi
     else
         # NO PLAN DOC REGISTERED — say so, do not go quiet (fixed 2026-08-11).
