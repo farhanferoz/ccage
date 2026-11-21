@@ -95,6 +95,8 @@ JOB_WORDS = "job|jobs|slurm|sbatch|isambard|turing|run"
 CLAIM_VERB = re.compile(r"\b(?:DONE|MERGED|PUSHED|SUPERSEDED|COMPLETE|COMPLETED)\b")
 NEGATION = re.compile(r"\bnot\s*$", re.IGNORECASE)
 TAG = re.compile(r"[A-Za-z]{1,4}\d{1,3}[a-z]?")       # an item ID people write in prose: W10, P3, M1, W05a
+STALE_DAYS = 14            # a plan untouched this long while the project moved on is reported stale
+REPORT_MAX_LINES = 8       # lines `plan-report --stale` prints
 CLAIM_WINDOW_CHARS = 80    # a verb counts for the item ID this close before it, on the same line
 CLAIM_MAX_ITEMS = 3        # items a claim refusal names (it stays a few lines)
 CLAIMS_STATE_KEEP = 2000   # claim keys remembered, so a claim is refused once
@@ -308,10 +310,14 @@ class Project:
 
 
 def project_of(plan: Path) -> Project:
-    """The project directory is $CLAUDE_PROJECT_DIR (set for hooks), else the plan's git root; its
-    RESUME is RESUME.md, or RESUME.<slot>.md under a valid CCAGE_SLOT (as resume_autoload.sh)."""
+    """The project directory is $CLAUDE_PROJECT_DIR (set for hooks), else the plan's git root."""
     given = os.environ.get("CLAUDE_PROJECT_DIR")
-    base = Path(given) if given and Path(given).is_dir() else git_root(plan)
+    return project_at(Path(given) if given and Path(given).is_dir() else git_root(plan))
+
+
+def project_at(base: Path) -> Project:
+    """The project in directory `base`: its RESUME is RESUME.md, or RESUME.<slot>.md under a valid
+    CCAGE_SLOT (as resume_autoload.sh), and its DECISIONS is DECISIONS.md."""
     slot = os.environ.get("CCAGE_SLOT", "")
     name = f"RESUME.{slot}.md" if slot and re.fullmatch(r"[A-Za-z0-9_-]+", slot) else "RESUME.md"
     resume, decisions = base / name, base / "DECISIONS.md"
@@ -772,6 +778,11 @@ class PlanItem:
         return word if TAG.fullmatch(word) else ""
 
     @property
+    def label(self) -> str:
+        """The item as a line of a report names it: its ID, else the start of its title."""
+        return self.tag or self.item.id[:30]
+
+    @property
     def text(self) -> str:
         return "\n".join([self.item.rest, self.item.lines])
 
@@ -907,6 +918,156 @@ def check_claims(stdin_text: str) -> int:
     except Exception as exc:  # noqa: BLE001 -- a broken check must not wedge a checkpoint
         log(f"CLAIMS-ERROR-allow {type(exc).__name__}: {exc}")
         return 0
+
+
+# ---- plan-report --stale: what a plan says against what is on disk -------------
+
+SUPERSEDES = re.compile(r"\b(?:supersede[sd]?|amend(?:s|ed)?)\s+(?:the\s+)?(?:rulings?\s+)?(D\d+(?:\s*(?:,|/|and|&)\s*D\d+)*)",
+                        re.IGNORECASE)
+RESUME_COMPLETE = re.compile(r"\b(?:COMPLETE|COMPLETED|DONE)\b")
+RESUME_NOT_STARTED = re.compile(r"\bnot started\b", re.IGNORECASE)
+PATH_LIKE = re.compile(r"[\w.~-]*/[\w./~-]*\.[A-Za-z0-9]{1,5}|~/[\w./~-]+|\./[\w./~-]+")
+
+
+def supersession_links(decisions_text: str) -> dict[str, set[str]]:
+    """Which decisions each entry of DECISIONS.md supersedes or amends, from its own words:
+    {"D385": {"D320", "D368"}}. An entry is not said to supersede itself."""
+    links: dict[str, set[str]] = {}
+    for did, entry in decision_entries(decisions_text).items():
+        found = {d for m in SUPERSEDES.finditer(entry) for d in DECISION_TOKEN.findall(m.group(1))} - {did}
+        if found:
+            links[did] = found
+    return links
+
+
+def stale_citations(items: list[PlanItem], links: dict[str, set[str]]) -> list[tuple[PlanItem, str, str]]:
+    """(item, cited decision, the later one that supersedes or amends it) for every open item that
+    cites a decision some entry supersedes or amends, and does not cite that entry. Explicit
+    citation only: similar wording between an item and a ruling flagged every item in a trial."""
+    found = []
+    for item in items:
+        if not item.open:
+            continue
+        cited = set(DECISION_TOKEN.findall(item.text))
+        for later, older in sorted(links.items()):
+            if later not in cited:
+                found += [(item, d, later) for d in sorted(older & cited)]
+    return found
+
+
+def short_doc(doc: Path) -> str:
+    """A document as a report line names it: its file name (plan file names carry the date and topic;
+    a full path would cost a line a hundred characters)."""
+    return doc.name
+
+
+def done_when_paths(item: PlanItem, root: Path) -> list[str]:
+    """Paths named after the item's "done when:" (its own words, then its lines) that exist now."""
+    start = PROSE_DONE_WHEN.search(item.text)
+    if not start:
+        return []
+    found = []
+    for tok in re.split(r"[\s`]+", item.text[start.end():]):
+        tok = tok.strip(PATH_STRIP)
+        if PATH_LIKE.fullmatch(tok) and "://" not in tok and existing_path(tok, root, item.doc):
+            found.append(tok)
+    return found
+
+
+def stale_findings(project: Project, run: bool) -> list[str]:
+    """One line per fact that says a listed plan has fallen behind the disk, the rulings or RESUME's
+    own words, in the order the owner should act: a tick that can be made, a ruling that overtook
+    an item, a document that is finished, a hand-over line that disagrees with the boxes, a
+    document nobody has touched while the project moved on. Empty when nothing is."""
+    items = plan_items(project)
+    docs = list(dict.fromkeys(i.doc for i in items))
+    out: list[str] = []
+    deadline = time.monotonic() + _setting("CCAGE_PLAN_GUARD_BUDGET_S", GUARD_BUDGET_S)
+    skipped = 0
+    for it in items:
+        if not it.open:
+            continue
+        if run and it.item.done_when:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                skipped += 1
+            elif run_check(it.item.done_when, project.root, min(left, _setting("CCAGE_PLAN_CHECK_TIMEOUT_S", CHECK_TIMEOUT_S)))[0]:
+                out.append(f"{it.label} in {short_doc(it.doc)}: its check now passes (`{it.item.done_when[:80]}`); "
+                           "tick it with DONE <date>: <evidence>.")
+        for path in done_when_paths(it, project.root)[:1]:
+            out.append(f"{it.label} in {short_doc(it.doc)}: its done-when names {path.rsplit('/', 1)[-1]}, which now exists; "
+                       "tick it if that is the deliverable.")
+    if skipped:
+        out.append(f"{skipped} checks were not run: the time budget (CCAGE_PLAN_GUARD_BUDGET_S) was spent.")
+    for it, older, later in stale_citations(items, supersession_links(read_text(project.decisions))):
+        out.append(f"{it.label} in {short_doc(it.doc)} cites {older}, which {later} supersedes or amends; "
+                   f"cite {later} in the item, or tick it SUPERSEDED by {later} with the owner's words from that entry.")
+    for doc in docs:
+        mine = [i for i in items if i.doc == doc]
+        n_open, n_done = sum(i.open for i in mine), sum(not i.open for i in mine)
+        if n_open == 0 and n_done > 0:
+            out.append(f"{short_doc(doc)} has no open item ({n_done} done): finished; move it from ### Plan "
+                       "to the reference section.")
+    plan_lines = plan_section(read_text(project.resume))
+    for doc in docs:
+        mine = [i for i in items if i.doc == doc]
+        n_open, n_done = sum(i.open for i in mine), sum(not i.open for i in mine)
+        for line in (ln for ln in plan_lines if doc.name in ln):
+            if RESUME_COMPLETE.search(line) and n_open:
+                out.append(f"RESUME's plan line for {short_doc(doc)} says it is done or complete; "
+                           f"{n_open} of its {n_open + n_done} items are open.")
+            elif RESUME_NOT_STARTED.search(line) and n_done:
+                out.append(f"RESUME's plan line for {short_doc(doc)} says not started; "
+                           f"{n_done} of its {n_open + n_done} items are ticked.")
+    days = _setting("CCAGE_PLAN_STALE_DAYS", STALE_DAYS)
+    moved = project_activity(project)
+    for doc in docs:
+        n_open = sum(i.open for i in items if i.doc == doc)
+        age = (moved - doc.stat().st_mtime) / 86400 if n_open else 0
+        if n_open and age >= days:
+            out.append(f"{short_doc(doc)} has not changed for {age:.0f} days while the project moved on; "
+                       f"its {n_open} open items may be stale.")
+    return out
+
+
+def plan_section(resume_text: str) -> list[str]:
+    """The lines of RESUME's `### Plan` section (up to the next heading of level 2 or 3)."""
+    out, inside = [], False
+    for line in resume_text.splitlines():
+        if re.match(r"^###\s+Plan\s*$", line):
+            inside = True
+        elif inside and line.startswith("##"):
+            break
+        elif inside:
+            out.append(line)
+    return out
+
+
+def project_activity(project: Project) -> float:
+    """When the project last moved: the later of its last commit and its RESUME's last write (epoch s)."""
+    times = [project.resume.stat().st_mtime] if project.resume else []
+    try:
+        out = subprocess.run(["git", "-C", str(project.root), "log", "-1", "--format=%ct"], capture_output=True,
+                             text=True, timeout=_setting("CCAGE_PLAN_GIT_TIMEOUT_S", GIT_TIMEOUT_S), check=False)
+        if out.returncode == 0 and out.stdout.strip():
+            times.append(float(out.stdout.strip()))
+    except (subprocess.SubprocessError, OSError, ValueError):
+        pass
+    return max(times, default=0.0)
+
+
+def stale_report(base: Path, run: bool) -> int:
+    """Print the stale findings (at most CCAGE_PLAN_REPORT_MAX_LINES lines, the last saying how many
+    more); nothing at all when there are none. Always exits 0: these are facts for the session."""
+    project = project_at(base)
+    found = stale_findings(project, run)
+    cap = int(_setting("CCAGE_PLAN_REPORT_MAX_LINES", REPORT_MAX_LINES))
+    if len(found) > cap:
+        found = [*found[:max(cap - 1, 0)], f"(+{len(found) - max(cap - 1, 0)} more)"]
+    log(f"STALE-REPORT {project.root}: {len(found)} line(s), checks {'run' if run else 'not run'}")
+    if found:
+        print("\n".join(found))
+    return 0
 
 
 # ---- review ---------------------------------------------------------------
@@ -1050,8 +1211,12 @@ def main(argv: list[str]) -> int:
     sub.add_parser("guard")
     sub.add_parser("claims")
     pr = sub.add_parser("plan-report")
-    pr.add_argument("plan")
+    pr.add_argument("plan", nargs="?")
     pr.add_argument("--no-run", action="store_true")
+    pr.add_argument("--stale", action="store_true",
+                    help="instead of one plan's table: what the plans RESUME lists say against the disk and the rulings")
+    pr.add_argument("--project", default=os.environ.get("CLAUDE_PROJECT_DIR") or ".",
+                    help="with --stale: the project directory (default $CLAUDE_PROJECT_DIR, else here)")
     rv = sub.add_parser("review")
     rv.add_argument("plan")
     rv.add_argument("id")
@@ -1065,6 +1230,10 @@ def main(argv: list[str]) -> int:
     if args.cmd == "claims":
         return check_claims(sys.stdin.read())
     if args.cmd == "plan-report":
+        if args.stale:
+            return stale_report(Path(args.project).resolve(), not args.no_run)
+        if not args.plan:
+            ap.error("plan-report needs a plan file, or --stale")
         return plan_report(Path(args.plan), not args.no_run)
     # 1 means NEEDS_WORK; a review that could not be made exits 2.
     try:

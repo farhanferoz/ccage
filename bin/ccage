@@ -9,7 +9,7 @@
 #   handoff      — produce a Markdown brief from a session JSONL
 #   doctor       — backfill session-docs hooks + report a RESUME/memory worklist
 #   enable-mcp   — opt the current project into an MCP server (project .mcp.json)
-#   plan-report  — Progress items of a plan with their done-when checks run now
+#   plan-report  — Progress items of a plan with their done-when checks run now; --stale: plans that fell behind
 #   review       — independent model review of one plan item
 #   disable-mcp  — remove an MCP server from the current project's .mcp.json
 #   -h --help    — this message
@@ -147,7 +147,7 @@ Commands:
                 .mcp.json — never a cage's .claude.json). MCP stays per-project by
                 design; agents/skills are the globally shared part.
   disable-mcp   Remove an MCP server from the current project's .mcp.json.
-  plan-report   Table of a plan's Progress items with their done-when checks run now
+  plan-report   Table of a plan's Progress items with their done-when checks run now; --stale lists the plans RESUME names that fell behind
                 (--no-run to skip); exits non-zero if a ticked item's check fails.
   review        ccage review <plan.md> <ID> [--diff RANGE] [--files F...] [--model opus]
                 [--effort high]: independent model review of one plan item, saved to

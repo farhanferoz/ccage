@@ -65,3 +65,18 @@ fire() {
     CCAGE_RESUME_BUDGET_MODE=observe run -0 fire "$P/RESUME.md" "   $W10"
     [[ "$output" == *"W10 in docs/work_list_2026-11-21.md"* ]]
 }
+
+@test "B: session start prints the stale-plan facts, and nothing for a project with none" {
+    export CCAGE_NO_INTERACTIVE_RESOLVE=1
+    run bash -c 'cd "$1" && "$2" </dev/null' _ "$P" "$BATS_TEST_DIRNAME/../share/hooks/resume_autoload.sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"PLAN STALE (facts, checkable"* ]]
+    [[ "$output" == *"W1 in work_list_2026-11-19.md cites D368, which D385 supersedes"* ]]
+    [[ "$output" == *"plan_gs32_input_following_sizes_2026-11-16.md has no open item (5 done)"* ]]
+    # a project whose open item is annotated, whose rulings supersede nothing it cites and
+    # whose plan is not finished has nothing to say
+    printf '%s\n' '- [ ] A1 open (open 2026-11-21: waiting on the owner)' > "$P/docs/a.md"
+    printf '### Plan\n- docs/a.md — in progress\n' > "$P/RESUME.md"
+    run bash -c 'cd "$1" && "$2" </dev/null' _ "$P" "$BATS_TEST_DIRNAME/../share/hooks/resume_autoload.sh"
+    [[ "$output" != *"PLAN STALE"* ]]
+}

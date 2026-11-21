@@ -5,8 +5,10 @@ the payload shape and the exit code are all under test.
 """
 import argparse
 import json
+import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 
@@ -327,3 +329,70 @@ def test_an_annotation_is_not_a_change_of_the_item(tmp_path):
     code, err = guard(tmp_path, None, None, rel="proj/docs/checked.md", env={"CLAUDE_PROJECT_DIR": str(proj)},
                       edit=("- [ ] C1 Run it — done when: `false`", f"- [x] C1 Run it DONE 2026-11-21: merged {head} — done when: `false`"))
     assert code == 2 and "its check failed" in err
+
+
+# ---- plan-report --stale (plan-staleness fix, part B) -------------------------------------------
+
+def stale(tmp_path, proj, *flags, env=None):
+    """`ccage plan-report --stale` on a project; its stdout lines."""
+    cfg = tmp_path / "cfg"
+    cfg.mkdir(exist_ok=True)
+    r = subprocess.run(["python3", str(ROOT / "lib" / "ccage_plan.py"), "plan-report", "--stale", "--project", str(proj), *flags],
+                       capture_output=True, text=True, check=False,
+                       env={"PATH": "/usr/bin:/bin", "CLAUDE_CONFIG_DIR": str(cfg), **(env or {})})
+    assert r.returncode == 0, r.stderr
+    return r.stdout.splitlines()
+
+
+def test_stale_report_names_what_the_disk_and_the_rulings_overtook(tmp_path):
+    proj, _ = project(tmp_path)
+    audit = proj / "notes/design/project_admin/ci_lint_checks/test_audit_part1_2026-11-19.csv"
+    audit.parent.mkdir(parents=True)
+    audit.write_text("file,verdict\n")
+    out = "\n".join(stale(tmp_path, proj, "--no-run"))
+    # an open item whose done-when names a file that now exists
+    assert "P1 in plan_ci_green_and_test_pruning_2026-11-19.md: its done-when names test_audit_part1_2026-11-19.csv, which now exists" in out
+    # two open items cite decisions that D385 supersedes (D320, D368); an item citing D385 itself is not named
+    assert "W1 in work_list_2026-11-19.md cites D368, which D385 supersedes" in out
+    assert "4. in plan_paper_runs_after_state_following_trial_2026-11-17.md cites D320, which D385 supersedes" in out
+    # a finished document, and the RESUME line that says it was not started
+    assert "plan_gs32_input_following_sizes_2026-11-16.md has no open item (5 done): finished" in out
+    assert "says not started; 5 of its 5 items are ticked" in out
+    # the lines are capped, the last one saying how many more; the open check was not run
+    capped = stale(tmp_path, proj, "--no-run", env={"CCAGE_PLAN_REPORT_MAX_LINES": "2"})
+    assert len(capped) == 2 and capped[1] == "(+4 more)"
+    # an item that cites the superseding decision as well is not stale
+    doc = proj / "docs" / "work_list_2026-11-19.md"
+    doc.write_text(doc.read_text().replace("W1 J1 (D368)", "W1 J1 (D368, amended by D385)"))
+    assert "W1 in work_list_2026-11-19.md" not in "\n".join(stale(tmp_path, proj, "--no-run"))
+
+
+def test_stale_report_runs_checks_only_when_asked_and_is_silent_when_clean(tmp_path):
+    proj, _ = project(tmp_path)
+    (proj / "docs" / "extra.md").write_text("- [ ] E1 passes already — done when: `true`\n- [ ] E2 does not — done when: `false`\n")
+    resume = proj / "RESUME.md"
+    resume.write_text(resume.read_text().replace("### Reference docs", "- `docs/extra.md` — extra items.\n\n### Reference docs"))
+    assert not [ln for ln in stale(tmp_path, proj, "--no-run") if "extra.md" in ln]
+    lines = [ln for ln in stale(tmp_path, proj) if "extra.md" in ln]
+    assert len(lines) == 1 and lines[0].startswith("E1 in extra.md: its check now passes (`true`)")
+    # a project with nothing to say prints nothing at all
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    (clean / "p.md").write_text("- [ ] A1 open — done when: `false`\n")
+    (clean / "RESUME.md").write_text("### Plan\n- p.md — in progress\n")
+    assert stale(tmp_path, clean) == []
+
+
+def test_stale_report_flags_a_plan_untouched_while_the_project_moved_on(tmp_path):
+    proj, _ = project(tmp_path)
+    resume = proj / "RESUME.md"
+    resume.write_text(resume.read_text().replace("variance parts; waits for go.", "variance parts; COMPLETE."))
+    old = time.time() - 30 * 86400
+    for name in ("plan_variance_parts_and_state_dependence_2026-11-17.md", "plan_gs32_input_following_sizes_2026-11-16.md"):
+        os.utime(proj / "docs" / name, (old, old))
+    out = "\n".join(stale(tmp_path, proj, "--no-run"))
+    assert "plan_variance_parts_and_state_dependence_2026-11-17.md has not changed for 30 days" in out and "its 2 open items" in out
+    assert not [ln for ln in out.splitlines() if "gs32" in ln and "has not changed" in ln]    # a finished document is finished, not stale
+    assert "says it is done or complete; 2 of its 4 items are open" in out
+    # the age is a setting
+    assert "has not changed" not in "\n".join(stale(tmp_path, proj, "--no-run", env={"CCAGE_PLAN_STALE_DAYS": "60"}))

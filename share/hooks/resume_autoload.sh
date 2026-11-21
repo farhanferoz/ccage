@@ -426,6 +426,22 @@ EOF
     fi
 fi
 
+# ---- 1e. plan staleness: what the listed plans say against the disk and the rulings ----
+# FACTS from `ccage_plan.py plan-report --stale` (checks not run at session start; /checkpoint runs
+# them): an open item whose deliverable now exists, one that cites a ruling a later one supersedes,
+# a finished document still listed, a hand-over line that disagrees with the boxes, a plan nobody has
+# touched while the project moved on. Silent when there is nothing; at most 8 lines. Measured
+# 2026-11-21: 11 of 53 open items had been done or overtaken for 1 to 5 days with nothing saying so.
+if [ -f "$resume" ] && command -v python3 >/dev/null 2>&1; then
+    for _plan_py in "$(dirname "${BASH_SOURCE[0]}")/ccage_plan.py" "$(dirname "${BASH_SOURCE[0]}")/../../lib/ccage_plan.py"; do
+        [ -f "$_plan_py" ] && break
+    done
+    if [ -f "$_plan_py" ]; then
+        plan_stale="$(CLAUDE_PROJECT_DIR="$base" CCAGE_SLOT="${CCAGE_SLOT:-}" python3 "$_plan_py" plan-report --stale --no-run --project "$base" 2>/dev/null)"
+        [ -n "$plan_stale" ] && printf '\nPLAN STALE (facts, checkable; each line names the edit that settles it):\n%s\n' "$plan_stale"
+    fi
+fi
+
 # ---- 1b. post-compaction nudge ----
 # After auto-compaction (or a manual /compact) the conversation is summarized and
 # the RESUME above is only as fresh as the last /checkpoint. A hook can't run the
