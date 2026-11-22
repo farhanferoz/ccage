@@ -2342,6 +2342,19 @@ fakewatch() {
     [[ "$output" == *"background job"* ]]
 }
 
+# The harness's own list of running tasks (Stop payload `background_tasks`). No
+# test fed it until 2026-11-22, when five idle agent-team teammates in it made
+# every unwatched stop demand a watcher. A shell task must still be caught.
+@test "stop-guard: payload tasks: a running shell task is caught, an idle teammate is not" {
+    stopg "{\"session_id\":\"pt1\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All done here.\",\"background_tasks\":[{\"id\":\"b1\",\"type\":\"shell\",\"status\":\"running\"}]}" \
+        "$(fakewatch)"
+    [[ "$output" == *"1 background job(s) still running (b1)"* ]]
+    stopg "{\"session_id\":\"pt2\",\"cwd\":\"$REPO\",\"last_assistant_message\":\"All done here.\",\"background_tasks\":[{\"id\":\"t1\",\"type\":\"teammate\",\"status\":\"running\"}]}" \
+        "$(fakewatch)"
+    [ -z "$output" ]
+    grep -q "src=payload agents=0 jobs=0 kinds=teammate:1" "$CAGE/stop_continuation_guard.log"
+}
+
 @test "stop-guard: a FINISHED background job is not a reason to block" {
     bgjob bg2 job-b 'output...
 [exited with code 0]'

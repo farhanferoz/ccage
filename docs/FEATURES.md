@@ -917,6 +917,8 @@ Every duration, window, cap and count the tools use is a variable with today's v
 
 `share/hooks/stop_continuation_guard.sh`. A value that is not a non-negative number is ignored, the default is used and one `SETTING-IGNORED` line goes to `stop_continuation_guard.log`. (`CCLAUDE_STOPGUARD_MODE` and `CCLAUDE_STOPGUARD_MAX` are older and unchanged.) The hook also reads `CCAGE_AUTOCK_INJECTION_TOLERANCE_S`, `CCAGE_AUTOCK_TYPED_SCAN_BYTES` and `CCAGE_AUTOCK_JOB_TAIL_CHARS` above.
 
+What is still running comes from the Stop payload's `background_tasks` when Claude Code sends it, and from the job files on disk otherwise. A `subagent` task feeds the idle-subagents check, and any other running task counts as a background job that needs a watcher, except a `teammate`: the payload reports an idle teammate as running, so teammates feed neither check. Each decision line in the log ends with `kinds=`, the running tasks counted by type (`unknown` when the list was inferred from disk).
+
 | Variable | Default | Controls |
 |---|---|---|
 | `CCAGE_STOPGUARD_LIVE_WINDOW_S` | `180` | Seconds a subagent transcript may be untouched and still count as alive. |

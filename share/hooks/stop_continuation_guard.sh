@@ -50,6 +50,7 @@
 payload="$(cat 2>/dev/null || true)"
 
 python3 - "$payload" <<'PY'
+import collections
 import datetime
 import json
 import os
@@ -147,6 +148,14 @@ TERMINAL_JOB_MARKERS = ("[exited with code", "[killed]")
 # A task that finished is simply absent afterwards ("background_tasks": []).
 TASK_RUNNING = "running"
 TASK_KIND_SUBAGENT = "subagent"
+# An agent-team teammate. MEASURED 2026-11-22 (`kinds=teammate:5` in the log):
+# five teammates idle for one to two hours after their work landed were still
+# reported "running", so every stop with no watcher armed was refused as "5
+# background job(s) still running" -- a remedy no watcher can satisfy, because
+# nothing external is pending. The payload does not say whether a teammate is
+# idle or working, so it feeds NEITHER trigger (an unmeasurable condition must
+# never manufacture a block); the decision log still counts it under `kinds`.
+TASK_KIND_TEAMMATE = "teammate"
 
 
 def allow():
@@ -762,9 +771,12 @@ if isinstance(_bg, list):
     agents = [str(t.get("id")) for t in _running
               if t.get("type") == TASK_KIND_SUBAGENT]
     jobs = [str(t.get("id")) for t in _running
-            if t.get("type") != TASK_KIND_SUBAGENT]
+            if t.get("type") not in (TASK_KIND_SUBAGENT, TASK_KIND_TEAMMATE)]
+    KINDS = ",".join("%s:%d" % kv for kv in sorted(
+        collections.Counter(str(t.get("type")) for t in _running).items())) or "none"
 else:
     SRC = "inference"
+    KINDS = "unknown"
     agents = live_agents()
     jobs = live_background_jobs()
 
@@ -789,10 +801,12 @@ def log_decision(verdict, path):
     """One line per stop, allow included. A log that only recorded refusals made
     the false "still running" of 2026-10-05 undiagnosable: the allows around it
     left no trace of what the guard had believed. `src` says whether the running
-    set came from the payload or from disk inference."""
-    append_log("%s %s DECISION=%s path=%s src=%s agents=%d jobs=%d" % (
+    set came from the payload or from disk inference. `kinds` counts the running
+    tasks by their payload type: on 2026-11-22 "jobs=5" with nothing running
+    was five idle agent-team teammates, and no field said so."""
+    append_log("%s %s DECISION=%s path=%s src=%s agents=%d jobs=%d kinds=%s" % (
         time.strftime("%Y-%m-%dT%H:%M:%S"), MODE.upper(), verdict, path, SRC,
-        len(agents), len(jobs)))
+        len(agents), len(jobs), KINDS))
 
 
 # Every stop, allow or block. A record that only appeared on refusals would be
