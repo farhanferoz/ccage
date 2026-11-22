@@ -2,6 +2,18 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.26.0] — 2026-11-22
+
+Minor: `/checkpoint`, `/keepwarm` and the hook that delivers `RESUME.md` and `DECISIONS.md` after `/clear` also ship as the `session-continuity` plugin, so they work without ccage.
+
+### Added
+
+- **The `session-continuity` plugin, from ccage's own files.** `plugin/` holds `/checkpoint`, `/keepwarm` and `session_doc_chunk.sh` with a `hooks.json` that registers the hook exactly as ccage seeds it (12 parts each for RESUME and DECISIONS, all four SessionStart sources). Install it from the claude-skills marketplace (`/plugin install session-continuity@claude-skills`). ccage installs the same files from the same place, so there is one copy of each. With both installed, the plugin's hook sees ccage's registration in the config dir's `settings.json` and stays silent (logged), so nothing is delivered twice.
+
+### Changed
+
+- **The two skills work without ccage.** Every step that runs a ccage command (`ccage plan-report`, `ccage handoff` for `--from-session`, `ccage-auto`) now runs only when that command is on PATH and says what to do otherwise; nothing was removed. `share/skills/` keeps `/checkpoint-threshold` and `/skill-catalog`, which only make sense under ccage.
+
 ## [0.25.1] — 2026-11-22
 
 Patch: the stop guard no longer refuses to stop over idle agent-team teammates, and its log names the type of each running task.
