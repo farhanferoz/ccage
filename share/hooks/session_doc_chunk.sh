@@ -168,7 +168,7 @@ fi
 # A document may cap its OWN delivery with a header line in its first 20 lines:
 #     <!-- ccage: max-chars=60000 -->   (any text may follow the number)
 # For a register that keeps a complete index on top, the head is the useful part
-# and the rest is greppable on disk. MEASURED 2026-10-05: autocast-private's
+# and the rest is greppable on disk. MEASURED 2026-10-05: a research project's
 # 615 KB register cost ~134k tokens at every session start and STILL lost its
 # last 48% to capacity. Declared in the file, not in an env var, so it travels
 # with the file to every machine and cage, and a document without the line is

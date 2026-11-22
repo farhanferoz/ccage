@@ -154,7 +154,7 @@ make_decisions() {
 }
 
 @test "a document can cap its own delivery with a header line, and says where the rest is" {
-    # The register that started this (autocast-private, 2026-10-05) is 615 KB with
+    # The register that started this (a research project, 2026-10-05) is 615 KB with
     # a complete index on top; delivering 56 parts of it cost ~134k tokens at every
     # session start and STILL dropped 48% from the end. With the index on top, the
     # head is the useful part: the file declares how much of it to deliver.

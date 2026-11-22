@@ -4,7 +4,7 @@
 `tests/test_supervisor_wait.py` (44 cases) covering every row of §4. Verification, and the two places
 this differs from the spec as written, are recorded in §7.
 
-**Target:** `bin/ccage-auto` (installed copy `/home/ff235/.local/bin/ccage-auto`; edit the repo source and
+**Target:** `bin/ccage-auto` (installed copy `~/.local/bin/ccage-auto`; edit the repo source and
 reinstall). `bin/ccage-watch` needs **no change** — every field the fix reads is already written.
 **Design it amends:** `plans/2026-08-16-idle-session-supervisor.md`. Line numbers below are from the installed copy
 on 2026-09-12; grep for the symbol, do not trust the number.

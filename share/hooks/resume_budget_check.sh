@@ -133,7 +133,7 @@ esac
 tier_files() {
     # BOTH anchors, because neither alone is right. $HOME/.claude is where the
     # loaders actually read from here (the doctrine hook hard-codes it, and this
-    # cage's CLAUDE_CONFIG_DIR — measured: /home/ff235/.claude-ccage — contains no
+    # cage's CLAUDE_CONFIG_DIR — measured: ~/.claude-ccage — contains no
     # CLAUDE.md whatsoever, so keying off it alone would match nothing and this
     # guard would be inert from birth). CLAUDE_CONFIG_DIR is the right answer on a
     # machine with no ccage. Identical strings collapse in the dedupe below; a file

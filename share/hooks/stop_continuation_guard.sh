@@ -205,10 +205,10 @@ if not session_id:
 # "the current working directory when the hook is invoked" and it follows
 # Claude's own `cd` (the docs ship a CwdChanged event for exactly that), while
 # CLAUDE_PROJECT_DIR stays at the root. MEASURED from a subdirectory of this
-# repo: payload cwd=/home/ff235/dev/ccage/tests while CLAUDE_PROJECT_DIR
-# =/home/ff235/dev/ccage -- and both the transcript
-# (<config>/projects/-home-ff235-dev-ccage/) and a background job started from
-# that subdirectory (/tmp/claude-<uid>/-home-ff235-dev-ccage/) stayed under the
+# repo: payload cwd=~/dev/ccage/tests while CLAUDE_PROJECT_DIR
+# =~/dev/ccage -- and both the transcript
+# (<config>/projects/-home-<user>-dev-ccage/) and a background job started from
+# that subdirectory (/tmp/claude-<uid>/-home-<user>-dev-ccage/) stayed under the
 # PROJECT slug.
 #
 # So a single `cd` pointed every path below at a directory that does not exist,

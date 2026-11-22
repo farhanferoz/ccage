@@ -139,7 +139,7 @@ older lives in `$changelog`.
          results go to the project's own findings ledger, working rules go to CLAUDE.md.
      A DURABLE fact in a transient section ROTS: it is rewritten by someone summarising, drifts from
      the register that owns it, and is then read FIRST because this file loads first. Measured
-     2026-08-15 (Oasis/StrategyA): three ratified rulings were read out of a `### Open questions`
+     2026-08-15 (a research project): three ratified rulings were read out of a `### Open questions`
      section here and put back to the user as undecided.
      A TRANSIENT fact in a durable register BLOATS it: a task, a running job or a "currently
      building" note in `DECISIONS.md` never gets deleted, because that file's rule is that entries
@@ -244,7 +244,7 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    sequence.** RESUME's shrink guard counts items, it does not compare labels, so
    renumbering a list is safe and only a falling TOTAL is blocked; roll the finished
    ones to CHANGELOG and renumber what is left.
-   MEASURED 2026-09-12 (autocast-private). One checkpoint carried four false claims
+   MEASURED 2026-09-12 (a research project). One checkpoint carried four false claims
    at once: a certificate reported expired that had been renewed hours earlier;
    overnight cluster jobs described as queued after they had finished and been
    auto-cancelled; a `### Next` list with two items numbered 0 and two numbered 0b,
@@ -265,7 +265,7 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    answer is "not decided yet" plus its `Revisit if:` trigger — never into a separate section
    here.** RESUME and a decisions register both holding rulings is two registers with no
    back-pressure: an item settled in one stays open in the other, and RESUME is read first, so the
-   stale copy wins. Measured 2026-08-15 on Oasis/StrategyA — three already-ratified rulings (a
+   stale copy wins. Measured 2026-08-15 on a research project — three already-ratified rulings (a
    borrowing ceiling, twice; an FX rate) were read out of RESUME's `### Open questions` and put
    back to the user as open. *"All 3 we have decided before. This is unacceptable."* One register
    holds both states; only there can they contradict each other visibly. `### Now` and `### Next` are
@@ -282,7 +282,7 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
      WITH its scope ("on all three cases") and the day it was given — never a
      "not decided yet" entry. Only something the owner was ASKED and has not
      answered may be filed as undecided, naming what was asked and when.
-     Measured 2026-09-28 (autocast-private): "retrain 4D like 4C, on all three
+     Measured 2026-09-28 (a research project): "retrain 4D like 4C, on all three
      cases" was filed as "owner not yet confirmed", and the next session built a
      third of it. *"This is pathetic."*
    - **`### Done (do not redo)`** — at most ~10 one-line items finished
@@ -291,11 +291,11 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
      loaded at session start, so work recorded only there is invisible to the
      next session. Add one line naming where findings and literature notes live
      (e.g. `notes/research/INDEX.md`), so "have we looked at this before" starts
-     there. Measured: autocast-private's owner had to say "we already did
+     there. Measured: a research project's owner had to say "we already did
      research on this, check that first" on 2026-09-07 and again on 09-11.
    - **Look before filing anything as open.** Before writing that a question is
      open or undecided, `grep -n` its topic in `DECISIONS.md`, the plan docs and
-     the notes index. Measured 2026-09-21 (ReviewSense): a repair settled in a
+     the notes index. Measured 2026-09-21 (a research project): a repair settled in a
      plan doc was put back to the owner as open — *"Again, you are reopening
      something we have already done."*
    - **Never promise a notification from a background task.** Backgrounded
@@ -370,7 +370,7 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    index and the head, and the full text stays on disk to `grep`. Every new
    ruling gets its index line AND its body. The price, measured 2026-10-05:
    ~0.42 tokens per char, on every session start and every `/clear` —
-   autocast-private's 615 KB register cost ~134k tokens a session and still lost
+   a research project's 615 KB register cost ~134k tokens a session and still lost
    its last 48% to capacity.
 7. **Apply everything surgically — `Edit`, never a full rewrite.** The in-place line
    updates plus the single same-day block edit are a handful of targeted `Edit`s; a

@@ -27,7 +27,7 @@ def test_lists_transcripts_nested_under_session_id_dir(tmp_path):
     live-fire run against a real 2.1.207 session (v0.11.0 shipped without
     this: list_subagent_transcripts(session_dir) alone always found nothing
     in production, so the breaker never tracked any real teammate)."""
-    project_dir = tmp_path / "-home-ff235-scratch-ccb-test"
+    project_dir = tmp_path / "-home-user-scratch-ccb-test"
     session_id = "46b8e302-cbd9-4249-b21b-2d1f480d2838"
     sub_dir = project_dir / session_id / "subagents"
     sub_dir.mkdir(parents=True)
@@ -477,13 +477,13 @@ def test_ledger_appends_transition_with_signals_and_config(tmp_path):
                       peak_elapsed_min=92.0, peak_stale_min=14.0)
     ledger_write(
         ledger, EventKind.NUDGE, rec, CCBConfig(max_tier=Tier.STOP),
-        session_id="1e0c8efe-964a-4167-b722-8019792e8645", cwd="/home/ff235/dev/Oasis/StrategyA",
+        session_id="1e0c8efe-964a-4167-b722-8019792e8645", cwd="/home/user/dev/proj",
         elapsed_min=92.0, stale_min=14.0, session_cost_usd=41.2, open_tasks=3,
         now_iso="2026-07-13T12:00:00+00:00", orchestrator_model="claude-opus-4-8[1m]",
     )
     ledger_write(  # second line appends, never truncates
         ledger, EventKind.RESOLVED, rec, CCBConfig(),
-        session_id="1e0c8efe-964a-4167-b722-8019792e8645", cwd="/home/ff235/dev/Oasis/StrategyA",
+        session_id="1e0c8efe-964a-4167-b722-8019792e8645", cwd="/home/user/dev/proj",
         elapsed_min=97.0, stale_min=0.0, session_cost_usd=42.0, open_tasks=2,
         now_iso="2026-07-13T12:05:00+00:00",   # model omitted -> captured as None
     )
@@ -652,7 +652,7 @@ def test_run_tick_alerts_stuck_agent_writes_ledger_resume_and_state(tmp_path, mo
     state_path = tmp_path / ".ccb-state.json"
 
     kw = dict(session_dir=session_dir, config_root=tmp_path, session_id="s-uuid",
-              cwd="/home/ff235/dev/proj", cfg=cfg, now=now, parent_transcript=None,
+              cwd="/home/user/dev/proj", cfg=cfg, now=now, parent_transcript=None,
               resume_path=resume, ledger_path=ledger, state_path=state_path,
               orchestrator_model="claude-sonnet-5")
 

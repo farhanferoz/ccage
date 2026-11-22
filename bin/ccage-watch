@@ -830,7 +830,7 @@ def _name_process(name):
     earlyoom picks its victim by that name: its --prefer favours python
     processes and its --avoid can only spare a name it can tell apart. As
     plain ``python3`` this wrapper was killed first (2026-10-18 13:57,
-    spark-ad27: three sessions ended while the job holding the memory was
+    the DGX: three sessions ended while the job holding the memory was
     untouched). Linux only; elsewhere a no-op.
     """
     try:

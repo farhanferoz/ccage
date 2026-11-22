@@ -9,7 +9,7 @@ PLAN.md / PHASE-6 / PHASE-7. v1 of this plan proposed a Stop-hook sleeper; resea
 > frontmatter, when-to-use, deterministic helper script), `install.sh` (how the
 > checkpoint skill + hooks are deployed; `--no-session-docs` bundle),
 > `tests/test_checkpoint.bats` (how a shipped skill is tested), `docs/FEATURES.md`
-> (doc style). Paths repo-relative from `/home/ff235/dev/ccage`.
+> (doc style). Paths repo-relative from `~/dev/ccage`.
 
 ---
 

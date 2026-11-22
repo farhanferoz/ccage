@@ -12,7 +12,7 @@ reports green.** Same rhythm as PLAN.md / PHASE-6.
 > `bin/ccage` + `share/ccage-handoff.sh` (how a subcommand is dispatched),
 > `docs/FEATURES.md` (doc style: `[shipped]`/`[planned]`, numbered rules, Opt-outs/Config),
 > `tests/test_slot.bats` + `tests/test_bootstrap.bats` (bats style, `load helpers`).
-> All paths in this doc are absolute or repo-relative from `/home/ff235/dev/ccage`.
+> All paths in this doc are absolute or repo-relative from `~/dev/ccage`.
 
 ---
 
@@ -115,7 +115,7 @@ From current Claude Code hooks docs (https://code.claude.com/docs/en/hooks.md), 
   - A **hook** in `settings.json` is **per-cage** and must be seeded into each cage; it
     cannot live only in `~/.claude/settings.json`.
 - **`~/.claude/CLAUDE.md` is read in caged sessions** (verified: loaded this session though
-  `CLAUDE_CONFIG_DIR=~/.claude-autocast-private` has no `CLAUDE.md`). So the CLAUDE.md anchor
+  `CLAUDE_CONFIG_DIR=~/.claude-a research project` has no `CLAUDE.md`). So the CLAUDE.md anchor
   can live there.
 - **`_ccage_pre_exec_hook "$PWD" "$CONFIG_DIR"`** runs on **every** `claude` launch, after
   bootstrap, before `command claude` — the natural seeding point. It already seeds UI keys

@@ -67,7 +67,7 @@ No `--json` flag. YAGNI; add when a consumer exists.
 ```markdown
 # Handoff: <session-id>
 
-**Project:** /home/ff235/dev/ccage
+**Project:** ~/dev/ccage
 **Started:** 2026-05-15 09:14
 **Last activity:** 2026-05-16 18:32 (4h 12m ago)
 **Turns:** 47 user / 47 assistant
@@ -88,7 +88,7 @@ _(27 earlier prompts elided — see raw JSONL at <path> for full history)_
 
 | Path | Read | Edit | Write |
 |---|---:|---:|---:|
-| /home/ff235/dev/ccage/RESUME.md | 3 | 1 | 0 |
+| ~/dev/ccage/RESUME.md | 3 | 1 | 0 |
 | ... |
 
 ## Commands run (deduplicated, trivial elided)
@@ -355,7 +355,7 @@ Out of scope for Phase 6a/6b. Track as Phase 6+.
    - CHANGELOG Unreleased.
 7. `simplify` → Opus review → commit.
 
-**Acceptance:** tests green; brief generated from `/home/ff235/dev/ccage` session is human-readable; jq dep failure produces clean error from `install.sh`.
+**Acceptance:** tests green; brief generated from `~/dev/ccage` session is human-readable; jq dep failure produces clean error from `install.sh`.
 
 ### Phase 6b — `-r` / `-c` interception
 

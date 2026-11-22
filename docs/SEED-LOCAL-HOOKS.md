@@ -1,7 +1,7 @@
 # Seeding the user's own hooks into every cage (`CCAGE_SEED_LOCAL_HOOKS`)
 
 **Status: implemented + released in v0.12.0.**
-Written 2026-07-15 by the StrategyA session that found the bug. Release is the user's call.
+Written 2026-07-15 by the research-project session that found the bug. Release is the user's call.
 
 > **2026-07-16 addendum — the user has taken this up for release.** Read
 > **"2026-07-16 — the design got tested in the wild, and it was right"** below before

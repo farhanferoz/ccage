@@ -249,7 +249,7 @@ STALL_IDLE = 600.0      # silent-stall watchdog: while NUDGED, if this many
                         # seconds pass since the last nudge with ZERO transcript
                         # growth, the model went quiet without the sentinel
                         # (observed: it checkpoints, then hands the clear
-                        # decision back to an absent human — StrategyA
+                        # decision back to an absent human — a research project
                         # 2026-07-22). Occupancy cannot move on an idle session,
                         # so no occupancy branch will ever fire; without this
                         # the watcher sits NUDGED forever, silently. Idleness is
@@ -3760,7 +3760,7 @@ def _name_process(name):
     earlyoom picks its victim by that name: its --prefer favours python
     processes and its --avoid can only spare a name it can tell apart. As
     plain ``python3`` this wrapper was killed first (2026-10-18 13:57,
-    spark-ad27: three sessions ended while the job holding the memory was
+    the DGX: three sessions ended while the job holding the memory was
     untouched). Linux only; elsewhere a no-op.
     """
     try:

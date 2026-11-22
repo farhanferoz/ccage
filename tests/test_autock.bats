@@ -722,7 +722,7 @@ drive() {
 }
 
 @test "silent-stall watchdog re-nudges a quiet NUDGED session, then logs instead of nagging" {
-    # StrategyA 2026-07-22 incident class: the model checkpoints (or just goes
+    # A research project, 2026-07-22 incident class: the model checkpoints (or just goes
     # quiet) after the soft nudge WITHOUT printing the sentinel, and occupancy
     # sits below the re-nudge line — so no occupancy branch can ever fire and
     # the watcher would sit NUDGED forever. The watchdog must fire on
@@ -2204,7 +2204,7 @@ PY
 # --- ccage-auto's OWN keystrokes are not a present human (Task 9, 2026-08-16) -
 # The pty write ccage-auto uses to inject a nudge/poke/resume prompt is
 # indistinguishable from real typing: MEASURED against a real transcript
-# (/home/ff235/.claude-StrategyA/projects/-home-ff235-dev-Oasis-StrategyA/
+# (~/.claude-proj/projects/-home-user-dev-proj/
 # ad2baf5d-8082-4ad4-99f8-e3e6529dc0e1.jsonl), the 21:54:19.719Z resume prompt
 # carries origin: {"kind": "human"}, promptSource: "typed" -- the exact shape
 # sg4 above treats as a present human. Watcher._type() leaves a
