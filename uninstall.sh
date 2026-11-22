@@ -2,7 +2,8 @@
 # Remove ccage. Leaves per-project config dirs, credentials, and any
 # user-written claude-overrides.sh alone — those are user data. Also removes the
 # Phase 7 session-docs assets (hooks, /checkpoint skill, CLAUDE.md anchor), the
-# Phase 8 /keepwarm skill, and the Phase 9 /checkpoint-threshold skill, and
+# Phase 8 /keepwarm skill, the Phase 9 /checkpoint-threshold skill, the /skill-catalog
+# skill, every installed command (ccage, ccage-auto, ccage-watch, ccb-report) and the stop guard, and
 # unseeds ccage's two hook entries and any wrapped statusLine (weekly-limit
 # floor tee) from every cage's settings.json (all other keys survive) so no
 # cage is left executing a deleted hook script on session start. Never touches
@@ -44,20 +45,19 @@ for f in claude-isolation.sh claude-ccusage.sh; do
 done
 
 # CLI dispatcher + handoff library.
-if [ -f "$prefix/bin/ccage" ]; then
-    run rm -f "$prefix/bin/ccage"
-    printf 'removed %s/bin/ccage\n' "$prefix"
-fi
-if [ -f "$prefix/bin/ccage-auto" ]; then
-    run rm -f "$prefix/bin/ccage-auto"
-    printf 'removed %s/bin/ccage-auto\n' "$prefix"
-fi
+for name in ccage ccage-auto ccage-watch ccb-report; do
+    if [ -f "$prefix/bin/$name" ]; then
+        run rm -f "$prefix/bin/$name"
+        printf 'removed %s/bin/%s\n' "$prefix" "$name"
+    fi
+done
 ask_guard="${CCAGE_HOOKS_DIR:-$HOME/.claude/hooks}/autonomous_ask_guard.sh"
 if [ -f "$ask_guard" ]; then
     run rm -f "$ask_guard"
     printf 'removed %s\n' "$ask_guard"
 fi
-for f in "$prefix/share/ccage/lib/ccage_plan.py" "$prefix/share/ccage/prompts/review.md"; do
+for f in "$prefix/share/ccage/lib/ccage_plan.py" "$prefix/share/ccage/lib/ccb_types.py" \
+         "$prefix/share/ccage/lib/subagent_watch.py" "$prefix/share/ccage/prompts/review.md"; do
     if [ -f "$f" ]; then run rm -f "$f"; printf 'removed %s\n' "$f"; fi
 done
 if [ -f "$prefix/share/ccage/ccage-handoff.sh" ]; then
@@ -78,7 +78,16 @@ if [ -f "$prefix/share/ccage/claude-isolation.sh" ]; then
     run rm -f "$prefix/share/ccage/claude-isolation.sh"
     printf 'removed %s/share/ccage/claude-isolation.sh\n' "$prefix"
 fi
-# rmdir empty share/ccage dir if we left it behind, but don't force.
+# rmdir the empty lib/, prompts/ and share/ccage dirs if we left them behind, but don't force.
+for d in "$prefix/share/ccage/lib" "$prefix/share/ccage/prompts"; do
+    if [ -d "$d" ]; then
+        if [ "$dry_run" = 1 ]; then
+            printf '+ rmdir %s (if empty)\n' "$d"
+        elif rmdir "$d" 2>/dev/null; then
+            printf 'removed empty %s\n' "$d"
+        fi
+    fi
+done
 if [ -d "$prefix/share/ccage" ]; then
     if [ "$dry_run" = 1 ]; then
         printf '+ rmdir %s/share/ccage (if empty)\n' "$prefix"
@@ -111,7 +120,7 @@ fi
 
 # Session-docs assets (Phase 7): hooks, /checkpoint skill, CLAUDE.md anchor.
 hooks_dir="${CCAGE_HOOKS_DIR:-$HOME/.claude/hooks}"
-for f in "$hooks_dir/resume_autoload.sh" "$hooks_dir/session_doc_chunk.sh" "$hooks_dir/resume_budget_check.sh" "$hooks_dir/plan_contract_guard.sh" "$hooks_dir/ccage_plan.py" "$hooks_dir/ccage-statusline-tee.sh" "$hooks_dir/lib/plan_docs.sh"; do
+for f in "$hooks_dir/resume_autoload.sh" "$hooks_dir/session_doc_chunk.sh" "$hooks_dir/resume_budget_check.sh" "$hooks_dir/plan_contract_guard.sh" "$hooks_dir/ccage_plan.py" "$hooks_dir/ccage-statusline-tee.sh" "$hooks_dir/lib/plan_docs.sh" "$hooks_dir/stop_continuation_guard.sh"; do
     if [ -f "$f" ]; then run rm -f "$f"; printf 'removed %s\n' "$f"; fi
 done
 # lib/ may hold other files (the status line keeps its own); remove it only when empty.
@@ -156,6 +165,18 @@ if [ -d "$share_from/skills/checkpoint-threshold" ]; then
         printf '+ rmdir %s/skills/checkpoint-threshold (if empty)\n' "$share_from"
     elif rmdir "$share_from/skills/checkpoint-threshold" 2>/dev/null; then
         printf 'removed empty %s/skills/checkpoint-threshold\n' "$share_from"
+    fi
+fi
+
+# /skill-catalog skill — same removal semantics.
+for f in "$share_from/skills/skill-catalog/SKILL.md" "$share_from/skills/skill-catalog/skill-catalog.sh"; do
+    if [ -f "$f" ]; then run rm -f "$f"; printf 'removed %s\n' "$f"; fi
+done
+if [ -d "$share_from/skills/skill-catalog" ]; then
+    if [ "$dry_run" = 1 ]; then
+        printf '+ rmdir %s/skills/skill-catalog (if empty)\n' "$share_from"
+    elif rmdir "$share_from/skills/skill-catalog" 2>/dev/null; then
+        printf 'removed empty %s/skills/skill-catalog\n' "$share_from"
     fi
 fi
 

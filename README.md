@@ -41,7 +41,7 @@ An existing, different target is backed up first as `<file>.pre-update-<timestam
 | `--no-keepwarm` | Skip the `/keepwarm` skill |
 | `--no-checkpoint-threshold` | Skip the `/checkpoint-threshold` skill |
 
-Uninstall with `./uninstall.sh` (flags `--shell`, `--prefix`, `--dry-run`). It removes the wrapper, `ccage`, `ccage-auto`, the libraries, the hooks, the `/checkpoint`, `/keepwarm` and `/checkpoint-threshold` skills and ccage's hook entries in every cage's `settings.json`. It leaves per-project config dirs, credentials, `claude-overrides.sh`, and any repo's `RESUME.md` and `CHANGELOG.md` alone. It does not remove `ccage-watch`, `ccb-report` or the `/skill-catalog` skill, so delete those by hand.
+Uninstall with `./uninstall.sh` (flags `--shell`, `--prefix`, `--dry-run`). It removes everything `install.sh` put down: the wrapper, `ccage`, `ccage-auto`, `ccage-watch`, `ccb-report`, the libraries, the hooks, the `/checkpoint`, `/keepwarm`, `/checkpoint-threshold` and `/skill-catalog` skills and ccage's hook entries in every cage's `settings.json`. It leaves per-project config dirs, credentials, `claude-overrides.sh`, and any repo's `RESUME.md` and `CHANGELOG.md` alone.
 
 ## Quick use
 
@@ -66,6 +66,8 @@ ccusage-all               # ccusage across every cage
 ```
 
 Inside a session: `/checkpoint` before `/clear`, `/keepwarm` before stepping away, `/checkpoint-threshold` to retune `ccage-auto`, `/skill-catalog` to find an installed skill the session did not list.
+
+`ccage review` calls a model through the `agentcall` Python package, which is not public yet. Set `CCAGE_AGENTCALL_PYTHON` to an interpreter that has it installed. Every other command needs nothing beyond the requirements above.
 
 ## Configuration
 

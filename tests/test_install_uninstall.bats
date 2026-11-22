@@ -139,13 +139,14 @@ setup() {
     [ ! -e "$FAKE_HOME/.local/share/ccage/claude-isolation.sh" ]
 }
 
-@test "uninstall: bin/ccage and libraries removed" {
+@test "uninstall: every file install put down is removed (only the rc file and CLAUDE.md stay)" {
     HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
     HOME="$FAKE_HOME" "$REPO_ROOT/uninstall.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
-    [ ! -e "$FAKE_HOME/.local/bin/ccage" ]
-    [ ! -e "$FAKE_HOME/.local/share/ccage/ccage-handoff.sh" ]
-    [ ! -e "$FAKE_HOME/.local/share/ccage/ccage-enable-mcp.sh" ]
-    [ ! -e "$FAKE_HOME/.local/share/ccage/claude-isolation.sh" ]
+    # Whole population, not a list: a file install.sh adds later is covered without editing this test.
+    # The rc file is the user's (restored) and CLAUDE.md is the user's (anchor stripped).
+    left="$(cd "$FAKE_HOME" && find . -type f ! -path ./.bashrc ! -path ./.claude/CLAUDE.md | sort)"
+    [ -z "$left" ] || { printf 'left behind:\n%s\n' "$left"; false; }
+    [ ! -e "$FAKE_HOME/.local/share/ccage" ]
 }
 
 @test "installed bin/ccage handoff --help works (no source-tree access)" {
