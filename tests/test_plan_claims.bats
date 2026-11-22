@@ -19,6 +19,10 @@ setup() {
     LOG="$CLAUDE_CONFIG_DIR/resume_budget_check.log"
 }
 
+# sed_inplace SCRIPT FILE: in-place sed on GNU and BSD alike. `-i` with an attached suffix is the one
+# form both accept (BSD reads a bare `-i 's/...'` as a backup suffix: "invalid command code").
+sed_inplace() { sed -i.bak "$1" "$2" && rm -f "$2.bak"; }
+
 # fire FILE TEXT: the PostToolUse payload of an Edit of FILE that put TEXT in it, sent to the hook.
 fire() {
     python3 -c 'import json,sys; print(json.dumps({"tool_name":"Edit","tool_input":{"file_path":sys.argv[1],"old_string":"x","new_string":sys.argv[2]}}))' "$1" "$2" \
@@ -38,10 +42,10 @@ fire() {
 
 @test "C: an item that is ticked, or annotated with what remains, is not contradicted" {
     local doc="$P/docs/work_list_2026-11-21.md"
-    sed -i 's/^- \[ \] W10\. \(.*\)$/- [ ] W10. \1 (open 2026-11-21: settings part DONE; left: rule reads; blocked on job 8696014)/' "$doc"
+    sed_inplace 's/^- \[ \] W10\. \(.*\)$/- [ ] W10. \1 (open 2026-11-21: settings part DONE; left: rule reads; blocked on job 8696014)/' "$doc"
     grep -q "(open 2026-11-21" "$doc"
     run -0 fire "$P/RESUME.md" "   $W10"
-    sed -i 's/^- \[ \] W10\. /- [x] W10. /; s/ (open 2026-11-21:.*$//' "$doc"
+    sed_inplace 's/^- \[ \] W10\. /- [x] W10. /; s/ (open 2026-11-21:.*$//' "$doc"
     run -0 fire "$P/RESUME.md" "   $W10"
 }
 
@@ -101,8 +105,8 @@ fire() {
     # an edit that adds an unrelated entry says nothing about D385, whose citations are still open
     run -0 fire "$P/DECISIONS.md" "- **D500** (2026-11-22, owner 'y') A ruling that replaces nothing: items cite D320 freely."
     [[ "$output" != *"cites D3"* ]]
-    sed -i 's/^\(- \[ \] 4\. .*\)$/\1 (open 2026-11-21: Prodigy replaced, D385)/' "$P/docs/plan_paper_runs_after_state_following_trial_2026-11-17.md"
-    sed -i 's/^\(- \[ \] W1 .*\)$/\1 (open 2026-11-21: D385 replaced the optimizer)/' "$P/docs/work_list_2026-11-19.md"
+    sed_inplace 's/^\(- \[ \] 4\. .*\)$/\1 (open 2026-11-21: Prodigy replaced, D385)/' "$P/docs/plan_paper_runs_after_state_following_trial_2026-11-17.md"
+    sed_inplace 's/^\(- \[ \] W1 .*\)$/\1 (open 2026-11-21: D385 replaced the optimizer)/' "$P/docs/work_list_2026-11-19.md"
     run -0 fire "$P/DECISIONS.md" "$d385"
     [[ "$output" != *"cites D3"* ]]
 }

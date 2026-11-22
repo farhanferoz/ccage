@@ -468,7 +468,7 @@ def done_verdict(evidence: str, plan: Path, project: Project) -> Verdict:
     if wanted:
         have = set(decision_entries(read_text(project.decisions)))
         if wanted & have:
-            return Verdict("done", None, f"decision {sorted(wanted & have)[0]}")
+            return Verdict("done", None, f"decision {min(wanted & have)}")
     words = _words_setting("CCAGE_PLAN_JOB_WORDS", JOB_WORDS)
     numbers = re.findall(rf"\b(?:{words})\s+#?(\d{{3,}})\b", evidence, re.IGNORECASE)
     if numbers:
@@ -786,7 +786,7 @@ class PlanItem:
 
     @property
     def text(self) -> str:
-        return "\n".join([self.item.rest, self.item.lines])
+        return f"{self.item.rest}\n{self.item.lines}"
 
     @property
     def open(self) -> bool:
@@ -864,8 +864,8 @@ def claims_refusal(claims: list[Claim], root: Path) -> str:
     shown = int(_setting("CCAGE_PLAN_CLAIM_MAX_ITEMS", CLAIM_MAX_ITEMS))
     rows = []
     for c in claims[:shown]:
-        try:
-            doc = c.item.doc.relative_to(root)
+        try:   # the listed docs are resolved (listed_plans), so the root must be too: macOS /var is /private/var
+            doc = c.item.doc.relative_to(root.resolve())
         except ValueError:
             doc = c.item.doc
         rows.append(f'  {c.item.tag} in {doc}: RESUME says "{c.line[:110]}", the plan still shows it open.')
