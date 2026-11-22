@@ -28,8 +28,8 @@ bad()  { printf 'FAIL: %s\n' "$1"; fail=1; }
 # 1. shellcheck — EXACT file list from ci.yml (do not truncate the output).
 step "shellcheck (exact ci.yml file list)"
 if command -v shellcheck >/dev/null 2>&1; then
-    if shellcheck share/*.sh share/hooks/*.sh share/skills/checkpoint/*.sh \
-                  share/skills/keepwarm/*.sh install.sh uninstall.sh; then
+    if shellcheck share/*.sh share/hooks/*.sh plugin/hooks/*.sh plugin/skills/checkpoint/*.sh \
+                  plugin/skills/keepwarm/*.sh install.sh uninstall.sh; then
         ok "shellcheck"
     else
         bad "shellcheck"

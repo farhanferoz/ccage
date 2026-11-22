@@ -24,7 +24,12 @@
 # an explicit "part k/n" label, so the model can reassemble the document from
 # whatever order it lands in. Ordering is NOT a property this can rely on.
 #
-# Usage: session_doc_chunk.sh <kind> <k> <n> [maxlines]
+# Usage: session_doc_chunk.sh [--plugin] <kind> <k> <n> [maxlines]
+#   --plugin   the call comes from the session-continuity plugin's hooks.json.
+#              When ccage has already registered this hook in the config dir's
+#              settings.json, the plugin copy exits silently (logged) so RESUME
+#              and DECISIONS are not delivered twice. Decided from that fact at
+#              run time, never from a race between the two registrations.
 #   <kind>     resume | decisions. NOT a path: the file is resolved at RUN time
 #              from CLAUDE_PROJECT_DIR + CCAGE_SLOT, exactly as resume_autoload
 #              does. Baking an absolute path in at seed time would silently
@@ -53,6 +58,11 @@
 # Always exits 0; a SessionStart hook must never block a session from starting.
 # No `set -e`; a parse hiccup should no-op, not abort the start.
 
+plugin_call=0
+if [ "${1:-}" = "--plugin" ]; then
+    plugin_call=1
+    shift
+fi
 kind="${1:-}"
 k="${2:-}"
 n="${3:-}"
@@ -94,6 +104,18 @@ _log() {
 # here too so the opt-out actually takes effect in the cage the user set it for.
 if [ -n "${CCAGE_NO_AUTOLOAD:-}" ]; then
     _log "status=noop reason=opted-out"
+    exit 0
+fi
+
+# fact: the text ccage's own seeder writes into settings.json for part 1 of RESUME
+# (_ccage_seed_session_docs_hooks); its presence means ccage delivers the docs.
+ccage_registration='session_doc_chunk.sh resume 1 '
+# The plugin copy defers to ccage's registration: with both installed, every part
+# would otherwise arrive twice. The settings file is read at run time, so removing
+# ccage's hooks makes the plugin deliver again with no re-install. Without
+# --plugin (ccage's own registration) nothing here applies.
+if [ "$plugin_call" = 1 ] && grep -qF -- "$ccage_registration" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" 2>/dev/null; then
+    _log "status=noop reason=ccage-registered mode=plugin"
     exit 0
 fi
 

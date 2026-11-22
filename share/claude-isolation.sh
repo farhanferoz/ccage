@@ -200,7 +200,7 @@ _ccage_bootstrap_dir() {
 #
 # WHY 2N CHUNK ENTRIES, and why N is a fixed constant rather than a fit: the
 # reasoning, with its measurements, lives in the header of
-# share/hooks/session_doc_chunk.sh — the script that owns it. In short: a hook's
+# plugin/hooks/session_doc_chunk.sh — the script that owns it. In short: a hook's
 # output is capped at 10,000 chars, so each doc ships as N parts; N is CAPACITY,
 # seeded once, and the script decides at run time how many parts the current
 # file needs, so the docs may grow and shrink with no re-seeding.

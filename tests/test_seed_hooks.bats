@@ -192,3 +192,18 @@ JSON
     # Same commands as before — no duplicate set from the path change.
     [ "$(jq '[.hooks.SessionStart[]?.hooks[]?.command] | length' "$SETTINGS")" -eq "$SS_TOTAL" ]
 }
+
+@test "the session-continuity plugin's hooks.json registers exactly the chunk hooks ccage seeds, and its --plugin calls defer to the seeded file" {
+    CCAGE_SESSION_DOCS=1
+    _ccage_seed_session_docs_hooks "$CAGE"
+    local plugin_json="$BATS_TEST_DIRNAME/../plugin/hooks/hooks.json" want got
+    # Seeded: "bash <dir>/session_doc_chunk.sh <kind> <k> <n>"; plugin: the same with "--plugin" and no <dir>.
+    want=$(jq -r '.hooks.SessionStart[] | .matcher as $m | .hooks[].command
+                  | select(test("session_doc_chunk.sh")) | "\($m) \(sub("^.*session_doc_chunk.sh ";""))"' "$SETTINGS" | sort)
+    got=$(jq -r '.hooks.SessionStart[] | .matcher as $m | .hooks[].command
+                 | "\($m) \(sub("^.*session_doc_chunk.sh\"? --plugin ";""))"' "$plugin_json" | sort)
+    [ "$(wc -l <<<"$want")" -eq $((2 * CHUNKS)) ]
+    [ "$want" = "$got" ]
+    # The text the plugin copy looks for is present in what ccage really wrote.
+    grep -qF 'session_doc_chunk.sh resume 1 ' "$SETTINGS"
+}

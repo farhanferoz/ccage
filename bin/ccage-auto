@@ -281,7 +281,7 @@ WEEKLY_STALE_S = _num(os.environ.get("CCAGE_AUTOCK_WEEKLY_STALE_S"), 30 * 60.0) 
 # ---------------------------------------------------------------- keep-warm
 # One ping is a minimal turn that re-reads the cached conversation at the
 # cache-read price and resets the prompt-cache clock; a lapsed cache costs a full
-# rewrite. The clamps mirror share/skills/keepwarm/SKILL.md, which owns the
+# rewrite. The clamps mirror plugin/skills/keepwarm/SKILL.md, which owns the
 # manual loop for sessions that are not under ccage-auto.
 KEEPWARM_INTERVAL_MIN = 55.0     # minutes of transcript quiet before a ping
 KEEPWARM_INTERVAL_RANGE = (1.0, 59.0)   # >= the 1-hour TTL could never refresh it
@@ -937,7 +937,7 @@ class CacheTier(str, enum.Enum):
 def cache_tier(path):
     """The dominant prompt-cache tier of a session transcript.
 
-    Ported from share/skills/keepwarm/keepwarm-calc.sh `probe` (keep the two in
+    Ported from plugin/skills/keepwarm/keepwarm-calc.sh `probe` (keep the two in
     step): sum the 1-hour and 5-minute cache-write tokens over every row; 1h
     wins when it is present and at least as large, 5m when only it is present,
     otherwise unknown. Streams the file line by line, because a long session's

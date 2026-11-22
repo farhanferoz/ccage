@@ -212,7 +212,7 @@ fi
 if [ "$install_session_docs" = 1 ]; then
     hooks_dir="${CCAGE_HOOKS_DIR:-$HOME/.claude/hooks}"
     install_file "$REPO_ROOT/share/hooks/resume_autoload.sh"     "$hooks_dir/resume_autoload.sh"     0755
-    install_file "$REPO_ROOT/share/hooks/session_doc_chunk.sh"   "$hooks_dir/session_doc_chunk.sh"   0755
+    install_file "$REPO_ROOT/plugin/hooks/session_doc_chunk.sh" "$hooks_dir/session_doc_chunk.sh"   0755
     install_file "$REPO_ROOT/share/hooks/resume_budget_check.sh" "$hooks_dir/resume_budget_check.sh" 0755
     # Plan-contract guard (PreToolUse on Edit|Write|MultiEdit), seeded like the budget hook;
     # its logic is lib/ccage_plan.py, installed beside it.
@@ -222,8 +222,8 @@ if [ "$install_session_docs" = 1 ]; then
     install_file "$REPO_ROOT/share/hooks/lib/plan_docs.sh"       "$hooks_dir/lib/plan_docs.sh"       0644
 
     share_from="${CCAGE_SHARE_FROM:-$HOME/.claude}"
-    install_file "$REPO_ROOT/share/skills/checkpoint/SKILL.md"           "$share_from/skills/checkpoint/SKILL.md"
-    install_file "$REPO_ROOT/share/skills/checkpoint/checkpoint-init.sh" "$share_from/skills/checkpoint/checkpoint-init.sh" 0755
+    install_file "$REPO_ROOT/plugin/skills/checkpoint/SKILL.md"           "$share_from/skills/checkpoint/SKILL.md"
+    install_file "$REPO_ROOT/plugin/skills/checkpoint/checkpoint-init.sh" "$share_from/skills/checkpoint/checkpoint-init.sh" 0755
 
     # skill-catalog — searches every skill on disk and activates one on demand.
     # Inert in an unscoped cage (skills/ symlinked to master): it refuses --add
@@ -264,8 +264,8 @@ fi
 # settings.json seeding.
 if [ "$install_keepwarm" = 1 ]; then
     share_from="${CCAGE_SHARE_FROM:-$HOME/.claude}"
-    install_file "$REPO_ROOT/share/skills/keepwarm/SKILL.md"         "$share_from/skills/keepwarm/SKILL.md"
-    install_file "$REPO_ROOT/share/skills/keepwarm/keepwarm-calc.sh" "$share_from/skills/keepwarm/keepwarm-calc.sh" 0755
+    install_file "$REPO_ROOT/plugin/skills/keepwarm/SKILL.md"         "$share_from/skills/keepwarm/SKILL.md"
+    install_file "$REPO_ROOT/plugin/skills/keepwarm/keepwarm-calc.sh" "$share_from/skills/keepwarm/keepwarm-calc.sh" 0755
 fi
 
 # ---- Phase 9: /checkpoint-threshold skill ------------------------------------

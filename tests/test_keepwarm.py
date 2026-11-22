@@ -602,7 +602,7 @@ def test_cache_tier_agrees_with_the_shell_probe(tmp_path, one_h, five_m):
     t = _tier_of(tmp_path, one_h, five_m)
     shutil.copy(t, sd / "s.jsonl")
     out = subprocess.run(
-        ["bash", str(ROOT / "share/skills/keepwarm/keepwarm-calc.sh"), "probe", str(proj)],
+        ["bash", str(ROOT / "plugin/skills/keepwarm/keepwarm-calc.sh"), "probe", str(proj)],
         env={**os.environ, "CLAUDE_CONFIG_DIR": str(tmp_path / "cfg")},
         capture_output=True, text=True, check=True).stdout
     shell_tier = [ln.split("=", 1)[1] for ln in out.splitlines() if ln.startswith("tier=")][0]

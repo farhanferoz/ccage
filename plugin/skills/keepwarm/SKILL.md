@@ -35,6 +35,10 @@ Invocations:
 
 ## 0. Under `ccage-auto`: the watcher already does this
 
+**Runs only when the `ccage-auto` command is on PATH** (`command -v ccage-auto`).
+Without it, skip this whole section and treat the session as `unwatched`: the
+manual loop below is the whole skill and works on its own.
+
 `ccage-auto` pings by default: while the session sits idle it types one tiny
 turn every 55 minutes, up to 6 per idle stretch, and only when it is safe (no
 dialog waiting on the user, nothing half-typed, the cache on the 1-hour tier,
@@ -48,7 +52,9 @@ would double the cost. Check once, in one Bash call from the project dir:
 
 (`ccage-auto` exports both into the session it launches. This is the same
 `ccage-auto` command path `/checkpoint-threshold` shells out to; if the command
-is not found, say so plainly and fall through to the manual loop below.)
+is not found, say so plainly and fall through to the manual loop below. The
+`ccage-auto --keepwarm …` and `ccage-auto --status` calls in the table below run
+only under this check.)
 
 If `watched`:
 
@@ -205,4 +211,5 @@ output line.
 - A warm cache also serves `claude -r` / `-c` inside its lifetime (measured
   2026-10-05 on Claude Code 2.1.289: the whole prior prefix was read from
   cache). But pings stop when the session exits, so for a long absence after
-  exiting, point at `/checkpoint` or `ccage handoff` rather than arming this.
+  exiting, point at `/checkpoint` (or `ccage handoff`, where the `ccage` command is on
+  PATH) rather than arming this.

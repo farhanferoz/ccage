@@ -460,7 +460,7 @@ Closes the loop between the structural `ccage handoff` brief and a repo's durabl
 
 ### `/checkpoint` skill
 
-`share/skills/checkpoint/SKILL.md` (+ deterministic `checkpoint-init.sh`). Writes the session state **into `RESUME.md`** (slot-aware: `RESUME.<slot>.md` when `CCAGE_SLOT` is set), merging it with any threads carried in, and rolls older detail down into `CHANGELOG.md` so `RESUME.md` stays lean. `/checkpoint --tidy` additionally runs memory hygiene (regroup `MEMORY.md`, prune dead index links / orphan notes). `checkpoint-init.sh` is idempotent and adds `RESUME.md` / `CHANGELOG.md` to `.git/info/exclude` so continuity files never get committed.
+`plugin/skills/checkpoint/SKILL.md` (+ deterministic `checkpoint-init.sh`). Writes the session state **into `RESUME.md`** (slot-aware: `RESUME.<slot>.md` when `CCAGE_SLOT` is set), merging it with any threads carried in, and rolls older detail down into `CHANGELOG.md` so `RESUME.md` stays lean. `/checkpoint --tidy` additionally runs memory hygiene (regroup `MEMORY.md`, prune dead index links / orphan notes). `checkpoint-init.sh` is idempotent and adds `RESUME.md` / `CHANGELOG.md` to `.git/info/exclude` so continuity files never get committed.
 
 `/checkpoint --from-session [<id-prefix>]` covers the case the rest of the loop cannot: a session that ended **without** a checkpoint. Transcripts are retained in full on disk, so it runs `ccage handoff --stdout` against the previous session (the newest transcript is the live one, so it takes the next-newest unless given an id), reads the ~10 KB brief, and merges it into `RESUME.md` in place. Actions and outcomes reconstruct well; *rationale* does not, and the skill is required to say so rather than infer a plausible "why". Manual and opt-in by design — nothing runs at session start or end.
 
@@ -474,7 +474,7 @@ The **document bodies** are delivered by a second hook — see below.
 
 Claude Code caps **every** hook injection path — plain stdout, JSON `additionalContext`, `systemMessage`, `initialUserMessage` — at **10,000 characters** per hook output (verified in the 2.1.237 binary: the constant `Drp=1e4` feeding `nvt()`, called at all four sites). Past the cap, the output is written to disk and only a **2,000-character preview** reaches the model. A 76 KB decisions register therefore arrived as a 2 KB preview, and a 19 KB `RESUME.md` was silently losing most of itself the same way.
 
-`share/hooks/session_doc_chunk.sh` is registered once per **part**: `session_doc_chunk.sh <resume|decisions> <k> <n>`. Each invocation emits one balanced slice of the file, comfortably under the cap; together the slices reconstruct the document byte-for-byte. `/clear` re-runs every part, each of which re-reads from disk, so delivery stays fresh.
+`plugin/hooks/session_doc_chunk.sh` is registered once per **part**: `session_doc_chunk.sh <resume|decisions> <k> <n>`. Each invocation emits one balanced slice of the file, comfortably under the cap; together the slices reconstruct the document byte-for-byte. `/clear` re-runs every part, each of which re-reads from disk, so delivery stays fresh.
 
 Three properties are worth knowing:
 
@@ -639,7 +639,7 @@ When the transcript has been quiet for the interval, the watcher types `[keep-wa
 
 - keep-warm is on (launch setting, then the live control file), the TUI is ready, the watcher is in its normal state (never mid-nudge, mid-`/clear` or cooling down), the weekly floor does not own the session, and no `.ccage-session-done` marker exists for this run;
 - the latest context is at least `CCAGE_AUTOCK_KEEPWARM_MIN_TOKENS` (below that a rewrite costs cents) and below the soft checkpoint threshold;
-- the cache tier is the 1-hour one, using the same rule as `share/skills/keepwarm/keepwarm-calc.sh probe` (a 5-minute cache cannot be kept warm by a 55-minute ping, and an unknown tier is not guessed at);
+- the cache tier is the 1-hour one, using the same rule as `plugin/skills/keepwarm/keepwarm-calc.sh probe` (a 5-minute cache cannot be kept warm by a 55-minute ping, and an unknown tier is not guessed at);
 - fewer than `CCAGE_AUTOCK_KEEPWARM_MAX` pings have been sent in this idle stretch;
 - **no dialog is pending.** The last assistant message in the transcript must have no `tool_use` without a matching `tool_result`. A permission prompt, an `AskUserQuestion` menu and a plan approval all look exactly like that, and typing text plus Enter into one would choose an option on the user's behalf. The check reads the transcript, never the screen, and fails closed when the transcript cannot be read;
 - **no unsent draft.** The watcher forwards the user's stdin to the session, and any keystroke after the user's last Enter counts as a half-typed message that a ping must never be appended to. Terminal focus and mouse reports are not keystrokes. Where it cannot tell (Esc, Ctrl-U, a deleted line), it assumes a draft.
@@ -672,7 +672,7 @@ The two coexist without interfering. The supervisor's quiet window (300 s by def
 
 ## `/keepwarm` — bounded cache keep-warm loop [shipped — Phase 8]
 
-Skill at `share/skills/keepwarm/` (installed to the master skills dir; reaches every
+Skill at `plugin/skills/keepwarm/` (installed to the master skills dir; reaches every
 cage via the skills symlink, like `/checkpoint`). Invoke before stepping away:
 
 ```

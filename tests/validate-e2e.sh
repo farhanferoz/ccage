@@ -304,7 +304,7 @@ check "no hooks block without CCAGE_SESSION_DOCS" \
 echo "[12] checkpoint bootstrap, then auto-read re-injects RESUME"
 REPO_J="$TMP/repoJ"; mkdir -p "$REPO_J"
 ( cd "$REPO_J" && git init -q 2>/dev/null || true )
-( cd "$REPO_J" && bash "$REPO/share/skills/checkpoint/checkpoint-init.sh" bootstrap >/dev/null )
+( cd "$REPO_J" && bash "$REPO/plugin/skills/checkpoint/checkpoint-init.sh" bootstrap >/dev/null )
 check "bootstrap created RESUME.md"     test -f "$REPO_J/RESUME.md"
 check "bootstrap created CHANGELOG.md"  test -f "$REPO_J/CHANGELOG.md"
 ( cd "$REPO_J" && CLAUDE_CONFIG_DIR="$TMP/cage-j" bash "$REPO/share/hooks/resume_autoload.sh" ) > "$TMP/injected-j.txt" 2>/dev/null
@@ -331,7 +331,7 @@ KWSLUG=$(printf '%s' "$KWPROJ" | LC_ALL=C tr -c 'A-Za-z0-9' '-')
 mkdir -p "$KWCFG/projects/$KWSLUG" "$KWPROJ"
 printf '{"message":{"usage":{"cache_read_input_tokens":42000,"cache_creation":{"ephemeral_1h_input_tokens":9000,"ephemeral_5m_input_tokens":0}}}}\n' \
     > "$KWCFG/projects/$KWSLUG/s.jsonl"
-CLAUDE_CONFIG_DIR="$KWCFG" bash "$REPO/share/skills/keepwarm/keepwarm-calc.sh" probe "$KWPROJ" > "$TMP/kw-probe.txt"
+CLAUDE_CONFIG_DIR="$KWCFG" bash "$REPO/plugin/skills/keepwarm/keepwarm-calc.sh" probe "$KWPROJ" > "$TMP/kw-probe.txt"
 check "probe reports prefix size" grep -q 'peak_cache_read=42000' "$TMP/kw-probe.txt"
 check "probe reports cache tier"  grep -q 'tier=1h'               "$TMP/kw-probe.txt"
 

@@ -184,10 +184,17 @@ setup() {
     [ ! -e "$FAKE_HOME/.claude/hooks/ccage-statusline-tee.sh" ]
 }
 
-@test "install: /checkpoint skill lands in the master skills dir" {
+@test "install: /checkpoint and /keepwarm land in the master skills dir, from plugin/skills" {
     HOME="$FAKE_HOME" "$REPO_ROOT/install.sh" --shell bash --prefix "$FAKE_HOME/.local" >/dev/null
     [ -f "$FAKE_HOME/.claude/skills/checkpoint/SKILL.md" ]
     [ -x "$FAKE_HOME/.claude/skills/checkpoint/checkpoint-init.sh" ]
+    [ -f "$FAKE_HOME/.claude/skills/keepwarm/SKILL.md" ]
+    [ -x "$FAKE_HOME/.claude/skills/keepwarm/keepwarm-calc.sh" ]
+    # One copy of each file: the installed skills are the plugin's, not a second tree under share/.
+    cmp "$REPO_ROOT/plugin/skills/checkpoint/SKILL.md" "$FAKE_HOME/.claude/skills/checkpoint/SKILL.md"
+    cmp "$REPO_ROOT/plugin/skills/keepwarm/SKILL.md"   "$FAKE_HOME/.claude/skills/keepwarm/SKILL.md"
+    cmp "$REPO_ROOT/plugin/hooks/session_doc_chunk.sh" "$FAKE_HOME/.claude/hooks/session_doc_chunk.sh"
+    [ ! -e "$REPO_ROOT/share/skills/checkpoint" ] && [ ! -e "$REPO_ROOT/share/skills/keepwarm" ]
 }
 
 @test "install: CLAUDE.md anchor appended once and idempotent on re-run" {

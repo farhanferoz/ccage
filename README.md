@@ -460,7 +460,7 @@ To load them in every cage without a per-cage install, point `CCAGE_PLUGINS_FROM
 ./tests/bats/bin/bats tests/                    # the full bats suite
 ./tests/bats/bin/bats tests/test_config_dir_for.bats   # one file
 python3 -m pytest tests/ -q                     # the Python unit tests (needs pytest)
-shellcheck bin/ccage share/*.sh share/hooks/*.sh share/hooks/lib/*.sh share/skills/checkpoint/*.sh share/skills/keepwarm/*.sh install.sh uninstall.sh
+shellcheck bin/ccage share/*.sh share/hooks/*.sh share/hooks/lib/*.sh plugin/hooks/*.sh plugin/skills/checkpoint/*.sh plugin/skills/keepwarm/*.sh install.sh uninstall.sh
 tests/ci-local.sh                               # mirror of the CI steps
 ```
 

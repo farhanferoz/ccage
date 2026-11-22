@@ -11,7 +11,8 @@ effort: medium
 # /checkpoint
 
 One command that keeps a durable, lean `RESUME.md` so a session's state survives
-`/clear`. ccage seeds `SessionStart` hooks that deliver `RESUME.md` (and
+`/clear`. A `SessionStart` hook (the session-continuity plugin's, or ccage's when
+ccage is installed) delivers `RESUME.md` (and
 `DECISIONS.md`) into the model's context on every (re)entry — including right
 after `/clear`. Both are delivered in labelled parts, because a single hook's
 output is capped at 10,000 characters. So the workflow is just:
@@ -86,7 +87,8 @@ same-directory case.
   (§3 step 8). This is the only mode that writes it; use
   it when the session's actual task is complete and you're winding down for real,
   not for a routine mid-work save. It's what lets background helpers stop:
-  `/keepwarm` self-stops on its next wake and `ccage-auto` stands down instead of
+  `/keepwarm` self-stops on its next wake and, where the `ccage-auto` command is
+  on PATH (`command -v ccage-auto`), `ccage-auto` stands down instead of
   running its checkpoint→clear loop all night. Combine with `--tidy` when closing
   the day for good (`--final --tidy`): both run, in that order.
 - **`--tidy`** (close of day) — do the lean checkpoint, **then** tidy this cage's
@@ -97,7 +99,9 @@ same-directory case.
 - **`--from-session [<id-prefix>]`** — recovery: a *previous* session ended
   without a checkpoint, and you want its state back. Compress that session's
   on-disk transcript with `ccage handoff` and merge the brief into `$resume`
-  (§3.1). Manual and opt-in — nothing about this runs automatically. Combine with
+  (§3.1). Runs only when the `ccage` command is on PATH (`command -v ccage`);
+  without it, say that this mode needs ccage and stop — every other mode is
+  unaffected. Manual and opt-in — nothing about this runs automatically. Combine with
   nothing else; it is a merge like any other checkpoint.
 - **`--merge-slots`** — fan-in: collapse every parallel `RESUME.<slot>.md` back
   into the plain `RESUME.md` trunk (§5), so a future slotless session reads the
@@ -210,7 +214,7 @@ Then tell the user the files were created and they are safe to `/clear`.
 
 The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
 
-1. **Use the `$resume` already in your context.** ccage's SessionStart hook
+1. **Use the `$resume` already in your context.** The SessionStart hook
    injected it at the top of this session, and every `Edit` you've made since is
    reflected there — so the in-context copy is current. **Only `Read` it again if
    it could have changed outside this session** (a parallel session, or you simply
@@ -261,7 +265,7 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    **`### Plan`** with its exact path and remaining scope — measured failure
    (2026-07-16): resumed sessions acted from RESUME's summary bullets without
    opening the plan, silently dropping tasks; the autoloader turns this line
-   into a read-and-dispatch directive. For each doc you list, count its `- [ ]`/`- [x]` lines (`grep -c -E '^\s*- \[( |x|X)\]' <doc>`). Zero → do not list it as the plan silently: tell the user `<doc> has no checkboxes, so its progress cannot be measured — add checkbox steps, or list it under ### Plan as 'reference (not a plan)'`. Then run `ccage plan-report --stale` (it runs every open item's check, so it can take minutes; silent when clean) and settle each line it prints in the plan itself before you write the `### Plan` bullet: tick a done item with `DONE <date>: <evidence>`, annotate a partly done one `(open <date>: <what remains>; blocked on X | not started)`, cite the later ruling, or move a finished document out of `### Plan`. The plan is what the status line counts; a RESUME bullet that says done over open boxes is the drift this catches. Add new decisions. **An UNRESOLVED question goes to `DECISIONS.md` too, as an entry whose
+   into a read-and-dispatch directive. For each doc you list, count its `- [ ]`/`- [x]` lines (`grep -c -E '^\s*- \[( |x|X)\]' <doc>`). Zero → do not list it as the plan silently: tell the user `<doc> has no checkboxes, so its progress cannot be measured — add checkbox steps, or list it under ### Plan as 'reference (not a plan)'`. Then, only when the `ccage` command is on PATH (`command -v ccage`; otherwise skip this step and settle each open checkbox by hand), run `ccage plan-report --stale` (it runs every open item's check, so it can take minutes; silent when clean) and settle each line it prints in the plan itself before you write the `### Plan` bullet: tick a done item with `DONE <date>: <evidence>`, annotate a partly done one `(open <date>: <what remains>; blocked on X | not started)`, cite the later ruling, or move a finished document out of `### Plan`. The plan is what the status line counts; a RESUME bullet that says done over open boxes is the drift this catches. Add new decisions. **An UNRESOLVED question goes to `DECISIONS.md` too, as an entry whose
    answer is "not decided yet" plus its `Revisit if:` trigger — never into a separate section
    here.** RESUME and a decisions register both holding rulings is two registers with no
    back-pressure: an item settled in one stays open in the other, and RESUME is read first, so the
@@ -350,7 +354,7 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    as a dated prose line (lossless move, keep any still-open sub-question in
    `### Next` if it is WORK, or in `DECISIONS.md` with its `Revisit if:` trigger if it is a
    QUESTION); (b) a `### Decisions` bullet **moves to
-   `DECISIONS.md`** (create it if absent — ccage injects it into
+   `DECISIONS.md`** (create it if absent — the SessionStart hook injects it into
    every session, workers excluded), one line, with the condition that should
    prompt revisiting it; (c) never prune a bullet that is the only record of
    something still open.
@@ -409,8 +413,8 @@ The goal is a **merge**, not a rewrite, done in as few tool calls as possible.
    - **no `--final`** (plain, `--tidy` alone, `--merge-slots`) → run the same
      helper with `clear-done`.
 
-   This is what makes `/keepwarm` and `ccage-auto` stand down on `--final` and keep
-   going otherwise. Skip gracefully if the helper is missing.
+   This is what makes `/keepwarm` and, where it is installed, `ccage-auto` stand
+   down on `--final` and keep going otherwise. Skip gracefully if the helper is missing.
 9. **End by telling the user:** `RESUME updated — safe to /clear.` (append
    `, CHANGELOG rolled` only if step 5 actually moved a block; append
    `, marked done` on `--final`, followed by the audit result: what was cleaned,
@@ -429,6 +433,11 @@ A session that crashed, hit a limit, or was closed without checkpointing left no
 handoff` compresses one offline with zero API calls (measured: 8.2 MB of
 transcript → 9.4 KB of brief, 0.16 s), and this mode turns that brief into a
 merged `RESUME`.
+
+**Needs the `ccage` command.** Check `command -v ccage` first. If it is not on
+PATH, tell the user that `--from-session` needs ccage's `ccage handoff` and stop
+without editing `$resume`; checkpoint, `--tidy`, `--final` and `--merge-slots`
+do not use it and work as written.
 
 The split of responsibility is the point: **`ccage handoff` reads and
 compresses; this skill applies judgment.** That is what keeps recovery cheap —
@@ -629,11 +638,12 @@ durable: a small file at the project root, written **only** by `/checkpoint
 
 - **`/keepwarm`** checks it on every scheduled wake and self-stops when it's
   present — so an away-loop that's still pinging quits once the work is finished.
-- **`ccage-auto`** (the autonomous context manager) checks it each poll and stands
+- **`ccage-auto`** (ccage's autonomous context manager; present only where the
+  command is on PATH) checks it each poll and stands
   down — stops its checkpoint→clear→resume loop instead of running all night after
   the task is actually complete.
 
-**Why a plain checkpoint must clear it (§3 step 8).** `ccage-auto` drives ordinary
+**Why a plain checkpoint must clear it (§3 step 8).** Where `ccage-auto` is used, it drives ordinary
 `/checkpoint` calls as *maintenance* (save RESUME, then `/clear`, then keep
 working) — those are **not** "done." If a stale marker lingered, the very next
 maintenance checkpoint would look terminal and everything would stop early. So the
@@ -648,7 +658,7 @@ down" signal, and one fixed name keeps every consumer trivially simple.
 
 **When to reach for `--final`:** the session's actual task is done and you're
 winding down — the human is wrapping up for the day, or an autonomous `ccage-auto`
-run has finished its objective. Not for routine mid-work saves (that's plain
+run (where installed) has finished its objective. Not for routine mid-work saves (that's plain
 `/checkpoint`), and not merely because you're about to `/clear` to free context
 (that's also plain — you're continuing). Pair with `--tidy` (`--final --tidy`) at a
 true end-of-day.

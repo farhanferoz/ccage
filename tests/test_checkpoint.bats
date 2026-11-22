@@ -5,7 +5,7 @@
 # idempotent, non-destructive bootstrap (create-if-absent + .git/info/exclude).
 bats_require_minimum_version 1.5.0
 
-HELPER="$BATS_TEST_DIRNAME/../share/skills/checkpoint/checkpoint-init.sh"
+HELPER="$BATS_TEST_DIRNAME/../plugin/skills/checkpoint/checkpoint-init.sh"
 
 setup() {
     REPO="$BATS_TEST_TMPDIR/repo"

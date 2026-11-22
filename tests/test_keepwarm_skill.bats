@@ -7,8 +7,8 @@
 bats_require_minimum_version 1.5.0
 load helpers
 
-HELPER="$BATS_TEST_DIRNAME/../share/skills/keepwarm/keepwarm-calc.sh"
-SKILL="$BATS_TEST_DIRNAME/../share/skills/keepwarm/SKILL.md"
+HELPER="$BATS_TEST_DIRNAME/../plugin/skills/keepwarm/keepwarm-calc.sh"
+SKILL="$BATS_TEST_DIRNAME/../plugin/skills/keepwarm/SKILL.md"
 
 setup() {
     FAKE_CONFIG="$BATS_TEST_TMPDIR/config"

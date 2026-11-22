@@ -16,7 +16,7 @@
 #   5. the file is resolved at RUN time, never from a path baked in at seed time.
 bats_require_minimum_version 1.5.0
 
-HOOK="$BATS_TEST_DIRNAME/../share/hooks/session_doc_chunk.sh"
+HOOK="$BATS_TEST_DIRNAME/../plugin/hooks/session_doc_chunk.sh"
 
 setup() {
     REPO="$BATS_TEST_TMPDIR/repo"
@@ -272,4 +272,27 @@ make_decisions() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"RATIFIED DECISIONS"* ]]
     [ -z "$stderr" ]
+}
+
+# ===== the plugin copy defers to ccage's registration (no double delivery) =====
+
+@test "--plugin skips when settings.json holds ccage's registration, delivers when it does not, plain calls are unchanged" {
+    make_decisions 20000
+    # No settings.json at all: the plugin is the only deliverer, so it delivers.
+    run "$HOOK" --plugin decisions 1 12
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"RATIFIED DECISIONS"* ]]
+    # A settings.json without ccage's chunk registration (a colleague's own hooks): still delivers.
+    printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"bash ~/other.sh"}]}]}}' > "$CAGE/settings.json"
+    run "$HOOK" --plugin decisions 1 12
+    [[ "$output" == *"RATIFIED DECISIONS"* ]]
+    # ccage's registration present: the plugin copy is silent and says why in the log.
+    printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"bash /h/session_doc_chunk.sh resume 1 12"}]}]}}' > "$CAGE/settings.json"
+    run "$HOOK" --plugin decisions 1 12
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    grep -q 'kind=decisions k=1/12 status=noop reason=ccage-registered mode=plugin' "$LOG"
+    # ccage's own call (no --plugin) is not affected by the same settings.json.
+    run "$HOOK" decisions 1 12
+    [[ "$output" == *"RATIFIED DECISIONS"* ]]
 }
