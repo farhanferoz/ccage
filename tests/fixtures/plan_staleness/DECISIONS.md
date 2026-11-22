@@ -1,0 +1,6 @@
+# DECISIONS (fixture: five rulings reworded for these tests; their ids, dates, links and the D341 quote are the original's)
+- **D320** (2026-11-15; amended the same hour, owner: 'the difference is minimal, keep the default') The paper runs train with optimizer A at its default settings, after D208, D316 and D317. *Revisit if:* a run shows optimizer A failing to converge.
+- **D323** (2026-11-15, owner: 'no timing runs before a job we are running anyway') A job is timed from its own first epochs, never from a separate timing run; this supersedes D294. *Revisit if:* a job's first epochs cannot be measured.
+- **D341** (2026-11-17, owner 'agreed') The late drift of the small shallow-water system is accepted as it stands: THE TRAINING-SIDE FIX (D335's mean prior) IS CLOSED, and the evaluation reports the drift instead, after D329, D332 and D334. *Revisit if:* the drift grows past the reported band.
+- **D368** (2026-11-19, owner, walking the items one at a time: J1 'y') J1 runs with optimizer A as D320 set it, after D324 and D367. *Revisit if:* J1 fails.
+- **D385** (2026-11-19, owner: 'optimizer B is the clear choice') Optimizer B replaces optimizer A in every run: this supersedes D368 and amends D320, while D208 and D372 stand. *Revisit if:* optimizer B fails on a system that optimizer A trained.

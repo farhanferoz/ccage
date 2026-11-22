@@ -87,9 +87,9 @@ COMMIT_TOKEN = re.compile(r"\b[0-9a-f]{7,40}\b")
 DECISION_TOKEN = re.compile(r"\bD\d+\b")
 FILE_EXTENSION = re.compile(r"\w\.[A-Za-z0-9]{1,5}$")
 PATH_STRIP = "'\"()[],;:."          # punctuation that clings to a path written in prose
-# Words that make a number a job number in evidence ("slurm 8697908", "Turing 381"); a fact of how
-# this project's evidence is written, so it is a setting (CCAGE_PLAN_JOB_WORDS).
-JOB_WORDS = "job|jobs|slurm|sbatch|isambard|turing|run"
+# Words that make a number a job number in evidence ("slurm 8697908", "job 381"); how a project's
+# evidence is written varies (a cluster's name, for one), so it is a setting (CCAGE_PLAN_JOB_WORDS).
+JOB_WORDS = "job|jobs|slurm|sbatch|run"
 # Verbs RESUME uses, in capitals, to say a plan item is finished (the plan-staleness fix, part C):
 # a fact of how the owner's hand-over text is written. Lower case is ordinary prose ("when done").
 CLAIM_VERB = re.compile(r"\b(?:DONE|MERGED|PUSHED|SUPERSEDED|COMPLETE|COMPLETED)\b")
@@ -478,7 +478,7 @@ def done_verdict(evidence: str, plan: Path, project: Project) -> Verdict:
                 return Verdict("done", None, f"job {n}")
     return Verdict("done", "DONE annotation without evidence that can be verified. Put one of these in it: a commit "
                    "hash this repository has, a path that exists, a decision id (Dnnn) that DECISIONS.md has, or a "
-                   "job number (after the word job, slurm, Turing or Isambard) that RESUME.md or CHANGELOG.md mentions.")
+                   "job number (after a word such as job or slurm) that RESUME.md or CHANGELOG.md mentions.")
 
 
 def annotation_verdict(item: Item, plan: Path, project: Project) -> Verdict:
