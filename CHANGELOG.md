@@ -2,6 +2,14 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.25.1] — 2026-11-22
+
+Patch: the stop guard no longer refuses to stop over idle agent-team teammates, and its log names the type of each running task.
+
+### Fixed
+
+- **Idle teammates are not background jobs.** The Stop payload reports an agent-team teammate as running while it sits idle, and the guard counted every task that is not a subagent as a background job, so five teammates idle for one to two hours made every stop with no watcher armed refuse as "5 background job(s) still running", which no watcher can satisfy. A teammate now feeds neither check, because the payload cannot say whether it is working. Each decision line in `stop_continuation_guard.log` now ends with `kinds=`, the running tasks counted by type.
+
 ## [0.25.0] — 2026-11-22
 
 Minor: the plan guard covers every plan RESUME lists and accepts verifiable evidence, plan counts and `ccage plan-report --stale` say what is open against the disk and the rulings, and uninstall removes everything install put down.
