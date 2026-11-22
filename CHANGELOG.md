@@ -2,7 +2,9 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.25.0] — 2026-11-22
+
+Minor: the plan guard covers every plan RESUME lists and accepts verifiable evidence, plan counts and `ccage plan-report --stale` say what is open against the disk and the rulings, and uninstall removes everything install put down.
 
 ### Added
 
@@ -16,6 +18,16 @@ All notable changes to ccage. Format follows [Keep a Changelog](https://keepacha
 - **`ccage plan-report --stale`: what the listed plans say against the disk, the rulings and RESUME's own words.** At most 8 lines, silent when clean: an open item whose check now passes (only when checks are run), whose done-when file now exists, or that cites a decision a later entry supersedes or amends; a finished document still listed; a RESUME line saying DONE over open boxes or "not started" over ticked ones; a plan untouched for 14 days while the project moved on. Session start prints it as `PLAN STALE` (checks not run); the checkpoint skill runs it with checks. On the ten pre-reconciliation plan documents of 21 Nov it finds the two items citing decisions that D385 supersedes and the finished, "not started" GS32 plan. Settings: `CCAGE_PLAN_STALE_DAYS`, `CCAGE_PLAN_REPORT_MAX_LINES`.
 
 - **A new ruling names the open plan items that still cite what it replaced.** When an edit of `DECISIONS.md` adds "supersedes D320" or "amends D360", `resume_budget_check.sh` notes, at most 5 lines, the open items of the listed plans that cite the older decision without the newer, each with the one edit that settles it (cite the newer ruling, or tick `SUPERSEDED by Dnnn (<date>): '<quote>'`, which the plan guard checks against the entry). Explicit citation only; each pair once; never a block. Measured 2026-11-21: D385 replaced Prodigy and two open items kept citing it and D320 for two days; against the real register an edit adding D385 now names 4 open items (W1, P0, P8, P9, all citing D368). Setting: `CCAGE_PLAN_RULING_MAX_LINES`.
+
+### Changed
+
+- **The README matches the code.** Every `install.sh` flag and installed file, every setting with its default, `ccage plan-report`, `ccage review` and `ccb-report`, and the supported shells (bash 3.2 and zsh 5), checked against each command's `--help` and the `CCAGE_*` reads in `bin/`, `share/` and `lib/`.
+
+### Fixed
+
+- **Uninstall removes every file install put down.** `uninstall.sh` left `ccage-watch`, `ccb-report`, `lib/ccb_types.py`, `lib/subagent_watch.py`, the stop guard and the `/skill-catalog` skill behind, so `share/ccage` was never emptied. It now removes them and the empty `lib/` and `prompts/` directories.
+- **A clean clone passes its own tests.** The plan-staleness fixture's `RESUME.md` and `DECISIONS.md` were never committed, so every clean clone and CI failed 7 pytest and 8 bats tests. Both are now tracked.
+- **The plan-claims refusal names the plan relative to the project on macOS.** With the project path behind a symlink (macOS `/var` is `/private/var`) the refusal printed an absolute path, because the plan documents were resolved and the root was not. The root is now resolved first.
 
 ## [0.24.0] — 2026-11-20
 
@@ -643,7 +655,7 @@ Then untangled where OpenCode lives. The material was scattered across four regi
 outside `~/dev`, which is why neither knowledge-vault (walks `~/dev` only) nor corpus-search (13
 research repos) had ever captured it. Two false starts on the docs home — `~/.claude/SYSTEMS.md`,
 then a `~/dev/systems` index repo — before the actual requirement surfaced: a **project folder for
-OpenCode work**, not a map. Settled on `/home/ff235/dev/opencode` with code, GUIDE, PATCHES and
+OpenCode work**, not a map. Settled on `~/dev/opencode` with code, GUIDE, PATCHES and
 `_knowledge/` together, forked so the work is finally pushed rather than sitting uncommitted in a
 third party's clone.
 
