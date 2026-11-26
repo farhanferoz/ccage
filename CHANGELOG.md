@@ -2,6 +2,19 @@
 
 All notable changes to ccage. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.27.0] — 2026-11-26
+
+Minor: keep-warm now pings before Claude Code's own idle compaction and lasts through a night, and a hold's default lapse matches what the supervisor honours.
+
+### Changed
+
+- **Keep-warm pings after 50 quiet minutes, not 55.** Claude Code's idle compaction (setting `idleCompaction`, on by default) restarts its timer after every request and fires at 0.9 of the one-hour cache, 54 minutes, on sessions over 200,000 tokens, replacing the conversation with a summary. A 55-minute ping landed after it; a 50-minute ping lands first, so the full conversation stays cached. Once the pings run out, idle compaction takes over while the cache is still warm.
+- **Keep-warm sends up to 18 pings per idle stretch, not 6.** Eighteen pings at 50 minutes cover about 15 hours, enough for a night away; six covered about 6½ hours, so the cache usually lapsed overnight anyway. Each ping costs about a tenth of the rewrite it avoids, so the cap stays under the roughly 20-ping break-even. `CCAGE_AUTOCK_KEEPWARM_INTERVAL` and `CCAGE_AUTOCK_KEEPWARM_MAX` still override both, and `/keepwarm` uses the same defaults.
+
+### Fixed
+
+- **`ccage-watch hold` defaults to a 24-hour lapse, not 72.** The supervisor caps any declared wait at 24 hours (`CCAGE_AUTOCK_SUP_WAIT_MAX_S`), so `hold` printed a lapse time that never applied. `CCAGE_WATCH_HOLD_TTL_S` now defaults to 86400.
+
 ## [0.26.0] — 2026-11-22
 
 Minor: `/checkpoint`, `/keepwarm` and the hook that delivers `RESUME.md` and `DECISIONS.md` after `/clear` also ship as the `session-continuity` plugin, so they work without ccage.
