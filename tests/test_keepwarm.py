@@ -31,7 +31,7 @@ from conftest import ROOT, load_ccage_auto
 
 AUTO = load_ccage_auto("ccage_auto_keepwarm")
 
-INTERVAL = 3300.0          # 55 minutes, the shipped default
+INTERVAL = 3000.0          # 50 minutes, the shipped default
 QUIET = INTERVAL + 600.0   # comfortably due
 
 
@@ -172,7 +172,7 @@ def test_all_gates_open_types_one_ping_and_logs_it(h):
     assert h.typed == [AUTO.KEEPWARM_PING]
     assert "\n" not in AUTO.KEEPWARM_PING            # one line, so Enter submits it
     assert h.w.kw_pings == 1
-    assert h.logged("keep-warm ping 1/6 at 300k tokens (1h tier)")
+    assert h.logged(f"keep-warm ping 1/{AUTO.KEEPWARM_MAX} at 300k tokens (1h tier)")
 
 
 def test_ping_is_not_repeated_while_the_first_has_not_been_logged(h):
@@ -249,15 +249,16 @@ def test_gate_unknown_tier_never_pings(h):
 
 
 def test_gate_max_pings_per_idle_stretch(h):
-    """Each ping is followed by its own reply and 55 quiet minutes. Without the cap
-    this runs forever; with it the sixth ping is the last."""
-    for n in range(1, 7):
+    """Each ping is followed by its own reply and a quiet interval. Without the cap
+    this runs forever; with it the cap-th ping is the last."""
+    cap = AUTO.KEEPWARM_MAX
+    for n in range(1, cap + 1):
         assert h.tick() == n
         h.write(assistant_rows([text_block("ok")]), mode="a")
         h.quiet(INTERVAL + 5)
         h.w.kw_ping_at = time.time() - INTERVAL - 10   # that much time has passed
-    assert h.tick() == 6
-    assert h.logged("cap reached (6/6 pings)")
+    assert h.tick() == cap
+    assert h.logged(f"cap reached ({cap}/{cap} pings)")
 
 
 def test_gate_paused_never_pings_and_says_so(h):
@@ -511,11 +512,11 @@ def test_reset_drops_the_override_with_the_whole_control_file(tmp_path, monkeypa
 
 # -------------------------------------------------- env and flag parsing
 
-def test_defaults_are_on_55_minutes_6_pings_100k_tokens():
+def test_defaults_are_on_50_minutes_18_pings_100k_tokens():
     cfg = AUTO.Config([])
     assert cfg.keepwarm is True
-    assert cfg.kw_interval == 55 * 60.0
-    assert cfg.kw_max == 6
+    assert cfg.kw_interval == 50 * 60.0
+    assert cfg.kw_max == 18
     assert cfg.kw_min_tokens == 100_000
 
 
@@ -537,7 +538,7 @@ def test_no_keepwarm_flag_disables_and_is_consumed():
 
 
 @pytest.mark.parametrize("raw,minutes", [("0", 1), ("1", 1), ("30", 30),
-                                         ("59", 59), ("120", 59), ("nonsense", 55)])
+                                         ("59", 59), ("120", 59), ("nonsense", 50)])
 def test_interval_env_is_clamped_to_1_59_minutes(monkeypatch, raw, minutes):
     monkeypatch.setenv("CCAGE_AUTOCK_KEEPWARM_INTERVAL", raw)
     cfg = AUTO.Config([])
@@ -546,7 +547,7 @@ def test_interval_env_is_clamped_to_1_59_minutes(monkeypatch, raw, minutes):
 
 
 @pytest.mark.parametrize("raw,cap", [("0", 1), ("1", 1), ("12", 12),
-                                     ("24", 24), ("99", 24), ("nonsense", 6)])
+                                     ("24", 24), ("99", 24), ("nonsense", 18)])
 def test_max_env_is_clamped_to_1_24(monkeypatch, raw, cap):
     monkeypatch.setenv("CCAGE_AUTOCK_KEEPWARM_MAX", raw)
     assert AUTO.Config([]).kw_max == cap

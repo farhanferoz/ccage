@@ -2,7 +2,7 @@
 name: keepwarm
 description: >-
   Keep this session's prompt cache warm while the user steps away, by scheduling a
-  tiny self-wake turn every N minutes (default 55). Use on "/keepwarm", "keep warm",
+  tiny self-wake turn every N minutes (default 50). Use on "/keepwarm", "keep warm",
   "keep the cache alive/warm", "I'm stepping away / going to a meeting / lunch — keep
   the session warm", or asks to prevent the prompt cache from expiring. Not a resume
   fix.
@@ -22,7 +22,7 @@ the cache TTL clock. Repeats up to `max` times, then stands down.
 Invocations:
 
 ```
-/keepwarm                      # interval 55 min, max 6 pings (defaults)
+/keepwarm                      # interval 50 min, max 18 pings (defaults)
 /keepwarm <interval>           # custom interval, max defaults to 6
 /keepwarm <interval> <max>     # both custom
 /keepwarm --ping <n> <max> <interval>   # INTERNAL — a scheduled wake re-entering
@@ -40,7 +40,7 @@ Without it, skip this whole section and treat the session as `unwatched`: the
 manual loop below is the whole skill and works on its own.
 
 `ccage-auto` pings by default: while the session sits idle it types one tiny
-turn every 55 minutes, up to 6 per idle stretch, and only when it is safe (no
+turn every 50 minutes, up to 18 per idle stretch, and only when it is safe (no
 dialog waiting on the user, nothing half-typed, the cache on the 1-hour tier,
 at least 100k tokens of context). So **do not arm a second loop** — two chains
 would double the cost. Check once, in one Bash call from the project dir:
@@ -60,7 +60,7 @@ If `watched`:
 
 | The user says… | Do |
 |---|---|
-| `/keepwarm` (no args) | Run nothing and arm nothing. Reply that the watcher already keeps this session warm (every 55 min while idle, up to 6 per stretch) and that `/keepwarm off` stops it. |
+| `/keepwarm` (no args) | Run nothing and arm nothing. Reply that the watcher already keeps this session warm (every 50 min while idle, up to 18 per stretch) and that `/keepwarm off` stops it. |
 | `/keepwarm <interval> [<max>]` | Same reply, plus: the watcher's values are fixed at launch (`CCAGE_AUTOCK_KEEPWARM_INTERVAL`, `CCAGE_AUTOCK_KEEPWARM_MAX`); to run the manual loop instead, `/keepwarm off` first. |
 | `/keepwarm off` | `ccage-auto --keepwarm off` — takes effect within one poll (~12 s); relay its one-line echo. |
 | `/keepwarm on` | `ccage-auto --keepwarm on` — also overrides a launch with `--no-keepwarm`. |
@@ -83,8 +83,8 @@ ping. Everything below is the manual loop and is unchanged.
 
 - `interval` (minutes): integer, clamped to **[1, 59]** — the scheduler's
   single-hop ceiling is 60 minutes, and an interval ≥ the 1-hour TTL is useless
-  anyway. Default **55**. Non-numeric → use the default and say so.
-- `max` (pings): integer, clamped to **[1, 24]**. Default **6**. There is no
+  anyway. Default **50**: Claude Code's idle compaction fires at 54 minutes on sessions over 200,000 tokens, and a ping must land first to keep the full conversation. Non-numeric → use the default and say so.
+- `max` (pings): integer, clamped to **[1, 24]**. Default **18** (15 hours at 50 minutes, enough for a night). There is no
   "forever": past ~20 pings the loop costs more than the one rewrite it avoids.
 - Track which values came from defaults — the arming announcement must say so.
 
@@ -115,7 +115,7 @@ announcement.
 - **Tiny session:** `peak_cache_read < 20000` → a full rewrite would cost only
   fractions of a cent; tell the user and ask whether to bother. Arm only if they
   confirm.
-- `tier=unknown` → proceed; mention the tier could not be determined and 55 min
+- `tier=unknown` → proceed; mention the tier could not be determined and 50 min
   assumes the 1-hour tier.
 
 ## 4. Announce the contract, then arm (defaults are never silent)
@@ -127,7 +127,7 @@ defaulted value with "(default)"), per-ping cost from `peak_cache_read`
 say "cost unknown" if the probe found nothing), projected auto-stop clock
 time, and the cancel phrase:
 
-> keep-warm armed: ping every 25 min, up to 6× (default cap) ≈ $0.05 each —
+> keep-warm armed: ping every 25 min, up to 18× (default cap) ≈ $0.05 each —
 > auto-stops ~16:40, or say "stop".
 
 A reply like "first ping scheduled for HH:MM" alone is a contract violation —

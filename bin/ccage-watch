@@ -76,9 +76,10 @@ DEFAULT_TTL_S = _env_num("CCAGE_WATCH_TTL_S", 24 * 60 * 60)
 # A hold lapses rather than lasting forever. If the user never comes back, the
 # alternative is a run that is silent indefinitely — which is the 11-hour idle
 # incident the supervisor was built to end. On lapse the ladder simply resumes:
-# one poke, not a restart. Longer than a watcher's ttl because a human answering
-# a question is slower than a job finishing.
-DEFAULT_HOLD_TTL_S = _env_num("CCAGE_WATCH_HOLD_TTL_S", 72 * 60 * 60)
+# one poke, not a restart. Equal to the supervisor's ceiling on any declared wait
+# (CCAGE_AUTOCK_SUP_WAIT_MAX_S in bin/ccage-auto), so the lapse time `hold` prints
+# is the one the supervisor actually honours.
+DEFAULT_HOLD_TTL_S = _env_num("CCAGE_WATCH_HOLD_TTL_S", 24 * 60 * 60)
 CONDITION_TIMEOUT_S = _env_num("CCAGE_WATCH_CONDITION_TIMEOUT_S", 120)   # a probe that hangs must not wedge the watcher
 ID_LEN = 12                        # fact: chars of sha1 used as the watcher id
 SETTLE_S = _env_num("CCAGE_WATCH_SETTLE_S", 0.2)   # parent's grace for the daemon to write state

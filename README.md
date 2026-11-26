@@ -129,8 +129,8 @@ Every setting is an environment variable with the default shown. Set them before
 | Weekly-limit floor (remaining %, 0 = off) | `--weekly-floor N` | `CCAGE_AUTOCK_WEEKLY_FLOOR` | off |
 | Claude-in-Chrome handshake | none | `CCAGE_AUTOCK_CHROME=1` keeps it | off (`--no-chrome`) |
 | Keep the prompt cache warm while idle | `--no-keepwarm` | `CCAGE_AUTOCK_KEEPWARM=0` | on |
-| Keep-warm: quiet before a ping (min, 1-59) | none | `CCAGE_AUTOCK_KEEPWARM_INTERVAL` | 55 |
-| Keep-warm: pings per idle stretch (1-24) | none | `CCAGE_AUTOCK_KEEPWARM_MAX` | 6 |
+| Keep-warm: quiet before a ping (min, 1-59) | none | `CCAGE_AUTOCK_KEEPWARM_INTERVAL` | 50 |
+| Keep-warm: pings per idle stretch (1-24) | none | `CCAGE_AUTOCK_KEEPWARM_MAX` | 18 |
 | Keep-warm: no ping below this context (tokens) | none | `CCAGE_AUTOCK_KEEPWARM_MIN_TOKENS` | 100000 |
 | Kickoff prompt typed at startup | none | `CCAGE_AUTOCK_INIT_PROMPT` | none |
 | Kickoff fallback delay if the TUI marker never appears (s) | none | `CCAGE_AUTOCK_INIT_DELAY` | 20 |
@@ -145,7 +145,7 @@ An out-of-range threshold falls back to its default, and `soft >= hard` raises `
 |---|---|---|---|
 | Poll interval (s) | `--interval` | `CCAGE_WATCH_INTERVAL_S` | 600 |
 | Expiry (s) | `--ttl` | `CCAGE_WATCH_TTL_S` | 86400 |
-| Hold expiry (s) | `--ttl` on `hold` | `CCAGE_WATCH_HOLD_TTL_S` | 259200 (72 h) |
+| Hold expiry (s) | `--ttl` on `hold` | `CCAGE_WATCH_HOLD_TTL_S` | 86400 (24 h) |
 
 ## What ccage does
 
@@ -169,7 +169,7 @@ Further tools:
 - `ccage handoff` writes an offline Markdown brief from any session JSONL, as a context bootstrap for a fresh session. It uses only `jq` and makes no API calls. See [docs/FEATURES.md](docs/FEATURES.md) and [docs/PHASE-6-HANDOFF-SPEC.md](docs/PHASE-6-HANDOFF-SPEC.md).
 - A resume cost prompt for `claude -c` and `claude -r <id>` (below).
 - A session-continuity loop: `/checkpoint`, an auto-read hook and `ccage doctor` (below).
-- `/keepwarm`, a bounded cache keep-warm loop for planned absences. `/keepwarm [interval] [max]` (defaults 55 minutes and 6 pings) schedules minimal self-wake turns that re-read the cached prefix before the cache expires. While you are active, pending pings are re-anchored on a best-effort basis, and a ping that slips through is a free reset that does not count towards the cap. Costs and limits: [docs/FEATURES.md](docs/FEATURES.md).
+- `/keepwarm`, a bounded cache keep-warm loop for planned absences. `/keepwarm [interval] [max]` (defaults 50 minutes and 18 pings) schedules minimal self-wake turns that re-read the cached prefix before the cache expires. While you are active, pending pings are re-anchored on a best-effort basis, and a ping that slips through is a free reset that does not count towards the cap. Costs and limits: [docs/FEATURES.md](docs/FEATURES.md).
 - `ccage enable-mcp` and `disable-mcp` for per-project MCP servers (below).
 - `CCAGE_PLUGINS_FROM`, which loads one folder of plugins into every cage (below).
 - `ccage-auto`, an autonomous context manager (below), and `ccage-watch`, a condition watcher that outlives its session (below).
@@ -354,7 +354,7 @@ A watched launch exports `CCAGE_AUTONOMOUS=1` into the session and registers a p
 
 It writes a git-excluded control file (`.ccage-autock.conf`) in the project dir, which the watcher re-reads on its next poll. The override is per project dir and per run. It survives `ccage-auto`'s own `/clear` cycles and is cleared at the next real session start. For a permanent change use `--soft` and `--hard` or the variables at launch. While paused, the window can grow to auto-compact with no checkpoint. A `/clear` already in flight when the pause lands still finishes and still resumes. The same controls work from another terminal in the same dir: `ccage-auto --set soft=50`, `--pause`, `--resume`, `--reset`. To hand a running session one message, run `ccage-auto --say "text"` in the same dir (with the same `CCAGE_SLOT`, if the session has one). The watcher types it within one poll, once. With no session running, the message waits and the next session in that slot types it after its first prompt, led by when it was queued. A message waits while you have a half-typed prompt.
 
-**Keeping the prompt cache warm while you are away.** A session idle for an hour loses its prompt cache, and the next turn rewrites the conversation at the cache-write rate, where a re-read from cache costs a fraction of it. By default the watcher types one minimal turn after 55 quiet minutes, at most 6 times per idle stretch, only when the context holds at least 100,000 tokens and the cache is on the 1-hour tier. It never types while the last assistant message has a tool call without a result (a permission prompt, question menu or plan approval looks exactly like that), and never when keystrokes have reached the session since your last Enter. Any keystroke of yours starts a new idle stretch. Every ping and every skip reason is logged. Turn it off with `--no-keepwarm`, `CCAGE_AUTOCK_KEEPWARM=0`, `/keepwarm off` or `ccage-auto --keepwarm off`, and back on with `on`. Details: [docs/FEATURES.md](docs/FEATURES.md#keep-warm-pings-for-ccage-auto-ccage_autock_keepwarm-shipped). Without `ccage-auto`, `/keepwarm` still arms the manual loop.
+**Keeping the prompt cache warm while you are away.** A session idle for an hour loses its prompt cache, and the next turn rewrites the conversation at the cache-write rate, where a re-read from cache costs a fraction of it. By default the watcher types one minimal turn after 50 quiet minutes, at most 18 times per idle stretch (about 15 hours), only when the context holds at least 100,000 tokens and the cache is on the 1-hour tier. It never types while the last assistant message has a tool call without a result (a permission prompt, question menu or plan approval looks exactly like that), and never when keystrokes have reached the session since your last Enter. Any keystroke of yours starts a new idle stretch. The 50 minutes is deliberate: Claude Code's own idle compaction (`idleCompaction`, on by default) replaces a conversation over 200,000 tokens with a summary 54 minutes after the last request, so the ping lands first; after the last ping, idle compaction takes over while the cache is still warm. Every ping and every skip reason is logged. Turn it off with `--no-keepwarm`, `CCAGE_AUTOCK_KEEPWARM=0`, `/keepwarm off` or `ccage-auto --keepwarm off`, and back on with `on`. Details: [docs/FEATURES.md](docs/FEATURES.md#keep-warm-pings-for-ccage-auto-ccage_autock_keepwarm-shipped). Without `ccage-auto`, `/keepwarm` still arms the manual loop.
 
 **Per-model context windows.** The transcript does not record which window a session has, since a 1M and a 200K session log the same model id. The window is resolved on every measurement, most specific first: a forced `--window`, the per-model map, a `[1m]` marker in the id, built-in small families (haiku is 200K), then a 1,000,000 default. A 200K or 1M variant of the same family must be pinned with `--window-map` or `--window`. The high default makes the safe failure a late checkpoint rather than an early one.
 

@@ -1727,7 +1727,7 @@ PY
 
 # --- keep-warm: one typed turn per quiet interval keeps the prompt cache alive ---
 # CCAGE_AUTOCK_KEEPWARM_INTERVAL_S is TEST-ONLY: the same clock as the minutes
-# setting, in seconds and unclamped, so a ping is a few seconds away, not 55
+# setting, in seconds and unclamped, so a ping is a few seconds away, not 50
 # minutes. The 150k-token opening turn clears the 100k floor and stays under the
 # 40% soft line (15% of the 1M default window), so only keep-warm acts.
 
@@ -1740,7 +1740,7 @@ PY
         CCAGE_AUTOCK_KEEPWARM_INTERVAL_S FAKE_EXIT_ON_LOG
     [ "$status" -eq 0 ]
     cap_has "b'[keep-warm] Automated cache refresh'"
-    grep -q 'keep-warm ping 1/6 at 150k tokens (1h tier)' "$CAGE/ccage-autock.log"
+    grep -q 'keep-warm ping 1/18 at 150k tokens (1h tier)' "$CAGE/ccage-autock.log"
     # typed once, not once per poll
     python3 -c "import sys; sys.exit(0 if open('$CAP','rb').read().count(b'[keep-warm]') == 1 else 1)"
 }

@@ -1,6 +1,6 @@
 {
   "name": "session-continuity",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Save session state into RESUME.md with /checkpoint, keep the prompt cache warm with /keepwarm, and have RESUME.md and DECISIONS.md delivered after /clear by a SessionStart hook.",
   "author": {
     "name": "Farhan Feroz"

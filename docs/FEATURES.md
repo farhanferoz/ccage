@@ -639,7 +639,7 @@ When the transcript has been quiet for the interval, the watcher types `[keep-wa
 
 - keep-warm is on (launch setting, then the live control file), the TUI is ready, the watcher is in its normal state (never mid-nudge, mid-`/clear` or cooling down), the weekly floor does not own the session, and no `.ccage-session-done` marker exists for this run;
 - the latest context is at least `CCAGE_AUTOCK_KEEPWARM_MIN_TOKENS` (below that a rewrite costs cents) and below the soft checkpoint threshold;
-- the cache tier is the 1-hour one, using the same rule as `plugin/skills/keepwarm/keepwarm-calc.sh probe` (a 5-minute cache cannot be kept warm by a 55-minute ping, and an unknown tier is not guessed at);
+- the cache tier is the 1-hour one, using the same rule as `plugin/skills/keepwarm/keepwarm-calc.sh probe` (a 5-minute cache cannot be kept warm by a 50-minute ping, and an unknown tier is not guessed at);
 - fewer than `CCAGE_AUTOCK_KEEPWARM_MAX` pings have been sent in this idle stretch;
 - **no dialog is pending.** The last assistant message in the transcript must have no `tool_use` without a matching `tool_result`. A permission prompt, an `AskUserQuestion` menu and a plan approval all look exactly like that, and typing text plus Enter into one would choose an option on the user's behalf. The check reads the transcript, never the screen, and fails closed when the transcript cannot be read;
 - **no unsent draft.** The watcher forwards the user's stdin to the session, and any keystroke after the user's last Enter counts as a half-typed message that a ping must never be appended to. Terminal focus and mouse reports are not keystrokes. Where it cannot tell (Esc, Ctrl-U, a deleted line), it assumes a draft.
@@ -651,8 +651,8 @@ An idle stretch ends, and the counter and the logged skip reasons start over, on
 | Var / flag | Default | Effect |
 |---|---|---|
 | `CCAGE_AUTOCK_KEEPWARM` / `--no-keepwarm` | on | `0`, `false`, `off` or `no` turns it off for the launch. |
-| `CCAGE_AUTOCK_KEEPWARM_INTERVAL` | `55` | Minutes of transcript quiet before a ping. Clamped to `[1, 59]` with a warning, since an interval at or past the hour could never refresh the cache. |
-| `CCAGE_AUTOCK_KEEPWARM_MAX` | `6` | Pings per idle stretch. Clamped to `[1, 24]`; past about 24 the pings cost more than the rewrite they avoid. |
+| `CCAGE_AUTOCK_KEEPWARM_INTERVAL` | `50` | Minutes of transcript quiet before a ping. 50 lands before Claude Code's idle compaction, which fires 54 minutes after the last request on sessions over 200,000 tokens. Clamped to `[1, 59]` with a warning, since an interval at or past the hour could never refresh the cache. |
+| `CCAGE_AUTOCK_KEEPWARM_MAX` | `18` | Pings per idle stretch. Clamped to `[1, 24]`; past about 24 the pings cost more than the rewrite they avoid. |
 | `CCAGE_AUTOCK_KEEPWARM_MIN_TOKENS` | `100000` | No ping below this context size. |
 | `ccage-auto --keepwarm off` / `on` | — | Live switch for a running session, from another terminal in the same project dir (or `/keepwarm off` / `on` inside it). Written as `keepwarm=off\|on` in the control file `.ccage-autock.conf`, so it is per project dir, survives the watcher's own `/clear` cycles, and is dropped at the next real session start or by `--reset`. `on` overrides a launch with `--no-keepwarm`. |
 
@@ -676,7 +676,7 @@ Skill at `plugin/skills/keepwarm/` (installed to the master skills dir; reaches 
 cage via the skills symlink, like `/checkpoint`). Invoke before stepping away:
 
 ```
-/keepwarm                   # ping every 55 min, max 6 pings (defaults)
+/keepwarm                   # ping every 50 min, max 18 pings (defaults)
 /keepwarm <interval> <max>  # custom; interval clamped [1,59] min, max [1,24]
 ```
 
@@ -867,7 +867,7 @@ Every duration, window, cap and count the tools use is a variable with today's v
 |---|---|---|
 | `CCAGE_WATCH_INTERVAL_S` | `600` | Default `--interval` of `ccage-watch arm`, seconds between condition checks. |
 | `CCAGE_WATCH_TTL_S` | `86400` | Default `--ttl` of `ccage-watch arm`, seconds before an unmet watcher expires. |
-| `CCAGE_WATCH_HOLD_TTL_S` | `259200` | Default `--ttl` of `ccage-watch hold`, seconds before a declared wait lapses. |
+| `CCAGE_WATCH_HOLD_TTL_S` | `86400` | Default `--ttl` of `ccage-watch hold`, seconds before a declared wait lapses. |
 | `CCAGE_WATCH_CONDITION_TIMEOUT_S` | `120` | Seconds a condition probe may run before it is killed. |
 | `CCAGE_WATCH_SETTLE_S` | `0.2` | Seconds the arming parent waits for the daemon to write its state. |
 | `CCAGE_WATCH_PROC_TIMEOUT_S` | `5` | Timeout (s) of the liveness probes. |

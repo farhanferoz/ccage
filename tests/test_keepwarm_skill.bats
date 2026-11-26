@@ -121,9 +121,9 @@ probe() { CLAUDE_CONFIG_DIR="$FAKE_CONFIG" run bash "$HELPER" probe "$PROJ"; }
     grep -q '^description: >-$' "$SKILL"
 }
 
-@test "SKILL.md: documents the defaults (55 min interval, 6-ping cap) and clamps" {
-    grep -q 'Default \*\*55\*\*' "$SKILL"
-    grep -q 'Default \*\*6\*\*' "$SKILL"
+@test "SKILL.md: documents the defaults (50 min interval, 18-ping cap) and clamps" {
+    grep -q 'Default \*\*50\*\*' "$SKILL"
+    grep -q 'Default \*\*18\*\*' "$SKILL"
     grep -q '\[1, 59\]' "$SKILL"
     grep -q '\[1, 24\]' "$SKILL"
 }

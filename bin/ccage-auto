@@ -90,8 +90,8 @@
 #     is QUEUED until that turn ends, so this is minutes, not seconds. Default 300).
 #   CCAGE_AUTOCK_KEEPWARM (0/false/off/no = no idle keep-warm pings; default on),
 #   CCAGE_AUTOCK_KEEPWARM_INTERVAL (minutes of quiet before a ping, clamped to
-#     [1,59]; default 55), CCAGE_AUTOCK_KEEPWARM_MAX (pings per idle stretch,
-#     clamped to [1,24]; default 6), CCAGE_AUTOCK_KEEPWARM_MIN_TOKENS (no ping
+#     [1,59]; default 50), CCAGE_AUTOCK_KEEPWARM_MAX (pings per idle stretch,
+#     clamped to [1,24]; default 18), CCAGE_AUTOCK_KEEPWARM_MIN_TOKENS (no ping
 #     below this context size; default 100000).
 #   CCAGE_SLOT is honoured for RESUME naming.
 #   The remaining timings, windows and caps (CCAGE_AUTOCK_KEY_DELAY, _EXIT_GRACE,
@@ -283,9 +283,16 @@ WEEKLY_STALE_S = _num(os.environ.get("CCAGE_AUTOCK_WEEKLY_STALE_S"), 30 * 60.0) 
 # cache-read price and resets the prompt-cache clock; a lapsed cache costs a full
 # rewrite. The clamps mirror plugin/skills/keepwarm/SKILL.md, which owns the
 # manual loop for sessions that are not under ccage-auto.
-KEEPWARM_INTERVAL_MIN = 55.0     # minutes of transcript quiet before a ping
+# 50, not 55: Claude Code's own idle compaction (setting `idleCompaction`, on by
+# default) re-arms after every request and fires at 0.9 of the 1-hour cache,
+# i.e. 54 minutes, on sessions over 200,000 tokens, replacing the conversation
+# with a summary. A ping at 50 lands first, so the full conversation survives;
+# once the cap is spent, idle compaction is the backstop while the cache is warm.
+KEEPWARM_INTERVAL_MIN = 50.0     # minutes of transcript quiet before a ping
 KEEPWARM_INTERVAL_RANGE = (1.0, 59.0)   # >= the 1-hour TTL could never refresh it
-KEEPWARM_MAX = 6                 # pings per idle stretch
+# 18 pings x 50 min = 15 h, enough to span a night. Each ping costs ~0.1 of the
+# rewrite it avoids, so the cap stays under the ~20-ping break-even.
+KEEPWARM_MAX = 18                # pings per idle stretch
 KEEPWARM_MAX_RANGE = (1, 24)     # past ~25 pings a rewrite would have been cheaper
 KEEPWARM_MIN_TOKENS = 100_000    # below this a rewrite costs cents: don't bother
 KEEPWARM_OWN_TURN_S = _num(os.environ.get("CCAGE_AUTOCK_KEEPWARM_OWN_TURN_S"), 120.0)   # transcript growth this soon after a ping is the
